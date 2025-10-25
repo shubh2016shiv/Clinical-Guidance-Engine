@@ -8,9 +8,7 @@ import os
 
 from src.core.config import get_settings
 from src.core.managers.exceptions import VectorStoreError, ResponsesAPIError
-
-
-logger = logging.getLogger(__name__)
+from src.core.logs import get_component_logger, log_execution_time, time_execution
 
 
 class VectorStoreManager:
@@ -34,7 +32,9 @@ class VectorStoreManager:
         self._vector_store_cache: Dict[str, Dict[str, Any]] = {}
         self.batch_size = batch_size
         self.rate_limit_delay = rate_limit_delay
+        self.logger = get_component_logger("VectorStore")
 
+    @time_execution("VectorStore", "GetExistingGuidelinesVectorStore")
     async def _get_existing_guidelines_vector_store(self) -> Optional[str]:
         """
         Check for existing guidelines vector store with files.
@@ -43,7 +43,11 @@ class VectorStoreManager:
             Vector store ID if found with files, None otherwise.
         """
         try:
-            logger.info("Checking for existing guidelines vector store")
+            self.logger.info(
+                "Checking for existing guidelines vector store",
+                component="VectorStore",
+                subcomponent="GetExistingGuidelinesVectorStore"
+            )
 
             # List all vector stores
             vector_stores = await self.list_vector_stores()
@@ -55,21 +59,48 @@ class VectorStoreManager:
                     try:
                         files = await self.get_vector_store_files(vs["id"])
                         if files:  # Has files
-                            logger.info(f"Found existing guidelines vector store with {len(files)} files: {vs['id']}")
+                            self.logger.info(
+                                "Found existing guidelines vector store with files",
+                                component="VectorStore",
+                                subcomponent="GetExistingGuidelinesVectorStore",
+                                vector_store_id=vs["id"],
+                                file_count=len(files)
+                            )
                             return vs["id"]
                         else:
-                            logger.info(f"Found guidelines vector store but no files: {vs['id']}")
+                            self.logger.info(
+                                "Found guidelines vector store but no files",
+                                component="VectorStore",
+                                subcomponent="GetExistingGuidelinesVectorStore",
+                                vector_store_id=vs["id"]
+                            )
                     except Exception as e:
-                        logger.warning(f"Error checking files for vector store {vs['id']}: {e}")
+                        self.logger.warning(
+                            "Error checking files for vector store",
+                            component="VectorStore",
+                            subcomponent="GetExistingGuidelinesVectorStore",
+                            vector_store_id=vs["id"],
+                            error=str(e)
+                        )
                         continue
 
-            logger.info("No existing guidelines vector store with files found")
+            self.logger.info(
+                "No existing guidelines vector store with files found",
+                component="VectorStore",
+                subcomponent="GetExistingGuidelinesVectorStore"
+            )
             return None
 
         except Exception as e:
-            logger.error(f"Error checking for existing guidelines vector store: {e}")
+            self.logger.error(
+                "Error checking for existing guidelines vector store",
+                component="VectorStore",
+                subcomponent="GetExistingGuidelinesVectorStore",
+                error=str(e)
+            )
             return None
 
+    @time_execution("VectorStore", "CreateGuidelinesVectorStore")
     async def create_guidelines_vector_store(self) -> str:
         """
         Create a vector store for medical guidelines and start background upload.
@@ -79,12 +110,22 @@ class VectorStoreManager:
             Vector store ID (upload happens asynchronously in background).
         """
         try:
-            logger.info("Creating guidelines vector store")
+            self.logger.info(
+                "Creating guidelines vector store",
+                component="VectorStore",
+                subcomponent="CreateGuidelinesVectorStore"
+            )
 
             # Check for existing vector store with files first
             existing_vector_store_id = await self._get_existing_guidelines_vector_store()
             if existing_vector_store_id:
-                logger.info(f"Reusing existing guidelines vector store: {existing_vector_store_id}")
+                self.logger.info(
+                    "Reusing existing guidelines vector store",
+                    component="VectorStore",
+                    subcomponent="CreateGuidelinesVectorStore",
+                    vector_store_id=existing_vector_store_id,
+                    status="reused"
+                )
                 # Cache the existing vector store for consistency
                 if existing_vector_store_id not in self._vector_store_cache:
                     self._vector_store_cache[existing_vector_store_id] = {
@@ -101,7 +142,13 @@ class VectorStoreManager:
                 expires_after={"anchor": "last_active_at", "days": 1}
             )
 
-            logger.info(f"Created guidelines vector store: {vector_store.id}")
+            self.logger.info(
+                "Created guidelines vector store",
+                component="VectorStore",
+                subcomponent="CreateGuidelinesVectorStore",
+                vector_store_id=vector_store.id,
+                status="created"
+            )
 
             # Cache the full vector store object
             self._vector_store_cache[vector_store.id] = {
@@ -113,12 +160,22 @@ class VectorStoreManager:
 
             # Start background upload (fire-and-forget)
             upload_task = asyncio.create_task(self._upload_guideline_files(vector_store.id))
-            logger.info(f"Started background upload task for guidelines to vector store {vector_store.id}")
+            self.logger.info(
+                "Started background upload task for guidelines",
+                component="VectorStore",
+                subcomponent="CreateGuidelinesVectorStore",
+                vector_store_id=vector_store.id
+            )
 
             return vector_store.id
 
         except Exception as e:
-            logger.error(f"Failed to create guidelines vector store: {str(e)}")
+            self.logger.error(
+                "Failed to create guidelines vector store",
+                component="VectorStore",
+                subcomponent="CreateGuidelinesVectorStore",
+                error=str(e)
+            )
             raise VectorStoreError(f"Failed to create guidelines vector store: {str(e)}")
 
     async def _upload_guideline_files(self, vector_store_id: str) -> None:
@@ -132,7 +189,7 @@ class VectorStoreManager:
             guideline_dir = os.path.join(os.getcwd(), "clinical_guidelines")
             
             if not os.path.exists(guideline_dir):
-                logger.warning(f"Guidelines directory not found: {guideline_dir}")
+                self.logger.warning(f"Guidelines directory not found: {guideline_dir}")
                 return
 
             # Support both PDF and MD files
@@ -142,10 +199,10 @@ class VectorStoreManager:
             ]
             
             if not guideline_files:
-                logger.warning("No supported files (PDF/MD) found in guidelines directory")
+                self.logger.warning("No supported files (PDF/MD) found in guidelines directory")
                 return
 
-            logger.info(f"Found {len(guideline_files)} guideline files (PDF/MD) to upload")
+            self.logger.info(f"Found {len(guideline_files)} guideline files (PDF/MD) to upload")
 
             stats = {"total": len(guideline_files), "successful": 0, "failed": 0, "errors": []}
             
@@ -167,20 +224,20 @@ class VectorStoreManager:
                     if isinstance(result, Exception):
                         stats["failed"] += 1
                         stats["errors"].append(str(result))
-                        logger.error(f"Batch upload error: {result}")
+                        self.logger.error(f"Batch upload error: {result}")
                     else:  # Assume result is file_id on success
                         stats["successful"] += 1
                 
-                logger.info(f"Uploaded batch {i // self.batch_size + 1} ({len(batch)} files)")
+                self.logger.info(f"Uploaded batch {i // self.batch_size + 1} ({len(batch)} files)")
                 
                 # Rate limit delay between batches
                 if i + self.batch_size < len(guideline_files):
                     await asyncio.sleep(self.rate_limit_delay)
 
-            logger.info(f"Background upload completed for guideline files: {stats}")
+            self.logger.info(f"Background upload completed for guideline files: {stats}")
 
         except Exception as e:
-            logger.error(f"Error in background upload of guideline files: {e}")
+            self.logger.error(f"Error in background upload of guideline files: {e}")
             # Don't raise here as this is a background task
 
     async def _upload_file_to_vector_store(
@@ -212,11 +269,11 @@ class VectorStoreManager:
                 file_id=file_obj.id
             )
 
-            logger.info(f"Uploaded {file_name} to vector store {vector_store_id}")
+            self.logger.info(f"Uploaded {file_name} to vector store {vector_store_id}")
             return file_obj.id
 
         except Exception as e:
-            logger.error(f"Failed to upload file {file_name}: {e}")
+            self.logger.error(f"Failed to upload file {file_name}: {e}")
             return None
 
     async def _upload_text_to_vector_store(
@@ -252,13 +309,14 @@ class VectorStoreManager:
                 file_id=file_obj.id
             )
 
-            logger.info(f"Uploaded text as {file_name} to vector store {vector_store_id}")
+            self.logger.info(f"Uploaded text as {file_name} to vector store {vector_store_id}")
             return file_obj.id
 
         except Exception as e:
-            logger.error(f"Failed to upload text content: {e}")
+            self.logger.error(f"Failed to upload text content: {e}")
             raise VectorStoreError(f"Failed to upload text content: {str(e)}")
 
+    @time_execution("VectorStore", "GetVectorStore")
     async def get_vector_store(self, vector_store_id: str) -> Optional[Dict[str, Any]]:
         """
         Get vector store information.
@@ -270,9 +328,24 @@ class VectorStoreManager:
             Vector store information or None
         """
         try:
+            self.logger.info(
+                "Retrieving vector store",
+                component="VectorStore",
+                subcomponent="GetVectorStore",
+                vector_store_id=vector_store_id
+            )
+            
             vector_store = await asyncio.to_thread(
                 self.client.vector_stores.retrieve,
                 vector_store_id=vector_store_id
+            )
+
+            self.logger.info(
+                "Retrieved vector store successfully",
+                component="VectorStore",
+                subcomponent="GetVectorStore",
+                vector_store_id=vector_store_id,
+                status=vector_store.status
             )
 
             return {
@@ -285,9 +358,16 @@ class VectorStoreManager:
             }
 
         except Exception as e:
-            logger.error(f"Error getting vector store: {e}")
+            self.logger.error(
+                "Error getting vector store",
+                component="VectorStore",
+                subcomponent="GetVectorStore",
+                vector_store_id=vector_store_id,
+                error=str(e)
+            )
             return None
 
+    @time_execution("VectorStore", "ListVectorStores")
     async def list_vector_stores(self) -> List[Dict[str, Any]]:
         """
         List all vector stores.
@@ -296,6 +376,12 @@ class VectorStoreManager:
             List of vector store information
         """
         try:
+            self.logger.info(
+                "Listing all vector stores",
+                component="VectorStore",
+                subcomponent="ListVectorStores"
+            )
+            
             vector_stores = await asyncio.to_thread(
                 self.client.vector_stores.list
             )
@@ -310,12 +396,25 @@ class VectorStoreManager:
                     "created_at": vs.created_at,
                 })
 
+            self.logger.info(
+                "Vector stores listed successfully",
+                component="VectorStore",
+                subcomponent="ListVectorStores",
+                count=len(result)
+            )
+            
             return result
 
         except Exception as e:
-            logger.error(f"Error listing vector stores: {e}")
+            self.logger.error(
+                "Error listing vector stores",
+                component="VectorStore",
+                subcomponent="ListVectorStores",
+                error=str(e)
+            )
             raise VectorStoreError(f"Failed to list vector stores: {str(e)}")
 
+    @time_execution("VectorStore", "DeleteVectorStore")
     async def delete_vector_store(self, vector_store_id: str) -> bool:
         """
         Delete a vector store.
@@ -327,6 +426,13 @@ class VectorStoreManager:
             True if successful
         """
         try:
+            self.logger.info(
+                "Deleting vector store",
+                component="VectorStore",
+                subcomponent="DeleteVectorStore",
+                vector_store_id=vector_store_id
+            )
+            
             await asyncio.to_thread(
                 self.client.vector_stores.delete,
                 vector_store_id=vector_store_id
@@ -336,13 +442,25 @@ class VectorStoreManager:
             if vector_store_id in self._vector_store_cache:
                 del self._vector_store_cache[vector_store_id]
 
-            logger.info(f"Deleted vector store: {vector_store_id}")
+            self.logger.info(
+                "Vector store deleted successfully",
+                component="VectorStore",
+                subcomponent="DeleteVectorStore",
+                vector_store_id=vector_store_id
+            )
             return True
 
         except Exception as e:
-            logger.error(f"Error deleting vector store: {e}")
+            self.logger.error(
+                "Error deleting vector store",
+                component="VectorStore",
+                subcomponent="DeleteVectorStore",
+                vector_store_id=vector_store_id,
+                error=str(e)
+            )
             return False
 
+    @time_execution("VectorStore", "GetVectorStoreFiles")
     async def get_vector_store_files(self, vector_store_id: str) -> List[Dict[str, Any]]:
         """
         Get files in a vector store.
@@ -354,6 +472,13 @@ class VectorStoreManager:
             List of file information
         """
         try:
+            self.logger.info(
+                "Getting files for vector store",
+                component="VectorStore",
+                subcomponent="GetVectorStoreFiles",
+                vector_store_id=vector_store_id
+            )
+            
             files = await asyncio.to_thread(
                 self.client.vector_stores.files.list,
                 vector_store_id=vector_store_id
@@ -367,13 +492,31 @@ class VectorStoreManager:
                     "created_at": file.created_at,
                 })
 
+            self.logger.info(
+                "Retrieved vector store files successfully",
+                component="VectorStore",
+                subcomponent="GetVectorStoreFiles",
+                vector_store_id=vector_store_id,
+                file_count=len(result)
+            )
+            
             return result # TODO: Send the result after filtering out files that are not in the "completed" state
 
         except Exception as e:
-            logger.error(f"Error getting vector store files: {e}")
+            self.logger.error(
+                "Error getting vector store files",
+                component="VectorStore",
+                subcomponent="GetVectorStoreFiles",
+                vector_store_id=vector_store_id,
+                error=str(e)
+            )
             raise VectorStoreError(f"Failed to get vector store files: {str(e)}")
 
     def clear_cache(self) -> None:
         """Clear the vector store cache."""
         self._vector_store_cache.clear()
-        logger.info("Vector store cache cleared")
+        self.logger.info(
+            "Vector store cache cleared",
+            component="VectorStore",
+            subcomponent="ClearCache"
+        )

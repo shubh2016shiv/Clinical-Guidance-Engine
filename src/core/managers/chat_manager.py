@@ -5,8 +5,7 @@ from openai import OpenAI, AsyncOpenAI
 from src.core.config import get_settings
 from src.core.managers.tool_manager import ToolManager  # Optional integration for tools
 from src.core.managers.exceptions import ResponsesAPIError, ContentParsingError, ToolConfigurationError
-
-logger = logging.getLogger(__name__)
+from src.core.logs import get_component_logger, log_execution_time, time_execution
 
 class ChatManager:
     """
@@ -30,7 +29,9 @@ class ChatManager:
         self.tool_manager = tool_manager
         self.chat_history_limit = chat_history_limit
         self._chat_cache: Dict[str, str] = {}  # Cache: chat_id -> last_response_id
+        self.logger = get_component_logger("Chat")
 
+    @time_execution("Chat", "ExtractTextContent")
     def _extract_text_content(self, response):
         """
         Extract text content from a Responses API response object.
@@ -42,6 +43,16 @@ class ChatManager:
             Extracted text content as string.
         """
         try:
+            response_id = getattr(response, 'id', 'unknown')
+            
+            self.logger.debug(
+                "Extracting text content from response",
+                component="Chat",
+                subcomponent="ExtractTextContent",
+                response_id=response_id,
+                response_type=type(response).__name__
+            )
+            
             # Check for the new response structure with output field
             if hasattr(response, 'output') and response.output:
                 for item in response.output:
@@ -56,6 +67,13 @@ class ChatManager:
                                         text_parts.append(content_block.text)
                             
                             if text_parts:
+                                self.logger.debug(
+                                    "Extracted text from output structure",
+                                    component="Chat",
+                                    subcomponent="ExtractTextContent",
+                                    response_id=response_id,
+                                    text_parts_count=len(text_parts)
+                                )
                                 return "\n".join(text_parts)
             
             # Legacy format check
@@ -67,15 +85,35 @@ class ChatManager:
                         text_parts.append(content_block.text.value)
                 
                 if text_parts:
+                    self.logger.debug(
+                        "Extracted text from legacy content structure",
+                        component="Chat",
+                        subcomponent="ExtractTextContent",
+                        response_id=response_id,
+                        text_parts_count=len(text_parts)
+                    )
                     return "\n".join(text_parts)
             
             # Fallback for unexpected response structure
-            logger.warning(f"Unable to extract text from response structure: {type(response)}")
+            self.logger.warning(
+                "Unable to extract text from response structure",
+                component="Chat",
+                subcomponent="ExtractTextContent",
+                response_id=response_id,
+                response_type=type(response).__name__
+            )
             return str(response)
         except Exception as e:
-            logger.warning(f"Error extracting text content: {str(e)}")
+            self.logger.warning(
+                "Error extracting text content",
+                component="Chat",
+                subcomponent="ExtractTextContent",
+                response_id=getattr(response, 'id', 'unknown'),
+                error=str(e)
+            )
             raise ContentParsingError(f"Failed to parse response content: {str(e)}")
 
+    @time_execution("Chat", "CreateChat")
     async def create_chat(
         self, 
         message: str, 
@@ -95,7 +133,13 @@ class ChatManager:
         """
         try:
             model = model or self.settings.openai_model_name
-            logger.info(f"Creating new chat with initial message using model {model}")
+            self.logger.info(
+                "Creating new chat with initial message",
+                component="Chat",
+                subcomponent="CreateChat",
+                model=model,
+                has_tools=bool(tools)
+            )
 
             # Create first response (no previous_response_id)
             response = await asyncio.to_thread(
@@ -108,13 +152,25 @@ class ChatManager:
             chat_id = response.id  # Use response ID as chat identifier
             self._chat_cache[chat_id] = response.id  # Cache last response ID
 
-            logger.info(f"Created chat {chat_id} with initial response {response.id}")
+            self.logger.info(
+                "Created chat successfully",
+                component="Chat",
+                subcomponent="CreateChat",
+                chat_id=chat_id,
+                response_id=response.id
+            )
             return chat_id
 
         except Exception as e:
-            logger.error(f"Failed to create chat: {str(e)}")
+            self.logger.error(
+                "Failed to create chat",
+                component="Chat",
+                subcomponent="CreateChat",
+                error=str(e)
+            )
             raise ResponsesAPIError(message=f"Failed to create chat: {str(e)}")
 
+    @time_execution("Chat", "ContinueChat")
     async def continue_chat(
         self, 
         chat_id: str, 
@@ -142,13 +198,30 @@ class ChatManager:
                 last_response_id = self._chat_cache[chat_id]
 
             model = model or self.settings.openai_model_name
+            
+            self.logger.info(
+                "Continuing chat",
+                component="Chat",
+                subcomponent="ContinueChat",
+                chat_id=chat_id,
+                last_response_id=last_response_id,
+                model=model,
+                has_tools=bool(tools)
+            )
 
             # Check current chain length
             history = await self.get_chat_history(chat_id)
             current_length = len(history)
 
             if current_length >= self.chat_history_limit:
-                logger.info(f"Chat {chat_id} reached history limit ({self.chat_history_limit}); summarizing and resetting chain")
+                self.logger.info(
+                    "Chat reached history limit; summarizing and resetting chain",
+                    component="Chat",
+                    subcomponent="ContinueChat",
+                    chat_id=chat_id,
+                    history_limit=self.chat_history_limit,
+                    current_length=current_length
+                )
                 # Summarize old history
                 summary = await self._summarize_history(history, model)
                 # Create new root response from summary + new message
@@ -162,7 +235,14 @@ class ChatManager:
                 # Update chat_id to new root and cache
                 chat_id = new_response.id
                 self._chat_cache[chat_id] = new_response.id
-                logger.info(f"Reset chat to new root {chat_id} after summarization")
+                
+                self.logger.info(
+                    "Reset chat to new root after summarization",
+                    component="Chat",
+                    subcomponent="ContinueChat",
+                    new_chat_id=chat_id,
+                    response_id=new_response.id
+                )
                 return chat_id
             else:
                 # Chain new response normally
@@ -177,16 +257,36 @@ class ChatManager:
                 # Update cache: chat_id -> new response ID
                 self._chat_cache[chat_id] = response.id
 
-                logger.info(f"Continued chat {chat_id} with new response {response.id} (length: {current_length + 1})")
+                self.logger.info(
+                    "Continued chat with new response",
+                    component="Chat",
+                    subcomponent="ContinueChat",
+                    chat_id=chat_id,
+                    response_id=response.id,
+                    chain_length=current_length + 1
+                )
                 return response.id  # Return new ID for immediate use, but chat_id remains root
 
         except ContentParsingError as e:
-            logger.error(f"Content parsing error: {str(e)}")
+            self.logger.error(
+                "Content parsing error in continue_chat",
+                component="Chat",
+                subcomponent="ContinueChat",
+                chat_id=chat_id,
+                error=str(e)
+            )
             raise
         except Exception as e:
-            logger.error(f"Failed to continue chat {chat_id}: {str(e)}")
+            self.logger.error(
+                "Failed to continue chat",
+                component="Chat",
+                subcomponent="ContinueChat",
+                chat_id=chat_id,
+                error=str(e)
+            )
             raise ResponsesAPIError(message=f"Failed to continue chat: {str(e)}")
 
+    @time_execution("Chat", "ContinueChatWithTools")
     async def continue_chat_with_tools(
         self, 
         chat_id: str, 
@@ -210,16 +310,43 @@ class ChatManager:
         """
         try:
             if not self.tool_manager:
+                self.logger.error(
+                    "Tool manager is required for this operation",
+                    component="Chat",
+                    subcomponent="ContinueChatWithTools",
+                    chat_id=chat_id
+                )
                 raise ToolConfigurationError("Tool manager is required for this operation")
+
+            self.logger.info(
+                "Continuing chat with tools",
+                component="Chat",
+                subcomponent="ContinueChatWithTools",
+                chat_id=chat_id,
+                has_vector_store=bool(vector_store_id),
+                has_functions=bool(functions),
+                model=model or self.settings.openai_model_name
+            )
 
             # Validate vector store is ready before creating tools
             if vector_store_id:
                 store_info = await self.tool_manager.vector_store_manager.get_vector_store(vector_store_id)
                 if not store_info or store_info["status"] != "completed":
-                    logger.warning(f"Vector store {vector_store_id} not ready (status: {store_info['status'] if store_info else 'Not found'}). Skipping file_search tool.")
+                    self.logger.warning(
+                        "Vector store not ready, skipping file_search tool",
+                        component="Chat",
+                        subcomponent="ContinueChatWithTools",
+                        vector_store_id=vector_store_id,
+                        status=store_info["status"] if store_info else "Not found"
+                    )
                     vector_store_id = None  # Don't use the vector store if not ready
                 else:
-                    logger.info(f"Vector store {vector_store_id} is ready for tool creation")
+                    self.logger.info(
+                        "Vector store is ready for tool creation",
+                        component="Chat",
+                        subcomponent="ContinueChatWithTools",
+                        vector_store_id=vector_store_id
+                    )
 
             # Get tools from tool manager
             try:
@@ -230,10 +357,19 @@ class ChatManager:
                 # Validate tools
                 is_valid = await self.tool_manager.validate_tools(tools)
                 if not is_valid:
-                    logger.warning("Tool validation failed, proceeding without tools")
+                    self.logger.warning(
+                        "Tool validation failed, proceeding without tools",
+                        component="Chat",
+                        subcomponent="ContinueChatWithTools"
+                    )
                     tools = []
             except Exception as e:
-                logger.warning(f"Error preparing tools: {str(e)}, proceeding without tools")
+                self.logger.warning(
+                    "Error preparing tools, proceeding without tools",
+                    component="Chat",
+                    subcomponent="ContinueChatWithTools",
+                    error=str(e)
+                )
                 tools = []
             
             # Continue chat with tools
@@ -265,6 +401,15 @@ class ChatManager:
             elif hasattr(response, 'tool_calls') and response.tool_calls:
                 tool_calls = response.tool_calls
             
+            self.logger.info(
+                "Chat with tools continued successfully",
+                component="Chat",
+                subcomponent="ContinueChatWithTools",
+                chat_id=chat_id,
+                response_id=response_id,
+                has_tool_calls=bool(tool_calls)
+            )
+            
             return {
                 "response_id": response_id,
                 "content": content,
@@ -272,12 +417,26 @@ class ChatManager:
             }
         
         except (ContentParsingError, ToolConfigurationError, ResponsesAPIError) as e:
-            logger.error(f"Error in continue_chat_with_tools: {str(e)}")
+            self.logger.error(
+                "Error in continue_chat_with_tools",
+                component="Chat",
+                subcomponent="ContinueChatWithTools",
+                chat_id=chat_id,
+                error=str(e),
+                error_type=type(e).__name__
+            )
             raise
         except Exception as e:
-            logger.error(f"Failed to continue chat with tools: {str(e)}")
+            self.logger.error(
+                "Failed to continue chat with tools",
+                component="Chat",
+                subcomponent="ContinueChatWithTools",
+                chat_id=chat_id,
+                error=str(e)
+            )
             raise ResponsesAPIError(message=f"Failed to continue chat with tools: {str(e)}")
 
+    @time_execution("Chat", "SummarizeHistory")
     async def _summarize_history(self, history: List[Dict[str, Any]], model: str) -> str:
         """
         Summarize conversation history to reset chain.
@@ -290,6 +449,14 @@ class ChatManager:
             Concise summary string.
         """
         try:
+            self.logger.info(
+                "Summarizing conversation history",
+                component="Chat",
+                subcomponent="SummarizeHistory",
+                history_length=len(history),
+                model=model
+            )
+            
             # Build prompt from history (limit to key content)
             history_text = "\n".join([f"Response {i+1}: {h['content'][:500]}..." for i, h in enumerate(history)])  # Truncate for prompt
             summary_prompt = f"Summarize this conversation history concisely (under 1000 tokens):\n{history_text}"
@@ -303,17 +470,33 @@ class ChatManager:
             # Extract text content using the helper method
             summary = self._extract_text_content(summary_response)
             
-            logger.info("Generated history summary for chain reset")
+            self.logger.info(
+                "Generated history summary for chain reset",
+                component="Chat",
+                subcomponent="SummarizeHistory",
+                summary_length=len(summary)
+            )
             return summary
 
         except ContentParsingError as e:
-            logger.error(f"Content parsing error in summarize_history: {str(e)}")
+            self.logger.error(
+                "Content parsing error in summarize_history",
+                component="Chat",
+                subcomponent="SummarizeHistory",
+                error=str(e)
+            )
             return "Previous conversation history (summarized)."
         except Exception as e:
-            logger.error(f"Failed to summarize history: {str(e)}")
+            self.logger.error(
+                "Failed to summarize history",
+                component="Chat",
+                subcomponent="SummarizeHistory",
+                error=str(e)
+            )
             # Fallback: Basic summary
             return "Previous conversation history (summarized)."
 
+    @time_execution("Chat", "GetChatHistory")
     async def get_chat_history(self, chat_id: str, full_chain: bool = True) -> List[Dict[str, Any]]:
         """
         Retrieve the conversation history by traversing the response chain.
@@ -326,6 +509,14 @@ class ChatManager:
             List of response objects in reverse chronological order (newest first).
         """
         try:
+            self.logger.info(
+                "Retrieving chat history",
+                component="Chat",
+                subcomponent="GetChatHistory",
+                chat_id=chat_id,
+                full_chain=full_chain
+            )
+            
             history = []
             current_id = self._chat_cache.get(chat_id, chat_id)  # Start from last known
             
@@ -353,7 +544,13 @@ class ChatManager:
                     
                     history.append(response_data)
                 except ContentParsingError as e:
-                    logger.warning(f"Error parsing response {current_id}: {str(e)}")
+                    self.logger.warning(
+                        "Error parsing response in history",
+                        component="Chat",
+                        subcomponent="GetChatHistory",
+                        response_id=current_id,
+                        error=str(e)
+                    )
                     # Add minimal response data on parsing error
                     history.append({
                         "id": response.id,
@@ -369,13 +566,26 @@ class ChatManager:
                     break
             
             history.reverse()  # Chronological order
-            logger.info(f"Retrieved history for chat {chat_id} ({len(history)} responses)")
+            self.logger.info(
+                "Retrieved chat history",
+                component="Chat",
+                subcomponent="GetChatHistory",
+                chat_id=chat_id,
+                response_count=len(history)
+            )
             return history
         
         except Exception as e:
-            logger.error(f"Failed to get chat history {chat_id}: {str(e)}")
+            self.logger.error(
+                "Failed to get chat history",
+                component="Chat",
+                subcomponent="GetChatHistory",
+                chat_id=chat_id,
+                error=str(e)
+            )
             raise ResponsesAPIError(message=f"Failed to get chat history: {str(e)}")
 
+    @time_execution("Chat", "DeleteChat")
     async def delete_chat(self, chat_id: str) -> bool:
         """
         Delete the last response in the chain (partial cleanup; full chain deletion requires traversing).
@@ -388,6 +598,14 @@ class ChatManager:
         """
         try:
             last_response_id = self._chat_cache.get(chat_id, chat_id)
+            
+            self.logger.info(
+                "Deleting chat",
+                component="Chat",
+                subcomponent="DeleteChat",
+                chat_id=chat_id,
+                last_response_id=last_response_id
+            )
 
             await asyncio.to_thread(
                 self.client.responses.delete,
@@ -398,11 +616,23 @@ class ChatManager:
             if chat_id in self._chat_cache:
                 del self._chat_cache[chat_id]
 
-            logger.info(f"Deleted last response {last_response_id} for chat {chat_id}")
+            self.logger.info(
+                "Deleted chat successfully",
+                component="Chat",
+                subcomponent="DeleteChat",
+                chat_id=chat_id,
+                response_id=last_response_id
+            )
             return True
 
         except Exception as e:
-            logger.error(f"Failed to delete chat {chat_id}: {str(e)}")
+            self.logger.error(
+                "Failed to delete chat",
+                component="Chat",
+                subcomponent="DeleteChat",
+                chat_id=chat_id,
+                error=str(e)
+            )
             return False
 
     def list_chats(self) -> List[str]:
@@ -414,13 +644,27 @@ class ChatManager:
         """
         try:
             chats = list(self._chat_cache.keys())
-            logger.info(f"Listed {len(chats)} chats")
+            self.logger.info(
+                "Listed chats",
+                component="Chat",
+                subcomponent="ListChats",
+                chat_count=len(chats)
+            )
             return chats
         except Exception as e:
-            logger.error(f"Failed to list chats: {str(e)}")
+            self.logger.error(
+                "Failed to list chats",
+                component="Chat",
+                subcomponent="ListChats",
+                error=str(e)
+            )
             return []
 
     def clear_cache(self) -> None:
         """Clear chat cache."""
         self._chat_cache.clear()
-        logger.info("Chat cache cleared")
+        self.logger.info(
+            "Chat cache cleared",
+            component="Chat",
+            subcomponent="ClearCache"
+        )

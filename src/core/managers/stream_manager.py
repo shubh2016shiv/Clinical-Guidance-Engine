@@ -11,8 +11,7 @@ from typing import Dict, Any, List, Optional, AsyncGenerator, Callable
 from openai import OpenAI, AsyncOpenAI
 from src.core.config import get_settings
 from src.core.managers.exceptions import StreamConnectionError, ContentParsingError
-
-logger = logging.getLogger(__name__)
+from src.core.logs import get_component_logger, log_execution_time, time_execution
 
 class StreamManager:
     """
@@ -26,7 +25,9 @@ class StreamManager:
         self.settings = get_settings()
         self.client = OpenAI(api_key=self.settings.openai_api_key)
         self.async_client = AsyncOpenAI(api_key=self.settings.openai_api_key)
+        self.logger = get_component_logger("Stream")
 
+    @time_execution("Stream", "StreamResponse")
     async def stream_response(
         self, 
         message: str, 
@@ -50,7 +51,16 @@ class StreamManager:
         """
         try:
             model = model or self.settings.openai_model_name
-            logger.info(f"Starting response stream using model {model}")
+            
+            self.logger.info(
+                "Starting response stream",
+                component="Stream",
+                subcomponent="StreamResponse",
+                model=model,
+                has_previous_response=bool(previous_response_id),
+                has_tools=bool(tools),
+                message_length=len(message)
+            )
             
             # Create streaming response
             stream = await self.async_client.responses.create(
@@ -61,6 +71,7 @@ class StreamManager:
                 stream=True  # Enable streaming
             )
             
+            chunk_count = 0
             # Process streaming response
             async for chunk in stream:
                 try:
@@ -70,20 +81,37 @@ class StreamManager:
                             if hasattr(content_block, 'text') and hasattr(content_block.text, 'value'):
                                 text = content_block.text.value
                                 if text:
+                                    chunk_count += 1
                                     # Call callback if provided
                                     if callback:
                                         callback(text)
                                     yield text
                 except Exception as e:
-                    logger.warning(f"Error processing response chunk: {str(e)}")
+                    self.logger.warning(
+                        "Error processing response chunk",
+                        component="Stream",
+                        subcomponent="StreamResponse",
+                        error=str(e)
+                    )
                     raise ContentParsingError(f"Failed to parse response chunk: {str(e)}")
-                    
-            logger.info("Response stream completed")
+            
+            self.logger.info(
+                "Response stream completed",
+                component="Stream",
+                subcomponent="StreamResponse",
+                chunk_count=chunk_count
+            )
             
         except Exception as e:
-            logger.error(f"Streaming error: {str(e)}")
+            self.logger.error(
+                "Streaming error",
+                component="Stream",
+                subcomponent="StreamResponse",
+                error=str(e)
+            )
             raise StreamConnectionError(f"Failed to stream response: {str(e)}")
 
+    @time_execution("Stream", "StreamChatContinuation")
     async def stream_chat_continuation(
         self,
         chat_id: str,
@@ -107,7 +135,16 @@ class StreamManager:
         """
         try:
             model = model or self.settings.openai_model_name
-            logger.info(f"Streaming chat continuation for {chat_id}")
+            
+            self.logger.info(
+                "Starting chat continuation stream",
+                component="Stream",
+                subcomponent="StreamChatContinuation",
+                chat_id=chat_id,
+                model=model,
+                has_tools=bool(tools),
+                message_length=len(message)
+            )
             
             # Create streaming response with previous_response_id
             stream = await self.async_client.responses.create(
@@ -118,6 +155,7 @@ class StreamManager:
                 stream=True  # Enable streaming
             )
             
+            chunk_count = 0
             # Process streaming response
             async for chunk in stream:
                 try:
@@ -127,20 +165,40 @@ class StreamManager:
                             if hasattr(content_block, 'text') and hasattr(content_block.text, 'value'):
                                 text = content_block.text.value
                                 if text:
+                                    chunk_count += 1
                                     # Call callback if provided
                                     if callback:
                                         callback(text)
                                     yield text
                 except Exception as e:
-                    logger.warning(f"Error processing response chunk: {str(e)}")
+                    self.logger.warning(
+                        "Error processing chat continuation chunk",
+                        component="Stream",
+                        subcomponent="StreamChatContinuation",
+                        chat_id=chat_id,
+                        error=str(e)
+                    )
                     raise ContentParsingError(f"Failed to parse response chunk: {str(e)}")
-                    
-            logger.info("Chat continuation stream completed")
+            
+            self.logger.info(
+                "Chat continuation stream completed",
+                component="Stream",
+                subcomponent="StreamChatContinuation",
+                chat_id=chat_id,
+                chunk_count=chunk_count
+            )
             
         except Exception as e:
-            logger.error(f"Chat streaming error: {str(e)}")
+            self.logger.error(
+                "Chat streaming error",
+                component="Stream",
+                subcomponent="StreamChatContinuation",
+                chat_id=chat_id,
+                error=str(e)
+            )
             raise StreamConnectionError(f"Failed to stream chat continuation: {str(e)}")
 
+    @time_execution("Stream", "StreamWithTools")
     async def stream_with_tools(
         self,
         message: str,
@@ -166,7 +224,16 @@ class StreamManager:
         """
         try:
             model = model or self.settings.openai_model_name
-            logger.info(f"Starting response stream with tools using model {model}")
+            
+            self.logger.info(
+                "Starting response stream with tools",
+                component="Stream",
+                subcomponent="StreamWithTools",
+                model=model,
+                has_previous_response=bool(previous_response_id),
+                tool_count=len(tools),
+                message_length=len(message)
+            )
             
             # Create streaming response with tools
             stream = await self.async_client.responses.create(
@@ -176,6 +243,9 @@ class StreamManager:
                 tools=tools,
                 stream=True  # Enable streaming
             )
+            
+            chunk_count = 0
+            tool_call_count = 0
             
             # Process streaming response
             async for chunk in stream:
@@ -188,29 +258,55 @@ class StreamManager:
                             if hasattr(content_block, 'text') and hasattr(content_block.text, 'value'):
                                 text = content_block.text.value
                                 if text:
+                                    chunk_count += 1
                                     result['text'] = text
                                     if callback:
                                         callback(text)
                     
                     # Handle tool calls
                     if hasattr(chunk, 'tool_calls') and chunk.tool_calls:
+                        tool_call_count += 1
                         result['tool_calls'] = chunk.tool_calls
                         if tool_callback:
                             tool_callback(chunk.tool_calls)
+                        
+                        self.logger.info(
+                            "Received tool call in stream",
+                            component="Stream",
+                            subcomponent="StreamWithTools",
+                            tool_call_count=tool_call_count
+                        )
                     
                     if result:
                         yield result
                         
                 except Exception as e:
-                    logger.warning(f"Error processing response chunk: {str(e)}")
+                    self.logger.warning(
+                        "Error processing response chunk with tools",
+                        component="Stream",
+                        subcomponent="StreamWithTools",
+                        error=str(e)
+                    )
                     raise ContentParsingError(f"Failed to parse response chunk: {str(e)}")
-                    
-            logger.info("Response stream with tools completed")
+            
+            self.logger.info(
+                "Response stream with tools completed",
+                component="Stream",
+                subcomponent="StreamWithTools",
+                chunk_count=chunk_count,
+                tool_call_count=tool_call_count
+            )
             
         except Exception as e:
-            logger.error(f"Streaming error with tools: {str(e)}")
+            self.logger.error(
+                "Streaming error with tools",
+                component="Stream",
+                subcomponent="StreamWithTools",
+                error=str(e)
+            )
             raise StreamConnectionError(f"Failed to stream response with tools: {str(e)}")
 
+    @time_execution("Stream", "CreateSSEGenerator")
     async def create_sse_generator(
         self,
         message: str,
@@ -231,18 +327,56 @@ class StreamManager:
             SSE-formatted strings for streaming to clients.
         """
         try:
+            self.logger.info(
+                "Creating SSE generator",
+                component="Stream",
+                subcomponent="CreateSSEGenerator",
+                has_chat_id=bool(chat_id),
+                model=model or self.settings.openai_model_name,
+                has_tools=bool(tools),
+                message_length=len(message)
+            )
+            
+            chunk_count = 0
+            
             if chat_id:
                 # Stream chat continuation
+                self.logger.info(
+                    "Streaming chat continuation for SSE",
+                    component="Stream",
+                    subcomponent="CreateSSEGenerator",
+                    chat_id=chat_id
+                )
+                
                 async for text in self.stream_chat_continuation(chat_id, message, model, tools):
+                    chunk_count += 1
                     yield f"data: {text}\n\n"
             else:
                 # Stream new chat
+                self.logger.info(
+                    "Streaming new chat for SSE",
+                    component="Stream",
+                    subcomponent="CreateSSEGenerator"
+                )
+                
                 async for text in self.stream_response(message, model, None, tools):
+                    chunk_count += 1
                     yield f"data: {text}\n\n"
-                    
+            
             # Signal completion
+            self.logger.info(
+                "SSE stream completed",
+                component="Stream",
+                subcomponent="CreateSSEGenerator",
+                chunk_count=chunk_count
+            )
             yield "event: close\ndata: [DONE]\n\n"
             
         except Exception as e:
-            logger.error(f"SSE generator error: {str(e)}")
+            self.logger.error(
+                "SSE generator error",
+                component="Stream",
+                subcomponent="CreateSSEGenerator",
+                error=str(e)
+            )
             yield f"event: error\ndata: {str(e)}\n\n"

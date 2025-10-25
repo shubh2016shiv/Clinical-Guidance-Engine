@@ -17,8 +17,7 @@ from src.core.managers.exceptions import (
     ResponsesAPIError, VectorStoreError, ToolConfigurationError, 
     StreamConnectionError, ContentParsingError
 )
-
-logger = logging.getLogger(__name__)
+from src.core.logs import get_component_logger, log_execution_time, time_execution
 
 
 class ResponseAPIOrchestrator:
@@ -45,6 +44,7 @@ class ResponseAPIOrchestrator:
             rate_limit_delay: Rate limit delay for VectorStoreManager.
         """
         self.settings = get_settings()
+        self.logger = get_component_logger("Orchestrator")
         
         # Initialize managers
         if vector_store_manager:
@@ -65,6 +65,7 @@ class ResponseAPIOrchestrator:
         valid_prefixes = ["gpt-3.5", "gpt-4", "o1", "o3"]
         return any(model.startswith(prefix) for prefix in valid_prefixes)
 
+    @time_execution("Orchestrator", "HandleQuery")
     async def handle_query(
         self,
         message: str,
@@ -90,42 +91,89 @@ class ResponseAPIOrchestrator:
             When streaming, use: async for chunk in result["stream_generator"](): ...
         """
         try:
-            logger.info(f"Handling query: {message}")
+            self.logger.info(
+                "Handling query",
+                component="Orchestrator",
+                subcomponent="HandleQuery",
+                message_length=len(message),
+                has_chat_id=bool(chat_id),
+                has_vector_store=bool(vector_store_id),
+                has_functions=bool(functions),
+                streaming=stream
+            )
             
             # Resolve model to use default from settings if not provided
             resolved_model = model or self.settings.openai_model_name
             if not self._validate_model_name(resolved_model):
-                logger.warning(f"Model name '{resolved_model}' may be invalid")
-            logger.info(f"Using model: {resolved_model}")
+                self.logger.warning(
+                    "Model name may be invalid",
+                    component="Orchestrator",
+                    subcomponent="HandleQuery",
+                    model=resolved_model
+                )
+                
+            self.logger.info(
+                "Using model",
+                component="Orchestrator",
+                subcomponent="HandleQuery",
+                model=resolved_model
+            )
             
-            # Prepare tools if provided (2b requirement - always prepare if configured)
+            # Prepare tools if provided
             tools = []
             if vector_store_id or functions:
                 # Validate vector store is ready before creating tools
                 if vector_store_id:
                     store_info = await self.vector_store_manager.get_vector_store(vector_store_id)
                     if not store_info or store_info["status"] != "completed":
-                        logger.warning(f"Vector store {vector_store_id} not ready (status: {store_info['status'] if store_info else 'Not found'}). Skipping file_search tool.")
+                        self.logger.warning(
+                            "Vector store not ready, skipping file_search tool",
+                            component="Orchestrator",
+                            subcomponent="HandleQuery",
+                            vector_store_id=vector_store_id,
+                            status=store_info["status"] if store_info else "Not found"
+                        )
                         vector_store_id = None  # Don't use the vector store if not ready
                     else:
-                        logger.info(f"Vector store {vector_store_id} is ready for tool creation")
+                        self.logger.info(
+                            "Vector store is ready for tool creation",
+                            component="Orchestrator",
+                            subcomponent="HandleQuery",
+                            vector_store_id=vector_store_id
+                        )
 
                 if vector_store_id or functions:
                     try:
                         tools = await self.tool_manager.get_tools_for_response(
                             vector_store_id=vector_store_id, functions=functions
                         )
-                        # Strict validation - fail on error (4a requirement)
+                        # Strict validation - fail on error
                         is_valid = await self.tool_manager.validate_tools(tools)
                         if not is_valid:
-                            logger.warning("Tool validation failed, proceeding without tools")
+                            self.logger.warning(
+                                "Tool validation failed, proceeding without tools",
+                                component="Orchestrator",
+                                subcomponent="HandleQuery"
+                            )
                             tools = []
                     except Exception as e:
-                        logger.warning(f"Error preparing tools: {str(e)}, proceeding without tools")
+                        self.logger.warning(
+                            "Error preparing tools, proceeding without tools",
+                            component="Orchestrator",
+                            subcomponent="HandleQuery",
+                            error=str(e)
+                        )
                         tools = []
             
             if stream:
                 # Streaming response
+                self.logger.info(
+                    "Setting up streaming response",
+                    component="Orchestrator",
+                    subcomponent="HandleQuery",
+                    streaming=True
+                )
+                
                 async def stream_gen() -> AsyncGenerator[str, None]:
                     async for chunk in self.stream_manager.stream_response(
                         message=message, model=resolved_model, tools=tools
@@ -138,6 +186,13 @@ class ResponseAPIOrchestrator:
                         message=message, model=resolved_model, tools=tools
                     )
                 
+                self.logger.info(
+                    "Streaming response setup complete",
+                    component="Orchestrator",
+                    subcomponent="HandleQuery",
+                    chat_id=chat_id
+                )
+                
                 return {
                     "chat_id": chat_id,
                     "stream_generator": stream_gen,  # Call this function to get the async generator: stream_gen()
@@ -147,6 +202,13 @@ class ResponseAPIOrchestrator:
                 # Non-streaming response
                 if chat_id:
                     # Continue existing conversation
+                    self.logger.info(
+                        "Continuing existing conversation",
+                        component="Orchestrator",
+                        subcomponent="HandleQuery",
+                        chat_id=chat_id
+                    )
+                    
                     result = await self.chat_manager.continue_chat_with_tools(
                         chat_id=chat_id,
                         message=message,
@@ -154,6 +216,15 @@ class ResponseAPIOrchestrator:
                         functions=functions,
                         model=resolved_model
                     )
+                    
+                    self.logger.info(
+                        "Continued conversation successfully",
+                        component="Orchestrator",
+                        subcomponent="HandleQuery",
+                        chat_id=chat_id,
+                        has_tool_calls=bool(result.get("tool_calls", []))
+                    )
+                    
                     return {
                         "chat_id": chat_id,
                         "content": result["content"],
@@ -162,6 +233,12 @@ class ResponseAPIOrchestrator:
                     }
                 else:
                     # Start new conversation
+                    self.logger.info(
+                        "Starting new conversation",
+                        component="Orchestrator",
+                        subcomponent="HandleQuery"
+                    )
+                    
                     chat_id = await self.chat_manager.create_chat(
                         message=message, model=resolved_model, tools=tools
                     )
@@ -183,6 +260,14 @@ class ResponseAPIOrchestrator:
                     else:
                         tool_calls = getattr(response, 'tool_calls', [])
                     
+                    self.logger.info(
+                        "New conversation started successfully",
+                        component="Orchestrator",
+                        subcomponent="HandleQuery",
+                        chat_id=chat_id,
+                        has_tool_calls=bool(tool_calls)
+                    )
+                    
                     return {
                         "chat_id": chat_id,
                         "content": content,
@@ -191,12 +276,24 @@ class ResponseAPIOrchestrator:
                     }
                 
         except (ToolConfigurationError, VectorStoreError) as e:
-            logger.error(f"Tool/Vector store error in handle_query: {str(e)}")
+            self.logger.error(
+                "Tool/Vector store error in handle_query",
+                component="Orchestrator",
+                subcomponent="HandleQuery",
+                error=str(e),
+                error_type=type(e).__name__
+            )
             raise
         except Exception as e:
-            logger.error(f"Failed to handle query: {str(e)}")
+            self.logger.error(
+                "Failed to handle query",
+                component="Orchestrator",
+                subcomponent="HandleQuery",
+                error=str(e)
+            )
             raise ResponsesAPIError(message=f"Query handling failed: {str(e)}")
 
+    @time_execution("Orchestrator", "HandleStreamingQuery")
     async def handle_streaming_query(
         self,
         message: str,
@@ -219,13 +316,32 @@ class ResponseAPIOrchestrator:
             Dict with chunk data and metadata.
         """
         try:
-            logger.info(f"Handling streaming query: {message}...")
+            self.logger.info(
+                "Handling streaming query",
+                component="Orchestrator",
+                subcomponent="HandleStreamingQuery",
+                message_length=len(message),
+                has_chat_id=bool(chat_id),
+                has_vector_store=bool(vector_store_id),
+                has_functions=bool(functions)
+            )
             
             # Resolve model to use default from settings if not provided
             resolved_model = model or self.settings.openai_model_name
             if not self._validate_model_name(resolved_model):
-                logger.warning(f"Model name '{resolved_model}' may be invalid")
-            logger.info(f"Using model: {resolved_model}")
+                self.logger.warning(
+                    "Model name may be invalid",
+                    component="Orchestrator",
+                    subcomponent="HandleStreamingQuery",
+                    model=resolved_model
+                )
+                
+            self.logger.info(
+                "Using model",
+                component="Orchestrator",
+                subcomponent="HandleStreamingQuery",
+                model=resolved_model
+            )
             
             # Prepare tools if provided
             tools = []
@@ -234,38 +350,82 @@ class ResponseAPIOrchestrator:
                 if vector_store_id:
                     store_info = await self.vector_store_manager.get_vector_store(vector_store_id)
                     if not store_info or store_info["status"] != "completed":
-                        logger.warning(f"Vector store {vector_store_id} not ready (status: {store_info['status'] if store_info else 'Not found'}). Skipping file_search tool.")
+                        self.logger.warning(
+                            "Vector store not ready, skipping file_search tool",
+                            component="Orchestrator",
+                            subcomponent="HandleStreamingQuery",
+                            vector_store_id=vector_store_id,
+                            status=store_info["status"] if store_info else "Not found"
+                        )
                         vector_store_id = None  # Don't use the vector store if not ready
                     else:
-                        logger.info(f"Vector store {vector_store_id} is ready for tool creation")
+                        self.logger.info(
+                            "Vector store is ready for tool creation",
+                            component="Orchestrator",
+                            subcomponent="HandleStreamingQuery",
+                            vector_store_id=vector_store_id
+                        )
 
                 if vector_store_id or functions:
                     try:
                         tools = await self.tool_manager.get_tools_for_response(
                             vector_store_id=vector_store_id, functions=functions
                         )
-                        # Strict validation - fail on error (4a requirement)
+                        # Strict validation - fail on error
                         is_valid = await self.tool_manager.validate_tools(tools)
                         if not is_valid:
-                            logger.warning("Tool validation failed, proceeding without tools")
+                            self.logger.warning(
+                                "Tool validation failed, proceeding without tools",
+                                component="Orchestrator",
+                                subcomponent="HandleStreamingQuery"
+                            )
                             tools = []
                     except Exception as e:
-                        logger.warning(f"Error preparing tools: {str(e)}, proceeding without tools")
+                        self.logger.warning(
+                            "Error preparing tools, proceeding without tools",
+                            component="Orchestrator",
+                            subcomponent="HandleStreamingQuery",
+                            error=str(e)
+                        )
                         tools = []
             
             # Use appropriate streaming method
+            chunk_count = 0
+            
             if chat_id:
                 # Continue existing conversation
+                self.logger.info(
+                    "Streaming chat continuation",
+                    component="Orchestrator",
+                    subcomponent="HandleStreamingQuery",
+                    chat_id=chat_id
+                )
+                
                 async for chunk in self.stream_manager.stream_chat_continuation(
                     chat_id=chat_id, message=message, model=resolved_model, tools=tools
                 ):
+                    chunk_count += 1
                     yield {
                         "chunk": chunk,
                         "chat_id": chat_id,
                         "tools": tools
                     }
+                    
+                self.logger.info(
+                    "Chat continuation streaming completed",
+                    component="Orchestrator",
+                    subcomponent="HandleStreamingQuery",
+                    chat_id=chat_id,
+                    chunk_count=chunk_count
+                )
             else:
                 # Start new conversation
+                self.logger.info(
+                    "Starting new streaming conversation",
+                    component="Orchestrator",
+                    subcomponent="HandleStreamingQuery"
+                )
+                
                 new_chat_id = await self.chat_manager.create_chat(
                     message=message, model=resolved_model, tools=tools
                 )
@@ -274,27 +434,48 @@ class ResponseAPIOrchestrator:
                 async for chunk in self.stream_manager.stream_response(
                     message=message, model=resolved_model, tools=tools
                 ):
+                    chunk_count += 1
                     yield {
                         "chunk": chunk,
                         "chat_id": new_chat_id,
                         "tools": tools
                     }
+                
+                self.logger.info(
+                    "New conversation streaming completed",
+                    component="Orchestrator",
+                    subcomponent="HandleStreamingQuery",
+                    chat_id=new_chat_id,
+                    chunk_count=chunk_count
+                )
                     
         except (ToolConfigurationError, VectorStoreError, StreamConnectionError) as e:
-            logger.error(f"Error in streaming query: {str(e)}")
+            self.logger.error(
+                "Error in streaming query",
+                component="Orchestrator",
+                subcomponent="HandleStreamingQuery",
+                error=str(e),
+                error_type=type(e).__name__
+            )
             yield {
                 "error": str(e),
                 "chat_id": chat_id,
                 "tools": tools
             }
         except Exception as e:
-            logger.error(f"Failed to handle streaming query: {str(e)}")
+            self.logger.error(
+                "Failed to handle streaming query",
+                component="Orchestrator",
+                subcomponent="HandleStreamingQuery",
+                error=str(e)
+            )
             yield {
                 "error": f"Streaming query failed: {str(e)}",
                 "chat_id": chat_id,
                 "tools": tools
             }
 
+    @time_execution("Orchestrator", "GetHistory")
     async def get_history(self, chat_id: str) -> List[Dict[str, Any]]:
         """
         Retrieve conversation history for a chat.
@@ -306,13 +487,35 @@ class ResponseAPIOrchestrator:
             List of response dicts with content and tool calls.
         """
         try:
-            logger.info(f"Retrieving history for chat {chat_id}")
+            self.logger.info(
+                "Retrieving chat history",
+                component="Orchestrator",
+                subcomponent="GetHistory",
+                chat_id=chat_id
+            )
+            
             history = await self.chat_manager.get_chat_history(chat_id)
+            
+            self.logger.info(
+                "Retrieved chat history successfully",
+                component="Orchestrator",
+                subcomponent="GetHistory",
+                chat_id=chat_id,
+                history_length=len(history)
+            )
+            
             return history
         except Exception as e:
-            logger.error(f"Failed to get conversation history: {str(e)}")
+            self.logger.error(
+                "Failed to get conversation history",
+                component="Orchestrator",
+                subcomponent="GetHistory",
+                chat_id=chat_id,
+                error=str(e)
+            )
             raise ResponsesAPIError(message=f"History retrieval failed: {str(e)}")
 
+    @time_execution("Orchestrator", "CleanupResources")
     async def cleanup_resources(
         self, 
         vector_store_id: Optional[str] = None, 
@@ -329,28 +532,58 @@ class ResponseAPIOrchestrator:
             Dict with cleanup status for each resource.
         """
         try:
+            self.logger.info(
+                "Starting resource cleanup",
+                component="Orchestrator",
+                subcomponent="CleanupResources",
+                has_vector_store=bool(vector_store_id),
+                has_chat=bool(chat_id)
+            )
+            
             cleanup_status = {}
             
             if vector_store_id:
                 cleanup_status["vector_store"] = await self.vector_store_manager.delete_vector_store(vector_store_id)
-                logger.info(f"Vector store cleanup: {cleanup_status['vector_store']}")
+                self.logger.info(
+                    "Vector store cleanup completed",
+                    component="Orchestrator",
+                    subcomponent="CleanupResources",
+                    vector_store_id=vector_store_id,
+                    success=cleanup_status["vector_store"]
+                )
             
             if chat_id:
                 cleanup_status["chat"] = await self.chat_manager.delete_chat(chat_id)
-                logger.info(f"Chat cleanup: {cleanup_status['chat']}")
+                self.logger.info(
+                    "Chat cleanup completed",
+                    component="Orchestrator",
+                    subcomponent="CleanupResources",
+                    chat_id=chat_id,
+                    success=cleanup_status["chat"]
+                )
             
             # Clear caches
             self.tool_manager.clear_tool_cache()
             self.chat_manager.clear_cache()
             self.vector_store_manager.clear_cache()
             
-            logger.info("Orchestrator cleanup completed")
+            self.logger.info(
+                "All caches cleared, orchestrator cleanup completed",
+                component="Orchestrator",
+                subcomponent="CleanupResources"
+            )
             return cleanup_status
             
         except Exception as e:
-            logger.error(f"Cleanup error: {str(e)}")
+            self.logger.error(
+                "Cleanup error",
+                component="Orchestrator",
+                subcomponent="CleanupResources",
+                error=str(e)
+            )
             return {"error": str(e)}
 
+    @time_execution("Orchestrator", "SetupGuidelinesVectorStore")
     async def setup_guidelines_vector_store(self) -> str:
         """
         Set up the guidelines vector store with background file uploads.
@@ -359,8 +592,19 @@ class ResponseAPIOrchestrator:
             Vector store ID.
         """
         try:
-            logger.info("Setting up guidelines vector store")
+            self.logger.info(
+                "Setting up guidelines vector store",
+                component="Orchestrator",
+                subcomponent="SetupGuidelinesVectorStore"
+            )
+            
             vector_store_id = await self.vector_store_manager.create_guidelines_vector_store()
+            self.logger.info(
+                "Vector store created, polling for completion",
+                component="Orchestrator",
+                subcomponent="SetupGuidelinesVectorStore",
+                vector_store_id=vector_store_id
+            )
 
             # Poll vector store status until completed (with timeout)
             max_wait_time = 300  # 5 minutes max wait
@@ -369,25 +613,65 @@ class ResponseAPIOrchestrator:
 
             while total_waited < max_wait_time:
                 store_info = await self.vector_store_manager.get_vector_store(vector_store_id)
-                logger.info(f"Vector store {vector_store_id} status: {store_info['status'] if store_info else 'Not found'}")
+                status = store_info['status'] if store_info else 'Not found'
+                
+                self.logger.info(
+                    "Polling vector store status",
+                    component="Orchestrator",
+                    subcomponent="SetupGuidelinesVectorStore",
+                    vector_store_id=vector_store_id,
+                    status=status,
+                    waited_seconds=total_waited
+                )
 
                 if store_info and store_info["status"] == "completed":
-                    logger.info(f"Guidelines vector store ready: {vector_store_id}")
+                    self.logger.info(
+                        "Guidelines vector store ready",
+                        component="Orchestrator",
+                        subcomponent="SetupGuidelinesVectorStore",
+                        vector_store_id=vector_store_id,
+                        total_wait_time=total_waited
+                    )
                     return vector_store_id
                 elif store_info and store_info["status"] == "failed":
+                    self.logger.error(
+                        "Vector store setup failed",
+                        component="Orchestrator",
+                        subcomponent="SetupGuidelinesVectorStore",
+                        vector_store_id=vector_store_id,
+                        status="failed"
+                    )
                     raise VectorStoreError(f"Vector store {vector_store_id} failed during setup")
 
                 await asyncio.sleep(poll_interval)
                 total_waited += poll_interval
 
             # If we get here, we timed out
+            self.logger.error(
+                "Vector store setup timed out",
+                component="Orchestrator",
+                subcomponent="SetupGuidelinesVectorStore",
+                vector_store_id=vector_store_id,
+                max_wait_time=max_wait_time
+            )
             raise VectorStoreError(f"Vector store {vector_store_id} not ready after {max_wait_time} seconds")
 
         except VectorStoreError as e:
-            logger.error(f"Vector store setup error: {str(e)}")
+            self.logger.error(
+                "Vector store setup error",
+                component="Orchestrator",
+                subcomponent="SetupGuidelinesVectorStore",
+                error=str(e),
+                error_type="VectorStoreError"
+            )
             raise
         except Exception as e:
-            logger.error(f"Failed to setup guidelines vector store: {str(e)}")
+            self.logger.error(
+                "Failed to setup guidelines vector store",
+                component="Orchestrator",
+                subcomponent="SetupGuidelinesVectorStore",
+                error=str(e)
+            )
             raise ResponsesAPIError(message=f"Setup failed: {str(e)}")
 
 
@@ -402,21 +686,52 @@ async def example_workflow():
     4. Robust error handling at each step with appropriate fallbacks
     5. Proper resource cleanup with fallback strategies
     """
+    # Create a logger for the example workflow
+    logger = get_component_logger("ExampleWorkflow")
+    
     try:
+        logger.info(
+            "Starting example workflow",
+            component="ExampleWorkflow",
+            subcomponent="Main"
+        )
+        
         # Initialize orchestrator
         orchestrator = ResponseAPIOrchestrator(chat_history_limit=5)
+        logger.info(
+            "Initialized orchestrator",
+            component="ExampleWorkflow",
+            subcomponent="Main"
+        )
 
         # Setup vector store (with error handling)
         vector_store_id = None
         try:
             vector_store_id = await orchestrator.setup_guidelines_vector_store()
-            logger.info(f"Vector store setup successful: {vector_store_id}")
+            logger.info(
+                "Vector store setup successful",
+                component="ExampleWorkflow",
+                subcomponent="VectorStoreSetup",
+                vector_store_id=vector_store_id
+            )
         except Exception as e:
-            logger.warning(f"Vector store setup failed: {str(e)}. Continuing without tools.")
+            logger.warning(
+                "Vector store setup failed, continuing without tools",
+                component="ExampleWorkflow",
+                subcomponent="VectorStoreSetup",
+                error=str(e)
+            )
             vector_store_id = None
 
         # Use vector store if available to enable semantic search over guidelines
         try:
+            logger.info(
+                "Sending initial query",
+                component="ExampleWorkflow",
+                subcomponent="InitialQuery",
+                has_vector_store=bool(vector_store_id)
+            )
+            
             result = await orchestrator.handle_query(
                 message="What are the latest guidelines for diabetes treatment?",
                 chat_id=None,  # Start new conversation
@@ -425,12 +740,24 @@ async def example_workflow():
                 model=orchestrator.settings.openai_model_name,  # Use default model from settings
                 stream=False
             )
+            
             # If we got here with vector_store_id, tools were successfully used
             if vector_store_id:
-                logger.info("Successfully used vector store for semantic search")
+                logger.info(
+                    "Successfully used vector store for semantic search",
+                    component="ExampleWorkflow",
+                    subcomponent="InitialQuery",
+                    vector_store_id=vector_store_id
+                )
         except Exception as e:
             # Fall back to no tools if there's an issue with the vector store
-            logger.warning(f"Error using vector store in query: {str(e)}. Retrying without tools.")
+            logger.warning(
+                "Error using vector store in query, retrying without tools",
+                component="ExampleWorkflow",
+                subcomponent="InitialQuery",
+                error=str(e)
+            )
+            
             vector_store_id = None
             result = await orchestrator.handle_query(
                 message="What are the latest guidelines for diabetes treatment?",
@@ -440,10 +767,19 @@ async def example_workflow():
                 model=orchestrator.settings.openai_model_name,  # Use default model from settings
                 stream=False
             )
+            
         print(f"Response: {result['content']}...")
 
         # Continue conversation with same vector store to maintain context
         try:
+            logger.info(
+                "Sending follow-up query",
+                component="ExampleWorkflow",
+                subcomponent="FollowUpQuery",
+                chat_id=result["chat_id"],
+                has_vector_store=bool(vector_store_id)
+            )
+            
             continue_result = await orchestrator.handle_query(
                 message="Can you provide more details about medication recommendations?",
                 chat_id=result["chat_id"],  # Continue existing conversation
@@ -454,7 +790,14 @@ async def example_workflow():
             )
         except Exception as e:
             # Fall back to no tools if there's an issue with the vector store
-            logger.warning(f"Error using vector store in follow-up query: {str(e)}. Continuing without tools.")
+            logger.warning(
+                "Error using vector store in follow-up query, continuing without tools",
+                component="ExampleWorkflow",
+                subcomponent="FollowUpQuery",
+                chat_id=result["chat_id"],
+                error=str(e)
+            )
+            
             continue_result = await orchestrator.handle_query(
                 message="Can you provide more details about medication recommendations?",
                 chat_id=result["chat_id"],
@@ -463,31 +806,89 @@ async def example_workflow():
                 model=orchestrator.settings.openai_model_name,  # Use default model from settings
                 stream=False
             )
+            
         print(f"Continued: {continue_result['content'][:100]}...")
 
         # Get history
+        logger.info(
+            "Retrieving conversation history",
+            component="ExampleWorkflow",
+            subcomponent="GetHistory",
+            chat_id=result["chat_id"]
+        )
+        
         history = await orchestrator.get_history(result["chat_id"])
+        
+        logger.info(
+            "Retrieved history",
+            component="ExampleWorkflow",
+            subcomponent="GetHistory",
+            chat_id=result["chat_id"],
+            history_length=len(history)
+        )
+        
         print(f"History length: {len(history)}")
 
         # Cleanup both chat and vector store resources
         try:
+            logger.info(
+                "Cleaning up resources",
+                component="ExampleWorkflow",
+                subcomponent="Cleanup",
+                chat_id=result["chat_id"],
+                has_vector_store=bool(vector_store_id)
+            )
+            
             cleanup_result = await orchestrator.cleanup_resources(
                 chat_id=result["chat_id"],
                 vector_store_id=vector_store_id if vector_store_id else None
             )
-            logger.info(f"Cleanup completed: {cleanup_result}")
+            
+            logger.info(
+                "Cleanup completed successfully",
+                component="ExampleWorkflow",
+                subcomponent="Cleanup",
+                result=cleanup_result
+            )
         except Exception as e:
-            logger.error(f"Error during cleanup: {str(e)}")
+            logger.error(
+                "Error during cleanup",
+                component="ExampleWorkflow",
+                subcomponent="Cleanup",
+                error=str(e)
+            )
+            
             # Try to at least clean up the chat if vector store cleanup fails
             if result and "chat_id" in result:
                 try:
                     await orchestrator.cleanup_resources(chat_id=result["chat_id"])
-                    logger.info("Chat cleanup successful after vector store cleanup failure")
-                except Exception:
-                    logger.error("Failed to clean up chat after vector store cleanup failure")
+                    logger.info(
+                        "Chat cleanup successful after vector store cleanup failure",
+                        component="ExampleWorkflow",
+                        subcomponent="Cleanup",
+                        chat_id=result["chat_id"]
+                    )
+                except Exception as e2:
+                    logger.error(
+                        "Failed to clean up chat after vector store cleanup failure",
+                        component="ExampleWorkflow",
+                        subcomponent="Cleanup",
+                        chat_id=result["chat_id"],
+                        error=str(e2)
+                    )
 
+        logger.info(
+            "Example workflow completed successfully",
+            component="ExampleWorkflow",
+            subcomponent="Main"
+        )
     except Exception as e:
-        logger.error(f"Example workflow error: {str(e)}")
+        logger.error(
+            "Example workflow error",
+            component="ExampleWorkflow",
+            subcomponent="Main",
+            error=str(e)
+        )
 
 
 if __name__ == "__main__":

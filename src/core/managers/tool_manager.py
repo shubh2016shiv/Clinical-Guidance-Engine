@@ -5,8 +5,7 @@ from openai import OpenAI, AsyncOpenAI
 from src.core.config import get_settings
 from src.core.managers.vector_store_manager import VectorStoreManager
 from src.core.managers.exceptions import ToolConfigurationError, ResponsesAPIError, VectorStoreError
-
-logger = logging.getLogger(__name__)
+from src.core.logs import get_component_logger, log_execution_time, time_execution
 
 class ToolManager:
     """
@@ -27,7 +26,9 @@ class ToolManager:
         self.async_client = AsyncOpenAI(api_key=self.settings.openai_api_key)
         self.vector_store_manager = vector_store_manager
         self._tool_cache: Dict[str, List[Dict[str, Any]]] = {}  # Cache tools by key (e.g., vector_store_id or function name)
+        self.logger = get_component_logger("Tool")
 
+    @time_execution("Tool", "ConfigureFileSearchTool")
     async def configure_file_search_tool(self, vector_store_id: str, max_results: int = 20) -> Dict[str, Any]:
         """
         Configure a file_search tool with a vector store for Responses API.
@@ -40,11 +41,25 @@ class ToolManager:
             Tool configuration dictionary for responses.create.
         """
         try:
+            self.logger.info(
+                "Configuring file_search tool",
+                component="Tool",
+                subcomponent="ConfigureFileSearchTool",
+                vector_store_id=vector_store_id,
+                max_results=max_results
+            )
+            
             # Verify vector store exists and is ready
             vector_store_info = await self.vector_store_manager.get_vector_store(vector_store_id)
-            logger.info(f"Vector store info for {vector_store_id}: {vector_store_info}")
+            
             if not vector_store_info or vector_store_info["status"] != "completed":
-                logger.warning(f"Vector store {vector_store_id} not ready or not found")
+                self.logger.warning(
+                    "Vector store not ready or not found",
+                    component="Tool",
+                    subcomponent="ConfigureFileSearchTool",
+                    vector_store_id=vector_store_id,
+                    status=vector_store_info["status"] if vector_store_info else "Not found"
+                )
                 raise VectorStoreError(f"Vector store {vector_store_id} is not ready for file_search")
 
             # Configure file_search tool (Responses API schema)
@@ -55,23 +70,48 @@ class ToolManager:
                 "max_num_results": max_results
             }
 
-            logger.info(f"Created file_search tool config: {tool_config}")
+            self.logger.info(
+                "Created file_search tool config",
+                component="Tool",
+                subcomponent="ConfigureFileSearchTool",
+                vector_store_id=vector_store_id,
+                max_results=max_results
+            )
 
             # Cache tool configuration by vector_store_id
             if vector_store_id not in self._tool_cache:
                 self._tool_cache[vector_store_id] = []
             self._tool_cache[vector_store_id].append(tool_config)
-            logger.info(f"Configured file_search tool for vector store {vector_store_id}")
+            
+            self.logger.info(
+                "Configured file_search tool successfully",
+                component="Tool",
+                subcomponent="ConfigureFileSearchTool",
+                vector_store_id=vector_store_id
+            )
 
             return tool_config
 
         except VectorStoreError as e:
-            logger.error(f"Vector store error: {str(e)}")
+            self.logger.error(
+                "Vector store error",
+                component="Tool",
+                subcomponent="ConfigureFileSearchTool",
+                vector_store_id=vector_store_id,
+                error=str(e)
+            )
             raise
         except Exception as e:
-            logger.error(f"Failed to configure file_search tool: {str(e)}")
+            self.logger.error(
+                "Failed to configure file_search tool",
+                component="Tool",
+                subcomponent="ConfigureFileSearchTool",
+                vector_store_id=vector_store_id,
+                error=str(e)
+            )
             raise ToolConfigurationError(f"Failed to configure file_search tool: {str(e)}")
 
+    @time_execution("Tool", "ConfigureFunctionTool")
     def configure_function_tool(self, function: Dict[str, Any]) -> Dict[str, Any]:
         """
         Configure a function tool for Responses API.
@@ -83,9 +123,25 @@ class ToolManager:
             Tool configuration dictionary for responses.create.
         """
         try:
+            function_name = function.get('name', 'unknown')
+            
+            self.logger.info(
+                "Configuring function tool",
+                component="Tool",
+                subcomponent="ConfigureFunctionTool",
+                function_name=function_name
+            )
+            
             # Validate function (basic check for required fields)
             if not all(key in function for key in ["name", "description", "parameters"]):
-                raise ToolConfigurationError(f"Function {function.get('name', 'unknown')} missing required fields")
+                self.logger.error(
+                    "Function missing required fields",
+                    component="Tool",
+                    subcomponent="ConfigureFunctionTool",
+                    function_name=function_name,
+                    missing_fields=[key for key in ["name", "description", "parameters"] if key not in function]
+                )
+                raise ToolConfigurationError(f"Function {function_name} missing required fields")
 
             # Configure function tool (Responses API schema)
             tool_config = {
@@ -103,17 +159,36 @@ class ToolManager:
             if cache_key not in self._tool_cache:
                 self._tool_cache[cache_key] = []
             self._tool_cache[cache_key].append(tool_config)
-            logger.info(f"Configured function tool for {function['name']}")
+            
+            self.logger.info(
+                "Configured function tool successfully",
+                component="Tool",
+                subcomponent="ConfigureFunctionTool",
+                function_name=function["name"]
+            )
 
             return tool_config
 
         except ToolConfigurationError as e:
-            logger.error(f"Tool configuration error: {str(e)}")
+            self.logger.error(
+                "Tool configuration error",
+                component="Tool",
+                subcomponent="ConfigureFunctionTool",
+                function_name=function.get('name', 'unknown'),
+                error=str(e)
+            )
             raise
         except Exception as e:
-            logger.error(f"Failed to configure function tool: {str(e)}")
+            self.logger.error(
+                "Failed to configure function tool",
+                component="Tool",
+                subcomponent="ConfigureFunctionTool",
+                function_name=function.get('name', 'unknown'),
+                error=str(e)
+            )
             raise ToolConfigurationError(f"Failed to configure function tool: {str(e)}")
 
+    @time_execution("Tool", "GetToolsForResponse")
     async def get_tools_for_response(
         self,
         vector_store_id: Optional[str] = None,
@@ -131,37 +206,89 @@ class ToolManager:
         """
         try:
             tools = []
-            logger.info(f"get_tools_for_response called with vector_store_id={vector_store_id}, functions={bool(functions)}")
+            self.logger.info(
+                "Getting tools for response",
+                component="Tool",
+                subcomponent="GetToolsForResponse",
+                has_vector_store=bool(vector_store_id),
+                has_functions=bool(functions),
+                function_count=len(functions) if functions else 0
+            )
 
             # Add file_search tool if vector store ID is provided
             if vector_store_id:
-                logger.info(f"Attempting to create file_search tool for vector store {vector_store_id}")
+                self.logger.info(
+                    "Adding file_search tool",
+                    component="Tool",
+                    subcomponent="GetToolsForResponse",
+                    vector_store_id=vector_store_id
+                )
+                
                 if vector_store_id in self._tool_cache:
                     tools.extend(self._tool_cache[vector_store_id])
-                    logger.info(f"Using cached tools for vector store {vector_store_id}")
+                    self.logger.info(
+                        "Using cached file_search tool",
+                        component="Tool",
+                        subcomponent="GetToolsForResponse",
+                        vector_store_id=vector_store_id
+                    )
                 else:
                     # Configure on-the-fly if not cached
                     file_search_tool = await self.configure_file_search_tool(vector_store_id)
                     tools.append(file_search_tool)
-                    logger.info(f"Created new file_search tool: {file_search_tool}")
+                    self.logger.info(
+                        "Created new file_search tool",
+                        component="Tool",
+                        subcomponent="GetToolsForResponse",
+                        vector_store_id=vector_store_id
+                    )
 
             # Add function tools if functions are provided
             if functions and len(functions) > 0:
+                self.logger.info(
+                    "Adding function tools",
+                    component="Tool",
+                    subcomponent="GetToolsForResponse",
+                    function_count=len(functions)
+                )
+                
                 for function in functions:
                     function_tool = self.configure_function_tool(function)
                     tools.append(function_tool)
-                    logger.info(f"Created function tool for {function['name']}")
+                    self.logger.info(
+                        "Added function tool",
+                        component="Tool",
+                        subcomponent="GetToolsForResponse",
+                        function_name=function['name']
+                    )
 
-            logger.info(f"Prepared {len(tools)} tools for response: {tools}")
+            self.logger.info(
+                "Prepared tools for response",
+                component="Tool",
+                subcomponent="GetToolsForResponse",
+                tool_count=len(tools)
+            )
             return tools
 
         except (VectorStoreError, ToolConfigurationError) as e:
-            logger.error(f"Error preparing tools for response: {str(e)}")
+            self.logger.error(
+                "Error preparing tools for response",
+                component="Tool",
+                subcomponent="GetToolsForResponse",
+                error=str(e),
+                error_type=type(e).__name__
+            )
             raise
         except Exception as e:
-            logger.error(f"Error preparing tools for response: {str(e)}")
+            self.logger.error(
+                "Error preparing tools for response",
+                component="Tool",
+                subcomponent="GetToolsForResponse",
+                error=str(e)
+            )
             raise ToolConfigurationError(f"Failed to prepare tools for response: {str(e)}")
 
+    @time_execution("Tool", "ValidateTools")
     async def validate_tools(self, tools: List[Dict[str, Any]]) -> bool:
         """
         Validate tool configurations for Responses API.
@@ -173,34 +300,95 @@ class ToolManager:
             True if valid, False otherwise.
         """
         try:
+            self.logger.info(
+                "Validating tools",
+                component="Tool",
+                subcomponent="ValidateTools",
+                tool_count=len(tools)
+            )
+            
             for tool in tools:
                 if tool["type"] == "file_search":
                     # vector_store_ids is at the root level of the tool object
                     vector_store_ids = tool.get("vector_store_ids", [])
-                    logger.info(f"Validating file_search tool with vector_store_ids: {vector_store_ids}")
+                    self.logger.info(
+                        "Validating file_search tool",
+                        component="Tool",
+                        subcomponent="ValidateTools",
+                        vector_store_ids=vector_store_ids
+                    )
+                    
                     if not vector_store_ids:
-                        logger.error("file_search tool missing vector_store_ids")
+                        self.logger.error(
+                            "file_search tool missing vector_store_ids",
+                            component="Tool",
+                            subcomponent="ValidateTools"
+                        )
                         return False
+                        
                     for vs_id in vector_store_ids:
                         vs_info = await self.vector_store_manager.get_vector_store(vs_id)
                         if not vs_info or vs_info["status"] != "completed":
-                            logger.error(f"Vector store {vs_id} not ready for file_search")
+                            self.logger.error(
+                                "Vector store not ready for file_search",
+                                component="Tool",
+                                subcomponent="ValidateTools",
+                                vector_store_id=vs_id,
+                                status=vs_info["status"] if vs_info else "Not found"
+                            )
                             return False
+                            
                 elif tool["type"] == "function":
                     function = tool.get("function", {})
+                    function_name = function.get('name', 'unknown')
+                    
+                    self.logger.info(
+                        "Validating function tool",
+                        component="Tool",
+                        subcomponent="ValidateTools",
+                        function_name=function_name
+                    )
+                    
                     if not function:
-                        logger.error("function tool missing function definition")
+                        self.logger.error(
+                            "function tool missing function definition",
+                            component="Tool",
+                            subcomponent="ValidateTools"
+                        )
                         return False
+                        
                     if not all(key in function for key in ["name", "description", "parameters"]):
-                        logger.error(f"Function {function.get('name', 'unknown')} missing required fields")
+                        self.logger.error(
+                            "Function missing required fields",
+                            component="Tool",
+                            subcomponent="ValidateTools",
+                            function_name=function_name,
+                            missing_fields=[key for key in ["name", "description", "parameters"] if key not in function]
+                        )
                         return False
+                        
+            self.logger.info(
+                "Tools validation successful",
+                component="Tool",
+                subcomponent="ValidateTools",
+                tool_count=len(tools)
+            )
             return True
 
         except Exception as e:
-            logger.error(f"Error validating tools: {str(e)}")
+            self.logger.error(
+                "Error validating tools",
+                component="Tool",
+                subcomponent="ValidateTools",
+                error=str(e)
+            )
             return False
 
     def clear_tool_cache(self) -> None:
         """Clear the tool configuration cache."""
         self._tool_cache.clear()
-        logger.info("Tool cache cleared")
+        self.logger.info(
+            "Tool cache cleared",
+            component="Tool",
+            subcomponent="ClearCache"
+        )
