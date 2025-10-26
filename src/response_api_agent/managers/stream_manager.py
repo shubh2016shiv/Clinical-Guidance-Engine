@@ -67,36 +67,68 @@ class StreamManager:
                 input=message,
                 previous_response_id=previous_response_id,
                 instructions=get_system_prompt(),
-                temperature=self.settings.openai_temperature,
-                top_p=self.settings.openai_top_p,
-                max_output_tokens=self.settings.openai_max_output_tokens,
                 tools=tools or [],
                 stream=True  # Enable streaming
             )
             
             chunk_count = 0
+            self.logger.info(
+                "Beginning to process stream chunks",
+                component="Stream",
+                subcomponent="StreamResponse"
+            )
+            
             # Process streaming response
             async for chunk in stream:
                 try:
-                    # Extract text from chunk
-                    if hasattr(chunk, 'content') and chunk.content:
-                        for content_block in chunk.content:
-                            if hasattr(content_block, 'text') and hasattr(content_block.text, 'value'):
-                                text = content_block.text.value
-                                if text:
-                                    chunk_count += 1
-                                    # Call callback if provided
-                                    if callback:
-                                        callback(text)
-                                    yield text
+                    # CORRECTED: Handle Response API streaming format
+                    text = None
+                    chunk_type = type(chunk).__name__
+                    
+                    # Handle ResponseTextDeltaEvent - this is where the actual text content is
+                    if chunk_type == "ResponseTextDeltaEvent" and hasattr(chunk, 'delta'):
+                        text = chunk.delta
+                        if text and text.strip():
+                            chunk_count += 1
+                            # self.logger.info(
+                            #     "Extracted text from ResponseTextDeltaEvent",
+                            #     component="Stream",
+                            #     subcomponent="StreamResponse",
+                            #     text_length=len(text),
+                            #     chunk_count=chunk_count
+                            # )
+                            
+                            if callback:
+                                callback(text)
+                            print(text)
+                            yield text
+                        else:
+                            self.logger.debug(
+                                "Empty text in ResponseTextDeltaEvent",
+                                component="Stream",
+                                subcomponent="StreamResponse"
+                            )
+                    else:
+                        # Log other chunk types for debugging
+                        self.logger.debug(
+                            "Non-text chunk received",
+                            component="Stream",
+                            subcomponent="StreamResponse",
+                            chunk_type=chunk_type,
+                            has_delta=hasattr(chunk, 'delta'),
+                            delta_value=getattr(chunk, 'delta', None) if hasattr(chunk, 'delta') else None
+                        )
+                        
                 except Exception as e:
                     self.logger.warning(
                         "Error processing response chunk",
                         component="Stream",
                         subcomponent="StreamResponse",
-                        error=str(e)
+                        error=str(e),
+                        chunk_type=type(chunk).__name__
                     )
-                    raise ContentParsingError(f"Failed to parse response chunk: {str(e)}")
+                    # Don't raise - continue processing other chunks
+                    continue
             
             self.logger.info(
                 "Response stream completed",
@@ -155,9 +187,6 @@ class StreamManager:
                 input=message,
                 previous_response_id=chat_id,  # Use chat_id as previous_response_id
                 instructions=get_system_prompt(),
-                temperature=self.settings.openai_temperature,
-                top_p=self.settings.openai_top_p,
-                max_output_tokens=self.settings.openai_max_output_tokens,
                 tools=tools or [],
                 stream=True  # Enable streaming
             )
@@ -166,17 +195,41 @@ class StreamManager:
             # Process streaming response
             async for chunk in stream:
                 try:
-                    # Extract text from chunk
-                    if hasattr(chunk, 'content') and chunk.content:
-                        for content_block in chunk.content:
-                            if hasattr(content_block, 'text') and hasattr(content_block.text, 'value'):
-                                text = content_block.text.value
-                                if text:
-                                    chunk_count += 1
-                                    # Call callback if provided
-                                    if callback:
-                                        callback(text)
-                                    yield text
+                    # CORRECTED: Handle Response API streaming format for chat continuation
+                    text = None
+                    chunk_type = type(chunk).__name__
+                    
+                    # Handle ResponseTextDeltaEvent - this is where the actual text content is
+                    if chunk_type == "ResponseTextDeltaEvent" and hasattr(chunk, 'delta'):
+                        text = chunk.delta
+                        if text and text.strip():
+                            chunk_count += 1
+                            self.logger.info(
+                                "Extracted text from chat continuation ResponseTextDeltaEvent",
+                                component="Stream",
+                                subcomponent="StreamChatContinuation",
+                                text_length=len(text),
+                                chunk_count=chunk_count
+                            )
+                            
+                            if callback:
+                                callback(text)
+                            yield text
+                        else:
+                            self.logger.debug(
+                                "Empty text in chat continuation ResponseTextDeltaEvent",
+                                component="Stream",
+                                subcomponent="StreamChatContinuation"
+                            )
+                    else:
+                        # Log other chunk types for debugging
+                        self.logger.debug(
+                            "Non-text chunk in chat continuation",
+                            component="Stream",
+                            subcomponent="StreamChatContinuation",
+                            chunk_type=chunk_type
+                        )
+                        
                 except Exception as e:
                     self.logger.warning(
                         "Error processing chat continuation chunk",
@@ -185,7 +238,8 @@ class StreamManager:
                         chat_id=chat_id,
                         error=str(e)
                     )
-                    raise ContentParsingError(f"Failed to parse response chunk: {str(e)}")
+                    # Don't raise - continue processing other chunks
+                    continue
             
             self.logger.info(
                 "Chat continuation stream completed",
@@ -248,9 +302,6 @@ class StreamManager:
                 input=message,
                 previous_response_id=previous_response_id,
                 instructions=get_system_prompt(),
-                temperature=self.settings.openai_temperature,
-                top_p=self.settings.openai_top_p,
-                max_output_tokens=self.settings.openai_max_output_tokens,
                 tools=tools,
                 stream=True  # Enable streaming
             )
@@ -262,19 +313,18 @@ class StreamManager:
             async for chunk in stream:
                 try:
                     result = {}
+                    chunk_type = type(chunk).__name__
                     
-                    # Handle text content
-                    if hasattr(chunk, 'content') and chunk.content:
-                        for content_block in chunk.content:
-                            if hasattr(content_block, 'text') and hasattr(content_block.text, 'value'):
-                                text = content_block.text.value
-                                if text:
-                                    chunk_count += 1
-                                    result['text'] = text
-                                    if callback:
-                                        callback(text)
+                    # Handle ResponseTextDeltaEvent for text content
+                    if chunk_type == "ResponseTextDeltaEvent" and hasattr(chunk, 'delta'):
+                        text = chunk.delta
+                        if text and text.strip():
+                            chunk_count += 1
+                            result['text'] = text
+                            if callback:
+                                callback(text)
                     
-                    # Handle tool calls
+                    # Handle tool calls (this would be in different event types)
                     if hasattr(chunk, 'tool_calls') and chunk.tool_calls:
                         tool_call_count += 1
                         result['tool_calls'] = chunk.tool_calls
@@ -290,6 +340,14 @@ class StreamManager:
                     
                     if result:
                         yield result
+                    else:
+                        # Log other chunk types for debugging
+                        self.logger.debug(
+                            "Non-text chunk in stream with tools",
+                            component="Stream",
+                            subcomponent="StreamWithTools",
+                            chunk_type=chunk_type
+                        )
                         
                 except Exception as e:
                     self.logger.warning(
@@ -298,7 +356,8 @@ class StreamManager:
                         subcomponent="StreamWithTools",
                         error=str(e)
                     )
-                    raise ContentParsingError(f"Failed to parse response chunk: {str(e)}")
+                    # Don't raise - continue processing other chunks
+                    continue
             
             self.logger.info(
                 "Response stream with tools completed",

@@ -118,7 +118,8 @@ class ChatManager:
         self, 
         message: str, 
         model: Optional[str] = None,
-        tools: Optional[List[Dict[str, Any]]] = None
+        tools: Optional[List[Dict[str, Any]]] = None,
+        streaming: bool = False
     ) -> str:
         """
         Start a new conversation by creating the first response.
@@ -127,6 +128,7 @@ class ChatManager:
             message: Initial user message.
             model: Model to use (default: from settings).
             tools: Optional tools (e.g., from ToolManager) to include.
+            streaming: If True, optimizes for streaming (returns placeholder ID).
             
         Returns:
             Chat ID (the initial response ID, used as chain root).
@@ -138,18 +140,30 @@ class ChatManager:
                 component="Chat",
                 subcomponent="CreateChat",
                 model=model,
-                has_tools=bool(tools)
+                has_tools=bool(tools),
+                streaming=streaming
             )
 
-            # Create first response (no previous_response_id)
+            if streaming:
+                # For streaming, we don't need to wait for the full response
+                # Just return a placeholder ID that will be updated after streaming
+                import time
+                chat_id = f"streaming_{int(time.time())}"
+                self._chat_cache[chat_id] = None  # Will be updated after streaming
+                self.logger.info(
+                    "Created streaming chat placeholder",
+                    component="Chat",
+                    subcomponent="CreateChat",
+                    chat_id=chat_id
+                )
+                return chat_id
+
+            # Non-streaming: create full response
             response = await asyncio.to_thread(
                 self.client.responses.create,
                 model=model,
                 input=message,  # User input; API handles as first message
                 instructions=get_system_prompt(),
-                temperature=self.settings.openai_temperature,
-                top_p=self.settings.openai_top_p,
-                max_output_tokens=self.settings.openai_max_output_tokens,
                 tools=tools or []
             )
 
@@ -235,9 +249,6 @@ class ChatManager:
                     model=model,
                     input=reset_message,
                     instructions=get_system_prompt(),
-                    temperature=self.settings.openai_temperature,
-                    top_p=self.settings.openai_top_p,
-                    max_output_tokens=self.settings.openai_max_output_tokens,
                     tools=tools or []
                 )
                 # Update chat_id to new root and cache
@@ -260,9 +271,6 @@ class ChatManager:
                     previous_response_id=last_response_id,
                     input=message,
                     instructions=get_system_prompt(),
-                    temperature=self.settings.openai_temperature,
-                    top_p=self.settings.openai_top_p,
-                    max_output_tokens=self.settings.openai_max_output_tokens,
                     tools=tools or []
                 )
 
@@ -477,9 +485,7 @@ class ChatManager:
                 self.client.responses.create,
                 model=model,
                 input=summary_prompt,
-                instructions="Summarize the conversation history concisely.",
-                temperature=0.3,  # Lower for consistent summarization
-                max_output_tokens=500
+                instructions="Summarize the conversation history concisely."
             )
             
             # Extract text content using the helper method

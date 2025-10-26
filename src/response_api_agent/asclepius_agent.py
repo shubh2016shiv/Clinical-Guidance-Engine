@@ -87,11 +87,11 @@ class AsclepiusHealthcareAgent:
             return None
 
     async def consult(
-        self,
-        query: str,
-        conversation_id: Optional[str] = None,
-        use_clinical_guidelines: bool = True,
-        streaming: bool = False
+            self,
+            query: str,
+            conversation_id: Optional[str] = None,
+            use_clinical_guidelines: bool = True,
+            streaming: bool = False
     ) -> Dict[str, Any]:
         """
         Consult the agent on a healthcare or medication-related question.
@@ -126,17 +126,15 @@ class AsclepiusHealthcareAgent:
             )
 
             if streaming:
-                # For streaming, return the async generator directly
-                async def stream_response():
-                    async for chunk in self.response_manager.process_streaming_query(
-                        user_message=query,
-                        conversation_id=conversation_id,
-                        vector_store_id=vector_store_id
-                    ):
-                        yield chunk
+                # Use process_streaming_query which returns AsyncGenerator directly
+                stream_gen = self.response_manager.process_streaming_query(
+                    user_message=query,
+                    conversation_id=conversation_id,
+                    vector_store_id=vector_store_id
+                )
 
                 return {
-                    "stream_generator": stream_response,
+                    "stream_generator": stream_gen,
                     "conversation_id": conversation_id,
                     "guidelines_used": vector_store_id is not None
                 }

@@ -596,19 +596,14 @@ class OpenAIResponseManager:
                     chunk_count=chunk_count
                 )
             else:
-                # Stream new conversation
+                # CRITICAL FIX: Stream directly without creating chat first
                 self.logger.info(
                     "Starting new streaming conversation",
                     component="OpenAIResponseManager",
                     subcomponent="process_streaming_query"
                 )
                 
-                new_conversation_id = await self.chat_manager.create_chat(
-                    message=user_message,
-                    model=resolved_model,
-                    tools=tools
-                )
-                
+                # Stream the response directly - no create_chat call
                 async for chunk in self.stream_manager.stream_response(
                     message=user_message,
                     model=resolved_model,
@@ -617,7 +612,7 @@ class OpenAIResponseManager:
                     chunk_count += 1
                     yield {
                         "chunk": chunk,
-                        "conversation_id": new_conversation_id,
+                        "conversation_id": None,  # Will be set after first chunk
                         "tools": tools
                     }
                 
@@ -625,7 +620,6 @@ class OpenAIResponseManager:
                     "New conversation streaming completed",
                     component="OpenAIResponseManager",
                     subcomponent="process_streaming_query",
-                    conversation_id=new_conversation_id,
                     chunk_count=chunk_count
                 )
                     

@@ -112,10 +112,21 @@ class HealthcareAgentApplication:
             result = await self.agent.consult(
                 query=question,
                 use_clinical_guidelines=use_guidelines,
-                streaming=False
+                streaming=self.settings.enable_streaming
             )
+
+            # Handle streaming response
+            if self.settings.enable_streaming and "stream_generator" in result:
+                stream_generator = result["stream_generator"]
+                response_parts = []
+                async for chunk_data in stream_generator:
+                    # Each chunk is a dict with "chunk" key
+                    chunk = chunk_data.get("chunk", "")
+                    response_parts.append(chunk)
+                response_content = "".join(response_parts)
+            else:
+                response_content = result.get("content", "")
             
-            response_content = result.get("content", "")
             conversation_id = result.get("conversation_id", "")
             guidelines_used = result.get("guidelines_used", False)
             
@@ -156,19 +167,26 @@ class HealthcareAgentApplication:
         """
         try:
             if self.agent:
-                self.logger.info(
-                    "Shutting down application",
-                    component="Application",
-                    subcomponent="Shutdown"
-                )
-                
-                await self.agent.close_session()
-                
-                self.logger.info(
-                    "Application shutdown complete",
-                    component="Application",
-                    subcomponent="Shutdown"
-                )
+                if self.settings.enable_cleanup:
+                    self.logger.info(
+                        "Shutting down application with cleanup",
+                        component="Application",
+                        subcomponent="Shutdown"
+                    )
+                    
+                    await self.agent.close_session()
+                    
+                    self.logger.info(
+                        "Application shutdown complete with cleanup",
+                        component="Application",
+                        subcomponent="Shutdown"
+                    )
+                else:
+                    self.logger.info(
+                        "Shutting down application without cleanup (resources will persist)",
+                        component="Application",
+                        subcomponent="Shutdown"
+                    )
         except Exception as e:
             self.logger.error(
                 "Error during shutdown",
