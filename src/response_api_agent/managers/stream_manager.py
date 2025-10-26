@@ -34,7 +34,7 @@ class StreamManager:
         previous_response_id: Optional[str] = None,
         tools: Optional[List[Dict[str, Any]]] = None,
         callback: Optional[Callable[[str], None]] = None
-    ) -> AsyncGenerator[str, None]:
+    ) -> AsyncGenerator[Dict[str, Any], None]:
         """
         Stream a response from the OpenAI Responses API.
         
@@ -46,7 +46,7 @@ class StreamManager:
             callback: Optional callback function to process each chunk.
             
         Yields:
-            Text chunks from the streaming response.
+            Dictionary containing 'text' and 'response_id' from the streaming response.
         """
         try:
             model = model or self.settings.openai_model_name
@@ -72,6 +72,7 @@ class StreamManager:
             )
             
             chunk_count = 0
+            response_id = None
             self.logger.info(
                 "Beginning to process stream chunks",
                 component="Stream",
@@ -85,8 +86,18 @@ class StreamManager:
                     text = None
                     chunk_type = type(chunk).__name__
                     
+                    # Extract response ID from ResponseCreatedEvent
+                    if chunk_type == "ResponseCreatedEvent" and hasattr(chunk, 'response'):
+                        response_id = chunk.response.id
+                        self.logger.info(
+                            "Extracted response ID from ResponseCreatedEvent",
+                            component="Stream",
+                            subcomponent="StreamResponse",
+                            response_id=response_id
+                        )
+                    
                     # Handle ResponseTextDeltaEvent - this is where the actual text content is
-                    if chunk_type == "ResponseTextDeltaEvent" and hasattr(chunk, 'delta'):
+                    elif chunk_type == "ResponseTextDeltaEvent" and hasattr(chunk, 'delta'):
                         text = chunk.delta
                         if text and text.strip():
                             chunk_count += 1
@@ -101,7 +112,10 @@ class StreamManager:
                             if callback:
                                 callback(text)
                             print(text)
-                            yield text
+                            yield {
+                                "text": text,
+                                "response_id": response_id
+                            }
                         else:
                             self.logger.debug(
                                 "Empty text in ResponseTextDeltaEvent",
@@ -154,7 +168,7 @@ class StreamManager:
         model: Optional[str] = None,
         tools: Optional[List[Dict[str, Any]]] = None,
         callback: Optional[Callable[[str], None]] = None
-    ) -> AsyncGenerator[str, None]:
+    ) -> AsyncGenerator[Dict[str, Any], None]:
         """
         Stream a continuation of an existing chat.
         
@@ -166,7 +180,7 @@ class StreamManager:
             callback: Optional callback function to process each chunk.
             
         Yields:
-            Text chunks from the streaming response.
+            Dictionary containing 'text' and 'response_id' from the streaming response.
         """
         try:
             model = model or self.settings.openai_model_name
@@ -192,6 +206,7 @@ class StreamManager:
             )
             
             chunk_count = 0
+            response_id = None
             # Process streaming response
             async for chunk in stream:
                 try:
@@ -199,8 +214,18 @@ class StreamManager:
                     text = None
                     chunk_type = type(chunk).__name__
                     
+                    # Extract response ID from ResponseCreatedEvent
+                    if chunk_type == "ResponseCreatedEvent" and hasattr(chunk, 'response'):
+                        response_id = chunk.response.id
+                        self.logger.info(
+                            "Extracted response ID from chat continuation ResponseCreatedEvent",
+                            component="Stream",
+                            subcomponent="StreamChatContinuation",
+                            response_id=response_id
+                        )
+                    
                     # Handle ResponseTextDeltaEvent - this is where the actual text content is
-                    if chunk_type == "ResponseTextDeltaEvent" and hasattr(chunk, 'delta'):
+                    elif chunk_type == "ResponseTextDeltaEvent" and hasattr(chunk, 'delta'):
                         text = chunk.delta
                         if text and text.strip():
                             chunk_count += 1
@@ -214,7 +239,10 @@ class StreamManager:
                             
                             if callback:
                                 callback(text)
-                            yield text
+                            yield {
+                                "text": text,
+                                "response_id": response_id
+                            }
                         else:
                             self.logger.debug(
                                 "Empty text in chat continuation ResponseTextDeltaEvent",

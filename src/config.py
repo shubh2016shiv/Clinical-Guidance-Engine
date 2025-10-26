@@ -13,7 +13,6 @@ class Settings(BaseSettings):
 
     # OpenAI API Configuration
     openai_api_key: str = ""
-
     openai_model_name: str = "gpt-4o-mini"
     
     # OpenAI Model Parameters
@@ -25,6 +24,10 @@ class Settings(BaseSettings):
     app_name: str = "Drug Recommendation Chatbot"
     app_version: str = "1.0.0"
     debug_mode: bool = False
+    
+    # Response Mode Configuration
+    enable_streaming: bool = True  # Global streaming mode control (default: False for standard responses)
+    enable_cleanup: bool = False     # Control resource cleanup at shutdown (default: True for proper resource management)
 
     # Vector store configuration
     vector_store_ttl: int = 3600  # 1 hour in seconds

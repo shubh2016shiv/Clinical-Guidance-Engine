@@ -575,7 +575,7 @@ class OpenAIResponseManager:
                     conversation_id=conversation_id
                 )
                 
-                async for chunk in self.stream_manager.stream_chat_continuation(
+                async for chunk_data in self.stream_manager.stream_chat_continuation(
                     chat_id=conversation_id,
                     message=user_message,
                     model=resolved_model,
@@ -583,7 +583,7 @@ class OpenAIResponseManager:
                 ):
                     chunk_count += 1
                     yield {
-                        "chunk": chunk,
+                        "chunk": chunk_data.get("text", ""),
                         "conversation_id": conversation_id,
                         "tools": tools
                     }
@@ -604,15 +604,21 @@ class OpenAIResponseManager:
                 )
                 
                 # Stream the response directly - no create_chat call
-                async for chunk in self.stream_manager.stream_response(
+                response_id = None
+                async for chunk_data in self.stream_manager.stream_response(
                     message=user_message,
                     model=resolved_model,
                     tools=tools
                 ):
                     chunk_count += 1
+                    
+                    # Extract response_id from first chunk if available
+                    if response_id is None and chunk_data.get("response_id"):
+                        response_id = chunk_data["response_id"]
+                    
                     yield {
-                        "chunk": chunk,
-                        "conversation_id": None,  # Will be set after first chunk
+                        "chunk": chunk_data.get("text", ""),
+                        "conversation_id": response_id,  # Use extracted response_id instead of None
                         "tools": tools
                     }
                 

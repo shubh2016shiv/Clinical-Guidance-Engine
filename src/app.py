@@ -119,15 +119,23 @@ class HealthcareAgentApplication:
             if self.settings.enable_streaming and "stream_generator" in result:
                 stream_generator = result["stream_generator"]
                 response_parts = []
+                extracted_conversation_id = None
                 async for chunk_data in stream_generator:
                     # Each chunk is a dict with "chunk" key
                     chunk = chunk_data.get("chunk", "")
                     response_parts.append(chunk)
+                    # Extract conversation_id from first chunk
+                    if extracted_conversation_id is None:
+                        extracted_conversation_id = chunk_data.get("conversation_id")
                 response_content = "".join(response_parts)
+                # Override conversation_id with extracted value
+                if extracted_conversation_id:
+                    conversation_id = extracted_conversation_id
+                else:
+                    conversation_id = result.get("conversation_id", "")
             else:
                 response_content = result.get("content", "")
-            
-            conversation_id = result.get("conversation_id", "")
+                conversation_id = result.get("conversation_id", "")
             guidelines_used = result.get("guidelines_used", False)
             
             self.logger.info(
