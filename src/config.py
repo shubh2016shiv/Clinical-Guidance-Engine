@@ -6,19 +6,36 @@ Simple configuration using Pydantic BaseSettings to read from .env file.
 
 from typing import Optional
 from pydantic_settings import BaseSettings
+from pydantic import Field
+import os
 
 
 class Settings(BaseSettings):
     """Application settings loaded from .env file."""
 
     # OpenAI API Configuration
-    openai_api_key: str = ""
-    openai_model_name: str = "gpt-4o-mini"
+    openai_api_key: str = Field(
+        default="",
+        description="OpenAI API Key loaded from .env"
+    )
+    openai_model_name: str = Field(
+        default="gpt-4o-mini",
+        description="OpenAI model name, can be overridden in .env"
+    )
     
     # OpenAI Model Parameters
-    openai_temperature: float = 0.1  # Creativity vs consistency (0.0-2.0)
-    openai_top_p: float = 0.9  # Nucleus sampling parameter (0.0-1.0)
-    openai_max_output_tokens: int = 2000  # Maximum response length
+    openai_temperature: float = Field(
+        default=0.1,
+        description="Creativity vs consistency (0.0-2.0)"
+    )
+    openai_top_p: float = Field(
+        default=0.9,
+        description="Nucleus sampling parameter (0.0-1.0)"
+    )
+    openai_max_output_tokens: int = Field(
+        default=2000,
+        description="Maximum response length"
+    )
 
     # Application Configuration
     app_name: str = "Drug Recommendation Chatbot"
@@ -26,7 +43,7 @@ class Settings(BaseSettings):
     debug_mode: bool = False
     
     # Response Mode Configuration
-    enable_streaming: bool = True  # Global streaming mode control (default: False for standard responses)
+    enable_streaming: bool = False  # Global streaming mode control (default: False for standard responses)
     enable_cleanup: bool = False     # Control resource cleanup at shutdown (default: True for proper resource management)
 
     # Vector store configuration
@@ -37,7 +54,10 @@ class Settings(BaseSettings):
 
     class Config:
         """Pydantic configuration."""
-        env_file = ".env"
+        # Get the project root directory (parent of src directory)
+        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        env_file = os.path.join(project_root, ".env")
+        env_file_encoding = "utf-8"
         case_sensitive = False
 
 
