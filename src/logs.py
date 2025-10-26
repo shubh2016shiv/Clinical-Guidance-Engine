@@ -228,7 +228,7 @@ def _configure_logging_once():
     logging.getLogger("uvicorn.watcher").setLevel(logging.WARNING)
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
-    logging.getLogger("azure.core.pipeline.policies.http_logging_policy").setLevel(
+    logging.getLogger("azure.response_api_agent.pipeline.policies.http_logging_policy").setLevel(
         logging.WARNING
     )
     logging.getLogger("azure.identity").setLevel(logging.WARNING)

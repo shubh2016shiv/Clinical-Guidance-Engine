@@ -5,13 +5,12 @@ This module provides functionality to stream responses from the OpenAI Responses
 using Server-Sent Events (SSE).
 """
 
-import asyncio
-import logging
 from typing import Dict, Any, List, Optional, AsyncGenerator, Callable
 from openai import OpenAI, AsyncOpenAI
-from src.core.config import get_settings
-from src.core.managers.exceptions import StreamConnectionError, ContentParsingError
-from src.core.logs import get_component_logger, log_execution_time, time_execution
+from src.config import get_settings
+from src.response_api_agent.managers.exceptions import StreamConnectionError, ContentParsingError
+from src.logs import get_component_logger, time_execution
+from src.prompts.asclepius_system_prompt import get_system_prompt
 
 class StreamManager:
     """
@@ -67,6 +66,10 @@ class StreamManager:
                 model=model,
                 input=message,
                 previous_response_id=previous_response_id,
+                instructions=get_system_prompt(),
+                temperature=self.settings.openai_temperature,
+                top_p=self.settings.openai_top_p,
+                max_output_tokens=self.settings.openai_max_output_tokens,
                 tools=tools or [],
                 stream=True  # Enable streaming
             )
@@ -151,6 +154,10 @@ class StreamManager:
                 model=model,
                 input=message,
                 previous_response_id=chat_id,  # Use chat_id as previous_response_id
+                instructions=get_system_prompt(),
+                temperature=self.settings.openai_temperature,
+                top_p=self.settings.openai_top_p,
+                max_output_tokens=self.settings.openai_max_output_tokens,
                 tools=tools or [],
                 stream=True  # Enable streaming
             )
@@ -240,6 +247,10 @@ class StreamManager:
                 model=model,
                 input=message,
                 previous_response_id=previous_response_id,
+                instructions=get_system_prompt(),
+                temperature=self.settings.openai_temperature,
+                top_p=self.settings.openai_top_p,
+                max_output_tokens=self.settings.openai_max_output_tokens,
                 tools=tools,
                 stream=True  # Enable streaming
             )

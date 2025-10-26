@@ -16,3 +16,8 @@ venv/
 *.log
 logs/
 
+# Obsolete files and directories
+*_OBSELETE*
+*_OBSELETE/
+*_DELETE*
+*_DELETE/

@@ -15,6 +15,11 @@ class Settings(BaseSettings):
     openai_api_key: str = ""
 
     openai_model_name: str = "gpt-4o-mini"
+    
+    # OpenAI Model Parameters
+    openai_temperature: float = 0.1  # Creativity vs consistency (0.0-2.0)
+    openai_top_p: float = 0.9  # Nucleus sampling parameter (0.0-1.0)
+    openai_max_output_tokens: int = 2000  # Maximum response length
 
     # Application Configuration
     app_name: str = "Drug Recommendation Chatbot"
@@ -23,6 +28,9 @@ class Settings(BaseSettings):
 
     # Vector store configuration
     vector_store_ttl: int = 3600  # 1 hour in seconds
+    
+    # File paths configuration
+    clinical_guidelines_directory: str = "clinical_guidelines"  # Path relative to project root
 
     class Config:
         """Pydantic configuration."""

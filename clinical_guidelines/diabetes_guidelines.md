@@ -39,3 +39,5 @@
 - Avoid metformin in patients with eGFR < 30 mL/min/1.73m²
 - SGLT2 inhibitors require renal function monitoring
 - GLP-1 agonists may cause gastrointestinal side effects
+
+
