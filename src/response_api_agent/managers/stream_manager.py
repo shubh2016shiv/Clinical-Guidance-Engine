@@ -30,6 +30,9 @@ Emit citation chunk
     ↓
 Done!
 
+
+
+
 """
 
 import asyncio
@@ -634,3 +637,305 @@ class StreamManager:
                 error=str(e)
             )
             yield f"event: error\ndata: {str(e)}\n\n"
+
+
+
+
+
+# ------------------------------------------------------------
+"""
+# Streaming Citations in OpenAI Responses API
+
+## Overview
+
+The Stream Manager handles real-time streaming responses from the OpenAI Responses API with proper citation handling. This documentation explains how streaming works and best practices for implementation.
+
+## Core Concepts
+
+### Basic Flow
+```
+User Query
+    ↓
+Start Streaming (stream=True)
+    ↓
+[ResponseCreatedEvent] → Capture response_id
+    ↓
+[ResponseTextDeltaEvent] → Stream text chunks to user
+    ↓
+[ResponseOutputTextAnnotationAddedEvent] → Track citations
+    ↓
+[ResponseFileSearchCallCompleted] → File search done
+    ↓
+[ResponseCompletedEvent] → Stream ends
+    ↓
+Call responses.retrieve(response_id) → Get complete response
+    ↓
+Extract annotations from response.output[1].content[0].annotations
+    ↓
+Format citations
+    ↓
+Emit citation chunk
+    ↓
+Done!
+```
+
+## Stream Event Types
+
+During streaming, the Responses API emits these events in a specific sequence. Each event serves a distinct purpose in the streaming response lifecycle:
+
+| Event Type | Contains | When Emitted | Purpose & Data Structure |
+|------------|----------|--------------|---------------------------|
+| **ResponseCreatedEvent** | `response.id` | Once at start | **Response Initialization**: Signals the start of a new response. Contains the unique response ID needed for retrieving the complete response after streaming ends. This is the first event emitted and is crucial for citation handling. |
+| **ResponseTextDeltaEvent** | Text chunks (`delta`) | Multiple times during generation | **Content Streaming**: The core streaming mechanism. Each event contains a `delta` field with incremental text chunks as the model generates the response. These are emitted token-by-token for real-time display to users. |
+| **ResponseOutputTextAnnotationAddedEvent** | Annotation objects | When citations appear in text | **Citation Markers**: Emitted when the model references external sources (like files from file_search). Contains annotation objects with metadata about the referenced documents. These are emitted inline as citation markers like `[1]` appear in the generated text. |
+| **ResponseFileSearchCallCompleted** | Search completion status | After file search tool execution | **Tool Completion Signal**: Indicates that a file_search tool call has finished executing. This happens when the model uses the file_search tool to retrieve information from uploaded documents. |
+| **ResponseCompletedEvent** | Final status | Once at end | **Stream Termination**: The final event indicating the response generation is complete. After this event, no more content will be streamed, signaling the end of the real-time response phase. |
+
+### Event Sequence and Data Flow
+
+The events follow this precise chronological order:
+
+```
+1. ResponseCreatedEvent
+   → Capture response_id (critical for citations!)
+
+2. ResponseTextDeltaEvent (repeated)
+   → Stream text chunks to user in real-time
+   → May interleave with annotation events
+
+3. ResponseOutputTextAnnotationAddedEvent (when citations occur)
+   → Track that citations exist in the response
+   → Store annotation data for later processing
+
+4. ResponseFileSearchCallCompleted (if file_search was used)
+   → Confirm external document search completed
+
+5. ResponseCompletedEvent
+   → End of streaming phase
+   → Time to retrieve complete response for citations
+```
+
+### Critical Event Details
+
+#### ResponseCreatedEvent
+```python
+# Example structure (based on OpenAI API)
+{
+    "type": "response.created",
+    "response": {
+        "id": "resp_abc1234567890",
+        "created_at": 1234567890.0,
+        "model": "gpt-4o-mini",
+        "status": "in_progress"
+    }
+}
+```
+**Key Field**: `response.id` - This ID is essential for retrieving the complete response after streaming ends.
+
+#### ResponseTextDeltaEvent
+```python
+# Example structure
+{
+    "type": "response.output_text.delta",
+    "delta": "According to the clinical guidelines",
+    "content_index": 0
+}
+```
+**Key Field**: `delta` - Contains the actual text content to display to the user.
+
+#### ResponseOutputTextAnnotationAddedEvent
+```python
+# Example structure
+{
+    "type": "response.output_text.annotation.added",
+    "annotation": {
+        "type": "file_citation",
+        "file_citation": {
+            "file_id": "file_abc123",
+            "filename": "clinical_guidelines.pdf",
+            "quote": "relevant text from the document"
+        },
+        "index": 1
+    },
+    "content_index": 0
+}
+```
+**Key Field**: `annotation` - Contains citation metadata including filename and quote from the referenced document.
+
+#### ResponseFileSearchCallCompleted
+```python
+# Example structure
+{
+    "type": "response.file_search_call.completed",
+    "status": "completed",
+    "file_search_call": {
+        "id": "call_abc123",
+        "status": "completed"
+    }
+}
+```
+**Key Field**: `status` - Confirms the file search operation completed successfully.
+
+#### ResponseCompletedEvent
+```python
+# Example structure
+{
+    "type": "response.completed",
+    "response": {
+        "id": "resp_abc1234567890",
+        "status": "completed",
+        "usage": {
+            "prompt_tokens": 150,
+            "completion_tokens": 200,
+            "total_tokens": 350
+        }
+    }
+}
+```
+**Key Field**: `response.status` - Should be "completed" indicating successful generation.
+
+### Why These Events Matter for Citation Handling
+
+The streaming events are specifically designed to handle the complexity of real-time citation management:
+
+1. **ResponseCreatedEvent** → **Critical Foundation**
+   - Without capturing `response.id` here, you cannot retrieve the complete response later
+   - This is the single point where the response ID becomes available
+   - Missing this event breaks the entire citation retrieval process
+
+2. **ResponseTextDeltaEvent** → **Real-time User Experience**
+   - Provides immediate text feedback to users
+   - Maintains responsive UI during long responses
+   - Can be displayed incrementally as content is generated
+
+3. **ResponseOutputTextAnnotationAddedEvent** → **Citation Detection**
+   - Real-time indication that citations exist in the response
+   - Provides annotation metadata as citations are generated
+   - Links text content with source documents
+   - Enables inline citation markers (like `[1]`) to appear with the text
+
+4. **ResponseFileSearchCallCompleted** → **Tool Execution Confirmation**
+   - Confirms that file_search tool executed successfully
+   - Indicates that external document content was retrieved
+   - Helps predict whether citations will be present in the final response
+
+5. **ResponseCompletedEvent** → **Citation Retrieval Trigger**
+   - Signals that streaming phase is complete
+   - Indicates it's safe to retrieve the complete response
+   - Marks the transition from streaming to citation extraction
+
+### Event Timing and Dependencies
+
+The events have strict timing dependencies:
+
+- **ResponseCreatedEvent** must be captured before any other events
+- **ResponseTextDeltaEvent** and **ResponseOutputTextAnnotationAddedEvent** can interleave
+- **ResponseFileSearchCallCompleted** only occurs if file_search tool is used
+- **ResponseCompletedEvent** is always the final event in the sequence
+
+### Error Handling Considerations
+
+Each event type requires specific error handling:
+
+- **ResponseCreatedEvent**: If missing, streaming cannot proceed (fatal error)
+- **ResponseTextDeltaEvent**: Can be skipped if text processing fails (non-fatal)
+- **ResponseOutputTextAnnotationAddedEvent**: Can be ignored if citation processing fails (non-fatal)
+- **ResponseFileSearchCallCompleted**: Indicates tool success/failure (informational)
+- **ResponseCompletedEvent**: If missing, may indicate streaming error (potential issue)
+
+## Implementation Guide
+
+### 1. Capture Response ID During Streaming
+```python
+if chunk_type == "ResponseCreatedEvent" and hasattr(chunk, 'response'):
+    response_id = chunk.response.id  # Save this!
+```
+
+### 2. Stream Text in Real-time
+```python
+elif chunk_type == "ResponseTextDeltaEvent" and hasattr(chunk, 'delta'):
+    text = chunk.delta
+    if text and text.strip():
+        yield {
+            "text": text,
+            "response_id": response_id
+        }
+```
+
+### 3. After Stream Ends, Get Complete Response
+```python
+final_response = await self.async_client.responses.retrieve(response_id)
+citations = await self.citation_manager.extract_citations_from_response(final_response)
+```
+
+### 4. Emit Citations as Final Chunk
+```python
+if citations:
+    citation_text = "\\n\\n" + self.citation_manager.format_citations_section(citations)
+    yield {
+        "text": citation_text,
+        "response_id": response_id,
+        "is_citation": True
+    }
+```
+
+## Best Practices
+
+### Response ID Management
+- Always capture response_id from ResponseCreatedEvent
+- Store it for the duration of the stream
+- Use it to retrieve the complete response after streaming
+
+### Citation Handling
+- Don't try to extract complete citations during streaming
+- Wait for stream completion
+- Use responses.retrieve() to get full response
+- Extract citations from complete response object
+
+### Error Handling
+- Wrap streaming in try-except blocks
+- Log errors with appropriate context
+- Continue processing other chunks on error
+- Provide meaningful error messages
+
+### Performance Tips
+- Only retrieve final response if citations are expected
+- Consider conditional retrieval based on tool usage
+- Log key events for debugging
+- Use appropriate chunk processing
+
+
+## Debugging Tips
+
+### Common Issues
+1. Response ID not captured
+2. Final response not retrieved
+3. Citations not extracted
+4. Citations not emitted
+
+### Debug Logging
+```python
+self.logger.info(
+    "Stream status",
+    component="Stream",
+    subcomponent="StreamResponse",
+    response_id=response_id,
+    chunk_count=chunk_count,
+    citation_count=len(citations)
+)
+```
+
+## Summary
+
+The Stream Manager provides robust handling of streaming responses with proper citation support. Key points:
+
+1. Capture response_id early
+2. Stream text chunks in real-time
+3. Retrieve complete response after stream
+4. Extract and emit citations as final chunk
+5. Handle errors gracefully
+6. Log key events for debugging
+
+For detailed implementation, refer to the stream_response() and stream_chat_continuation() methods in this class.
+"""
+# ------------------------------------------------------------
