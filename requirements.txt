@@ -4,3 +4,4 @@ structlog>=24.1.0
 pydantic_settings
 pre-commit
 ruff
+google-generativeai>=0.8.0

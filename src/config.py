@@ -18,7 +18,7 @@ class Settings(BaseSettings):
         default="", description="OpenAI API Key loaded from .env"
     )
     openai_model_name: str = Field(
-        default="gpt-4o-mini",
+        default="gpt-4",
         description="OpenAI model name, can be overridden in .env",
     )
 
@@ -33,16 +33,25 @@ class Settings(BaseSettings):
         default=2000, description="Maximum response length"
     )
 
+    # Gemini API Configuration
+    gemini_api_key: str = Field(
+        default="", description="Google Gemini API Key loaded from .env"
+    )
+    gemini_embedding_model: str = Field(
+        default="gemini-embedding-001", description="Gemini embedding model name"
+    )
+    gemini_embedding_dimension: int = Field(
+        default=1536, description="Dimension size for Gemini embeddings"
+    )
+
     # Application Configuration
     app_name: str = "Drug Recommendation Chatbot"
     app_version: str = "1.0.0"
     debug_mode: bool = False
 
     # Response Mode Configuration
-    enable_streaming: bool = (
-        False  # Global streaming mode control (default: False for standard responses)
-    )
-    enable_cleanup: bool = False  # Control resource cleanup at shutdown (default: True for proper resource management)
+    enable_streaming: bool = False  # Global streaming mode control
+    enable_cleanup: bool = False  # Control resource cleanup at shutdown
 
     # Vector store configuration
     vector_store_ttl: int = 3600  # 1 hour in seconds
