@@ -43,7 +43,7 @@ class Settings(BaseSettings):
     debug_mode: bool = False
     
     # Response Mode Configuration
-    enable_streaming: bool = False  # Global streaming mode control (default: False for standard responses)
+    enable_streaming: bool = True  # Global streaming mode control (default: False for standard responses)
     enable_cleanup: bool = False     # Control resource cleanup at shutdown (default: True for proper resource management)
 
     # Vector store configuration
