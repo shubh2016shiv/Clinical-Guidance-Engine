@@ -15,45 +15,46 @@ class Settings(BaseSettings):
 
     # OpenAI API Configuration
     openai_api_key: str = Field(
-        default="",
-        description="OpenAI API Key loaded from .env"
+        default="", description="OpenAI API Key loaded from .env"
     )
     openai_model_name: str = Field(
         default="gpt-4o-mini",
-        description="OpenAI model name, can be overridden in .env"
+        description="OpenAI model name, can be overridden in .env",
     )
-    
+
     # OpenAI Model Parameters
     openai_temperature: float = Field(
-        default=0.1,
-        description="Creativity vs consistency (0.0-2.0)"
+        default=0.1, description="Creativity vs consistency (0.0-2.0)"
     )
     openai_top_p: float = Field(
-        default=0.9,
-        description="Nucleus sampling parameter (0.0-1.0)"
+        default=0.9, description="Nucleus sampling parameter (0.0-1.0)"
     )
     openai_max_output_tokens: int = Field(
-        default=2000,
-        description="Maximum response length"
+        default=2000, description="Maximum response length"
     )
 
     # Application Configuration
     app_name: str = "Drug Recommendation Chatbot"
     app_version: str = "1.0.0"
     debug_mode: bool = False
-    
+
     # Response Mode Configuration
-    enable_streaming: bool = True  # Global streaming mode control (default: False for standard responses)
-    enable_cleanup: bool = False     # Control resource cleanup at shutdown (default: True for proper resource management)
+    enable_streaming: bool = (
+        False  # Global streaming mode control (default: False for standard responses)
+    )
+    enable_cleanup: bool = False  # Control resource cleanup at shutdown (default: True for proper resource management)
 
     # Vector store configuration
     vector_store_ttl: int = 3600  # 1 hour in seconds
-    
+
     # File paths configuration
-    clinical_guidelines_directory: str = "clinical_guidelines"  # Path relative to project root
+    clinical_guidelines_directory: str = (
+        "clinical_guidelines"  # Path relative to project root
+    )
 
     class Config:
         """Pydantic configuration."""
+
         # Get the project root directory (parent of src directory)
         project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         env_file = os.path.join(project_root, ".env")

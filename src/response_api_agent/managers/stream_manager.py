@@ -35,14 +35,14 @@ Done!
 
 """
 
-import asyncio
 from typing import Dict, Any, List, Optional, AsyncGenerator, Callable
 from openai import OpenAI, AsyncOpenAI
 from src.config import get_settings
-from src.response_api_agent.managers.exceptions import StreamConnectionError, ContentParsingError
+from src.response_api_agent.managers.exceptions import StreamConnectionError
 from src.response_api_agent.managers.citation_manager import CitationManager
 from src.logs import get_component_logger, time_execution
 from src.prompts.asclepius_system_prompt import get_system_prompt
+
 
 class StreamManager:
     """
@@ -66,7 +66,7 @@ class StreamManager:
         model: Optional[str] = None,
         previous_response_id: Optional[str] = None,
         tools: Optional[List[Dict[str, Any]]] = None,
-        callback: Optional[Callable[[str], None]] = None
+        callback: Optional[Callable[[str], None]] = None,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """
         Stream a response from the OpenAI Responses API.
@@ -91,7 +91,7 @@ class StreamManager:
                 model=model,
                 has_previous_response=bool(previous_response_id),
                 has_tools=bool(tools),
-                message_length=len(message)
+                message_length=len(message),
             )
 
             # Create streaming response
@@ -101,7 +101,7 @@ class StreamManager:
                 previous_response_id=previous_response_id,
                 instructions=get_system_prompt(),
                 tools=tools or [],
-                stream=True  # Enable streaming
+                stream=True,  # Enable streaming
             )
 
             chunk_count = 0
@@ -111,7 +111,7 @@ class StreamManager:
             self.logger.info(
                 "Beginning to process stream chunks",
                 component="Stream",
-                subcomponent="StreamResponse"
+                subcomponent="StreamResponse",
             )
 
             # Process streaming response
@@ -121,17 +121,21 @@ class StreamManager:
                     chunk_type = type(chunk).__name__
 
                     # Extract response ID from ResponseCreatedEvent
-                    if chunk_type == "ResponseCreatedEvent" and hasattr(chunk, 'response'):
+                    if chunk_type == "ResponseCreatedEvent" and hasattr(
+                        chunk, "response"
+                    ):
                         response_id = chunk.response.id
                         self.logger.info(
                             "Extracted response ID from ResponseCreatedEvent",
                             component="Stream",
                             subcomponent="StreamResponse",
-                            response_id=response_id
+                            response_id=response_id,
                         )
 
                     # Handle ResponseTextDeltaEvent - this is where the actual text content is
-                    elif chunk_type == "ResponseTextDeltaEvent" and hasattr(chunk, 'delta'):
+                    elif chunk_type == "ResponseTextDeltaEvent" and hasattr(
+                        chunk, "delta"
+                    ):
                         text = chunk.delta
                         if text and text.strip():
                             chunk_count += 1
@@ -139,32 +143,29 @@ class StreamManager:
                             if callback:
                                 callback(text)
                             print(text, end="", flush=True)
-                            yield {
-                                "text": text,
-                                "response_id": response_id
-                            }
+                            yield {"text": text, "response_id": response_id}
 
                     # CRITICAL: Capture annotation events during streaming
                     # These events contain file citation information
                     elif chunk_type == "ResponseOutputTextAnnotationAddedEvent":
-                        if hasattr(chunk, 'annotation'):
+                        if hasattr(chunk, "annotation"):
                             collected_annotations.append(chunk.annotation)
                             self.logger.info(
                                 "Annotation captured during stream",
                                 component="Stream",
                                 subcomponent="StreamResponse",
                                 annotation_count=len(collected_annotations),
-                                has_filename=hasattr(chunk.annotation, 'filename')
+                                has_filename=hasattr(chunk.annotation, "filename"),
                             )
 
                     # Also check for annotations in other potential event types
-                    elif hasattr(chunk, 'annotations') and chunk.annotations:
+                    elif hasattr(chunk, "annotations") and chunk.annotations:
                         collected_annotations.extend(chunk.annotations)
                         self.logger.info(
                             "Multiple annotations found in chunk",
                             component="Stream",
                             subcomponent="StreamResponse",
-                            annotation_count=len(chunk.annotations)
+                            annotation_count=len(chunk.annotations),
                         )
 
                     # Log file search completion for debugging
@@ -172,7 +173,7 @@ class StreamManager:
                         self.logger.info(
                             "File search call completed",
                             component="Stream",
-                            subcomponent="StreamResponse"
+                            subcomponent="StreamResponse",
                         )
 
                     else:
@@ -182,7 +183,7 @@ class StreamManager:
                             component="Stream",
                             subcomponent="StreamResponse",
                             chunk_type=chunk_type,
-                            has_annotations=hasattr(chunk, 'annotations')
+                            has_annotations=hasattr(chunk, "annotations"),
                         )
 
                 except Exception as e:
@@ -191,7 +192,7 @@ class StreamManager:
                         component="Stream",
                         subcomponent="StreamResponse",
                         error=str(e),
-                        chunk_type=type(chunk).__name__
+                        chunk_type=type(chunk).__name__,
                     )
                     # Don't raise - continue processing other chunks
                     continue
@@ -204,7 +205,7 @@ class StreamManager:
                         component="Stream",
                         subcomponent="StreamResponse",
                         response_id=response_id,
-                        annotations_during_stream=len(collected_annotations)
+                        annotations_during_stream=len(collected_annotations),
                     )
 
                     # Get the final response to extract complete citation information
@@ -213,30 +214,37 @@ class StreamManager:
                     )
 
                     # Extract citations using the citation manager
-                    citations = await self.citation_manager.extract_citations_from_response(final_response)
+                    citations = (
+                        await self.citation_manager.extract_citations_from_response(
+                            final_response
+                        )
+                    )
 
                     self.logger.info(
                         "Citations extracted from final response",
                         component="Stream",
                         subcomponent="StreamResponse",
-                        citation_count=len(citations)
+                        citation_count=len(citations),
                     )
 
                     # Emit citations as a separate chunk
                     if citations:
-                        citation_text = "\n\n" + self.citation_manager.format_citations_section(citations)
+                        citation_text = (
+                            "\n\n"
+                            + self.citation_manager.format_citations_section(citations)
+                        )
                         print(citation_text)  # Print to console
                         yield {
                             "text": citation_text,
                             "response_id": response_id,
                             "is_citation": True,  # Mark as citation chunk
-                            "citations": citations  # Include citation data
+                            "citations": citations,  # Include citation data
                         }
                     else:
                         self.logger.warning(
                             "No citations found in final response",
                             component="Stream",
-                            subcomponent="StreamResponse"
+                            subcomponent="StreamResponse",
                         )
 
                 except Exception as e:
@@ -245,13 +253,13 @@ class StreamManager:
                         component="Stream",
                         subcomponent="StreamResponse",
                         error=str(e),
-                        error_type=type(e).__name__
+                        error_type=type(e).__name__,
                     )
             else:
                 self.logger.warning(
                     "No response_id available for citation extraction",
                     component="Stream",
-                    subcomponent="StreamResponse"
+                    subcomponent="StreamResponse",
                 )
 
             self.logger.info(
@@ -259,7 +267,7 @@ class StreamManager:
                 component="Stream",
                 subcomponent="StreamResponse",
                 chunk_count=chunk_count,
-                final_citation_count=len(citations) if response_id else 0
+                final_citation_count=len(citations) if response_id else 0,
             )
 
         except Exception as e:
@@ -268,7 +276,7 @@ class StreamManager:
                 component="Stream",
                 subcomponent="StreamResponse",
                 error=str(e),
-                error_type=type(e).__name__
+                error_type=type(e).__name__,
             )
             raise StreamConnectionError(f"Failed to stream response: {str(e)}")
 
@@ -279,7 +287,7 @@ class StreamManager:
         message: str,
         model: Optional[str] = None,
         tools: Optional[List[Dict[str, Any]]] = None,
-        callback: Optional[Callable[[str], None]] = None
+        callback: Optional[Callable[[str], None]] = None,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """
         Stream a continuation of an existing chat.
@@ -304,7 +312,7 @@ class StreamManager:
                 chat_id=chat_id,
                 model=model,
                 has_tools=bool(tools),
-                message_length=len(message)
+                message_length=len(message),
             )
 
             # Create streaming response with previous_response_id
@@ -314,7 +322,7 @@ class StreamManager:
                 previous_response_id=chat_id,  # Use chat_id as previous_response_id
                 instructions=get_system_prompt(),
                 tools=tools or [],
-                stream=True  # Enable streaming
+                stream=True,  # Enable streaming
             )
 
             chunk_count = 0
@@ -328,40 +336,41 @@ class StreamManager:
                     chunk_type = type(chunk).__name__
 
                     # Extract response ID from ResponseCreatedEvent
-                    if chunk_type == "ResponseCreatedEvent" and hasattr(chunk, 'response'):
+                    if chunk_type == "ResponseCreatedEvent" and hasattr(
+                        chunk, "response"
+                    ):
                         response_id = chunk.response.id
                         self.logger.info(
                             "Extracted response ID from chat continuation",
                             component="Stream",
                             subcomponent="StreamChatContinuation",
-                            response_id=response_id
+                            response_id=response_id,
                         )
 
                     # Handle ResponseTextDeltaEvent
-                    elif chunk_type == "ResponseTextDeltaEvent" and hasattr(chunk, 'delta'):
+                    elif chunk_type == "ResponseTextDeltaEvent" and hasattr(
+                        chunk, "delta"
+                    ):
                         text = chunk.delta
                         if text and text.strip():
                             chunk_count += 1
 
                             if callback:
                                 callback(text)
-                            yield {
-                                "text": text,
-                                "response_id": response_id
-                            }
+                            yield {"text": text, "response_id": response_id}
 
                     # CRITICAL: Capture annotation events
                     elif chunk_type == "ResponseOutputTextAnnotationAddedEvent":
-                        if hasattr(chunk, 'annotation'):
+                        if hasattr(chunk, "annotation"):
                             collected_annotations.append(chunk.annotation)
                             self.logger.info(
                                 "Annotation captured during chat continuation",
                                 component="Stream",
                                 subcomponent="StreamChatContinuation",
-                                annotation_count=len(collected_annotations)
+                                annotation_count=len(collected_annotations),
                             )
 
-                    elif hasattr(chunk, 'annotations') and chunk.annotations:
+                    elif hasattr(chunk, "annotations") and chunk.annotations:
                         collected_annotations.extend(chunk.annotations)
 
                     else:
@@ -369,7 +378,7 @@ class StreamManager:
                             "Other chunk in chat continuation",
                             component="Stream",
                             subcomponent="StreamChatContinuation",
-                            chunk_type=chunk_type
+                            chunk_type=chunk_type,
                         )
 
                 except Exception as e:
@@ -378,7 +387,7 @@ class StreamManager:
                         component="Stream",
                         subcomponent="StreamChatContinuation",
                         chat_id=chat_id,
-                        error=str(e)
+                        error=str(e),
                     )
                     continue
 
@@ -389,7 +398,7 @@ class StreamManager:
                         "Retrieving final response for citations (chat continuation)",
                         component="Stream",
                         subcomponent="StreamChatContinuation",
-                        response_id=response_id
+                        response_id=response_id,
                     )
 
                     final_response = await self.async_client.responses.retrieve(
@@ -397,23 +406,30 @@ class StreamManager:
                     )
 
                     # Extract citations
-                    citations = await self.citation_manager.extract_citations_from_response(final_response)
+                    citations = (
+                        await self.citation_manager.extract_citations_from_response(
+                            final_response
+                        )
+                    )
 
                     self.logger.info(
                         "Citations extracted (chat continuation)",
                         component="Stream",
                         subcomponent="StreamChatContinuation",
-                        citation_count=len(citations)
+                        citation_count=len(citations),
                     )
 
                     # Emit citations
                     if citations:
-                        citation_text = "\n\n" + self.citation_manager.format_citations_section(citations)
+                        citation_text = (
+                            "\n\n"
+                            + self.citation_manager.format_citations_section(citations)
+                        )
                         yield {
                             "text": citation_text,
                             "response_id": response_id,
                             "is_citation": True,
-                            "citations": citations
+                            "citations": citations,
                         }
 
                 except Exception as e:
@@ -421,7 +437,7 @@ class StreamManager:
                         "Error retrieving final response for citations (chat continuation)",
                         component="Stream",
                         subcomponent="StreamChatContinuation",
-                        error=str(e)
+                        error=str(e),
                     )
 
             self.logger.info(
@@ -429,7 +445,7 @@ class StreamManager:
                 component="Stream",
                 subcomponent="StreamChatContinuation",
                 chat_id=chat_id,
-                chunk_count=chunk_count
+                chunk_count=chunk_count,
             )
 
         except Exception as e:
@@ -438,7 +454,7 @@ class StreamManager:
                 component="Stream",
                 subcomponent="StreamChatContinuation",
                 chat_id=chat_id,
-                error=str(e)
+                error=str(e),
             )
             raise StreamConnectionError(f"Failed to stream chat continuation: {str(e)}")
 
@@ -450,7 +466,7 @@ class StreamManager:
         model: Optional[str] = None,
         previous_response_id: Optional[str] = None,
         callback: Optional[Callable[[str], None]] = None,
-        tool_callback: Optional[Callable[[Dict[str, Any]], None]] = None
+        tool_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """
         Stream a response with tools, handling tool calls.
@@ -476,7 +492,7 @@ class StreamManager:
                 model=model,
                 has_previous_response=bool(previous_response_id),
                 tool_count=len(tools),
-                message_length=len(message)
+                message_length=len(message),
             )
 
             # Create streaming response with tools
@@ -486,7 +502,7 @@ class StreamManager:
                 previous_response_id=previous_response_id,
                 instructions=get_system_prompt(),
                 tools=tools,
-                stream=True  # Enable streaming
+                stream=True,  # Enable streaming
             )
 
             chunk_count = 0
@@ -499,18 +515,20 @@ class StreamManager:
                     chunk_type = type(chunk).__name__
 
                     # Handle ResponseTextDeltaEvent for text content
-                    if chunk_type == "ResponseTextDeltaEvent" and hasattr(chunk, 'delta'):
+                    if chunk_type == "ResponseTextDeltaEvent" and hasattr(
+                        chunk, "delta"
+                    ):
                         text = chunk.delta
                         if text and text.strip():
                             chunk_count += 1
-                            result['text'] = text
+                            result["text"] = text
                             if callback:
                                 callback(text)
 
                     # Handle tool calls (this would be in different event types)
-                    if hasattr(chunk, 'tool_calls') and chunk.tool_calls:
+                    if hasattr(chunk, "tool_calls") and chunk.tool_calls:
                         tool_call_count += 1
-                        result['tool_calls'] = chunk.tool_calls
+                        result["tool_calls"] = chunk.tool_calls
                         if tool_callback:
                             tool_callback(chunk.tool_calls)
 
@@ -518,7 +536,7 @@ class StreamManager:
                             "Received tool call in stream",
                             component="Stream",
                             subcomponent="StreamWithTools",
-                            tool_call_count=tool_call_count
+                            tool_call_count=tool_call_count,
                         )
 
                     if result:
@@ -529,7 +547,7 @@ class StreamManager:
                             "Non-text chunk in stream with tools",
                             component="Stream",
                             subcomponent="StreamWithTools",
-                            chunk_type=chunk_type
+                            chunk_type=chunk_type,
                         )
 
                 except Exception as e:
@@ -537,7 +555,7 @@ class StreamManager:
                         "Error processing response chunk with tools",
                         component="Stream",
                         subcomponent="StreamWithTools",
-                        error=str(e)
+                        error=str(e),
                     )
                     # Don't raise - continue processing other chunks
                     continue
@@ -547,7 +565,7 @@ class StreamManager:
                 component="Stream",
                 subcomponent="StreamWithTools",
                 chunk_count=chunk_count,
-                tool_call_count=tool_call_count
+                tool_call_count=tool_call_count,
             )
 
         except Exception as e:
@@ -555,9 +573,11 @@ class StreamManager:
                 "Streaming error with tools",
                 component="Stream",
                 subcomponent="StreamWithTools",
-                error=str(e)
+                error=str(e),
             )
-            raise StreamConnectionError(f"Failed to stream response with tools: {str(e)}")
+            raise StreamConnectionError(
+                f"Failed to stream response with tools: {str(e)}"
+            )
 
     @time_execution("Stream", "CreateSSEGenerator")
     async def create_sse_generator(
@@ -565,7 +585,7 @@ class StreamManager:
         message: str,
         chat_id: Optional[str] = None,
         model: Optional[str] = None,
-        tools: Optional[List[Dict[str, Any]]] = None
+        tools: Optional[List[Dict[str, Any]]] = None,
     ) -> AsyncGenerator[str, None]:
         """
         Create a Server-Sent Events (SSE) generator for streaming responses.
@@ -587,7 +607,7 @@ class StreamManager:
                 has_chat_id=bool(chat_id),
                 model=model or self.settings.openai_model_name,
                 has_tools=bool(tools),
-                message_length=len(message)
+                message_length=len(message),
             )
 
             chunk_count = 0
@@ -598,26 +618,30 @@ class StreamManager:
                     "Streaming chat continuation for SSE",
                     component="Stream",
                     subcomponent="CreateSSEGenerator",
-                    chat_id=chat_id
+                    chat_id=chat_id,
                 )
 
-                async for chunk in self.stream_chat_continuation(chat_id, message, model, tools):
+                async for chunk in self.stream_chat_continuation(
+                    chat_id, message, model, tools
+                ):
                     chunk_count += 1
                     # Format as SSE
                     import json
+
                     yield f"data: {json.dumps(chunk)}\n\n"
             else:
                 # Stream new chat
                 self.logger.info(
                     "Streaming new chat for SSE",
                     component="Stream",
-                    subcomponent="CreateSSEGenerator"
+                    subcomponent="CreateSSEGenerator",
                 )
 
                 async for chunk in self.stream_response(message, model, None, tools):
                     chunk_count += 1
                     # Format as SSE
                     import json
+
                     yield f"data: {json.dumps(chunk)}\n\n"
 
             # Signal completion
@@ -625,7 +649,7 @@ class StreamManager:
                 "SSE stream completed",
                 component="Stream",
                 subcomponent="CreateSSEGenerator",
-                chunk_count=chunk_count
+                chunk_count=chunk_count,
             )
             yield "event: close\ndata: [DONE]\n\n"
 
@@ -634,12 +658,9 @@ class StreamManager:
                 "SSE generator error",
                 component="Stream",
                 subcomponent="CreateSSEGenerator",
-                error=str(e)
+                error=str(e),
             )
             yield f"event: error\ndata: {str(e)}\n\n"
-
-
-
 
 
 # ------------------------------------------------------------

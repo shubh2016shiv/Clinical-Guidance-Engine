@@ -36,9 +36,8 @@ Response format:
 def get_system_prompt() -> str:
     """
     Get the healthcare agent system prompt.
-    
+
     Returns:
         The system prompt string for the AI agent.
     """
     return HEALTHCARE_AGENT_SYSTEM_PROMPT
-

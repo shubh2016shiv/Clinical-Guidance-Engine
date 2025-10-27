@@ -45,7 +45,7 @@ class AsclepiusHealthcareAgent:
         self.logger.info(
             "Asclepius Healthcare Agent initialized",
             component="AsclepiusHealthcareAgent",
-            subcomponent="Init"
+            subcomponent="Init",
         )
 
     async def initialize_knowledge_base(self) -> Optional[str]:
@@ -62,16 +62,18 @@ class AsclepiusHealthcareAgent:
             self.logger.info(
                 "Initializing clinical knowledge base",
                 component="AsclepiusHealthcareAgent",
-                subcomponent="InitializeKnowledgeBase"
+                subcomponent="InitializeKnowledgeBase",
             )
 
-            self._vector_store_id = await self.response_manager.create_vector_store_from_guidelines()
+            self._vector_store_id = (
+                await self.response_manager.create_vector_store_from_guidelines()
+            )
 
             self.logger.info(
                 "Clinical knowledge base ready",
                 component="AsclepiusHealthcareAgent",
                 subcomponent="InitializeKnowledgeBase",
-                vector_store_id=self._vector_store_id
+                vector_store_id=self._vector_store_id,
             )
 
             return self._vector_store_id
@@ -81,17 +83,17 @@ class AsclepiusHealthcareAgent:
                 "Failed to initialize clinical knowledge base",
                 component="AsclepiusHealthcareAgent",
                 subcomponent="InitializeKnowledgeBase",
-                error=str(e)
+                error=str(e),
             )
             # Continue without vector store - agent will still respond but without clinical context
             return None
 
     async def consult(
-            self,
-            query: str,
-            conversation_id: Optional[str] = None,
-            use_clinical_guidelines: bool = True,
-            streaming: bool = False
+        self,
+        query: str,
+        conversation_id: Optional[str] = None,
+        use_clinical_guidelines: bool = True,
+        streaming: bool = False,
     ) -> Dict[str, Any]:
         """
         Consult the agent on a healthcare or medication-related question.
@@ -122,7 +124,7 @@ class AsclepiusHealthcareAgent:
                 subcomponent="Consult",
                 query_length=len(query),
                 use_clinical_guidelines=use_clinical_guidelines,
-                streaming=streaming
+                streaming=streaming,
             )
 
             if streaming:
@@ -130,13 +132,13 @@ class AsclepiusHealthcareAgent:
                 stream_gen = self.response_manager.process_streaming_query(
                     user_message=query,
                     conversation_id=conversation_id,
-                    vector_store_id=vector_store_id
+                    vector_store_id=vector_store_id,
                 )
 
                 return {
                     "stream_generator": stream_gen,
                     "conversation_id": conversation_id,
-                    "guidelines_used": vector_store_id is not None
+                    "guidelines_used": vector_store_id is not None,
                 }
             else:
                 # Standard response
@@ -144,7 +146,7 @@ class AsclepiusHealthcareAgent:
                     user_message=query,
                     conversation_id=conversation_id,
                     vector_store_id=vector_store_id,
-                    enable_streaming=False
+                    enable_streaming=False,
                 )
 
                 return {
@@ -152,7 +154,7 @@ class AsclepiusHealthcareAgent:
                     "conversation_id": result["conversation_id"],
                     "tool_calls": result.get("tool_calls", []),
                     "citations": result.get("citations", []),
-                    "guidelines_used": vector_store_id is not None
+                    "guidelines_used": vector_store_id is not None,
                 }
 
         except Exception as e:
@@ -160,7 +162,7 @@ class AsclepiusHealthcareAgent:
                 "Failed to process consultation",
                 component="AsclepiusHealthcareAgent",
                 subcomponent="Consult",
-                error=str(e)
+                error=str(e),
             )
             raise ResponsesAPIError(f"Consultation failed: {str(e)}")
 
@@ -168,7 +170,7 @@ class AsclepiusHealthcareAgent:
         self,
         conversation_id: str,
         follow_up_query: str,
-        use_clinical_guidelines: bool = True
+        use_clinical_guidelines: bool = True,
     ) -> Dict[str, Any]:
         """
         Continue an ongoing healthcare consultation with a follow-up question.
@@ -185,10 +187,12 @@ class AsclepiusHealthcareAgent:
             query=follow_up_query,
             conversation_id=conversation_id,
             use_clinical_guidelines=use_clinical_guidelines,
-            streaming=False
+            streaming=False,
         )
 
-    async def retrieve_consultation_history(self, conversation_id: str) -> List[Dict[str, Any]]:
+    async def retrieve_consultation_history(
+        self, conversation_id: str
+    ) -> List[Dict[str, Any]]:
         """
         Retrieve the complete history of a healthcare consultation.
 
@@ -206,10 +210,12 @@ class AsclepiusHealthcareAgent:
                 "Retrieving consultation history",
                 component="AsclepiusHealthcareAgent",
                 subcomponent="RetrieveConsultationHistory",
-                conversation_id=conversation_id
+                conversation_id=conversation_id,
             )
 
-            history = await self.response_manager.retrieve_conversation_history(conversation_id)
+            history = await self.response_manager.retrieve_conversation_history(
+                conversation_id
+            )
 
             return history
 
@@ -219,7 +225,7 @@ class AsclepiusHealthcareAgent:
                 component="AsclepiusHealthcareAgent",
                 subcomponent="RetrieveConsultationHistory",
                 conversation_id=conversation_id,
-                error=str(e)
+                error=str(e),
             )
             raise ResponsesAPIError(f"History retrieval failed: {str(e)}")
 
@@ -237,12 +243,11 @@ class AsclepiusHealthcareAgent:
             self.logger.info(
                 "Closing Asclepius healthcare session",
                 component="AsclepiusHealthcareAgent",
-                subcomponent="CloseSession"
+                subcomponent="CloseSession",
             )
 
             cleanup_status = await self.response_manager.cleanup_resources(
-                vector_store_id=self._vector_store_id,
-                clear_all_caches=True
+                vector_store_id=self._vector_store_id, clear_all_caches=True
             )
 
             self._vector_store_id = None
@@ -251,7 +256,7 @@ class AsclepiusHealthcareAgent:
                 "Healthcare session closed successfully",
                 component="AsclepiusHealthcareAgent",
                 subcomponent="CloseSession",
-                status=cleanup_status
+                status=cleanup_status,
             )
 
             return cleanup_status
@@ -261,7 +266,7 @@ class AsclepiusHealthcareAgent:
                 "Error closing healthcare session",
                 component="AsclepiusHealthcareAgent",
                 subcomponent="CloseSession",
-                error=str(e)
+                error=str(e),
             )
             return {"error": str(e)}
 
@@ -279,7 +284,7 @@ class AsclepiusHealthcareAgent:
             "agent_type": "AsclepiusHealthcareAgent",
             "knowledge_base_ready": self._vector_store_id is not None,
             "vector_store_id": self._vector_store_id,
-            "response_manager": manager_info
+            "response_manager": manager_info,
         }
 
     # Convenience methods for backward compatibility and domain-specific usage
@@ -297,7 +302,7 @@ class AsclepiusHealthcareAgent:
         question: str,
         conversation_id: Optional[str] = None,
         use_clinical_context: bool = True,
-        streaming: bool = False
+        streaming: bool = False,
     ) -> Dict[str, Any]:
         """
         Convenience method for asking healthcare questions (backward compatibility).
@@ -315,5 +320,5 @@ class AsclepiusHealthcareAgent:
             query=question,
             conversation_id=conversation_id,
             use_clinical_guidelines=use_clinical_context,
-            streaming=streaming
+            streaming=streaming,
         )

@@ -1,3 +1,6 @@
 openai
 python-dotenv
 structlog>=24.1.0
+pydantic_settings
+pre-commit
+ruff

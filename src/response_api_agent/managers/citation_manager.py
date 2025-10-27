@@ -22,7 +22,9 @@ class CitationManager:
         self.logger = get_component_logger("Citation")
         self.client = client  # OpenAI client if needed for additional operations
 
-    async def extract_citations_from_response(self, response: Any) -> List[Dict[str, str]]:
+    async def extract_citations_from_response(
+        self, response: Any
+    ) -> List[Dict[str, str]]:
         """
         Extract citation information from Responses API response object.
 
@@ -43,7 +45,7 @@ class CitationManager:
             self.logger.info(
                 "Extracting citations from Responses API response",
                 component="Citation",
-                subcomponent="ExtractCitationsFromResponse"
+                subcomponent="ExtractCitationsFromResponse",
             )
 
             # Navigate to the annotations in the response
@@ -53,7 +55,7 @@ class CitationManager:
                 self.logger.warning(
                     "No annotations found in response",
                     component="Citation",
-                    subcomponent="ExtractCitationsFromResponse"
+                    subcomponent="ExtractCitationsFromResponse",
                 )
                 return citations
 
@@ -67,7 +69,7 @@ class CitationManager:
                 "Citations extracted successfully",
                 component="Citation",
                 subcomponent="ExtractCitationsFromResponse",
-                citation_count=len(citations)
+                citation_count=len(citations),
             )
 
             return citations
@@ -77,7 +79,7 @@ class CitationManager:
                 "Error extracting citations from response",
                 component="Citation",
                 subcomponent="ExtractCitationsFromResponse",
-                error=str(e)
+                error=str(e),
             )
             return []
 
@@ -97,11 +99,11 @@ class CitationManager:
         """
         try:
             # Check if response has output attribute
-            if not hasattr(response, 'output'):
+            if not hasattr(response, "output"):
                 self.logger.warning(
                     "Response does not have 'output' attribute",
                     component="Citation",
-                    subcomponent="ExtractAnnotations"
+                    subcomponent="ExtractAnnotations",
                 )
                 return []
 
@@ -112,7 +114,7 @@ class CitationManager:
                     "Response output does not have enough elements",
                     component="Citation",
                     subcomponent="ExtractAnnotations",
-                    output_length=len(output) if output else 0
+                    output_length=len(output) if output else 0,
                 )
                 return []
 
@@ -121,32 +123,32 @@ class CitationManager:
             assistant_message = output[1]
 
             # Try to get annotations from content[0].annotations
-            if hasattr(assistant_message, 'content') and assistant_message.content:
+            if hasattr(assistant_message, "content") and assistant_message.content:
                 if len(assistant_message.content) > 0:
                     content_item = assistant_message.content[0]
-                    if hasattr(content_item, 'annotations'):
+                    if hasattr(content_item, "annotations"):
                         self.logger.debug(
                             "Found annotations in content[0].annotations",
                             component="Citation",
                             subcomponent="ExtractAnnotations",
-                            annotation_count=len(content_item.annotations)
+                            annotation_count=len(content_item.annotations),
                         )
                         return content_item.annotations
 
             # Fallback: Try to get annotations directly from message
-            if hasattr(assistant_message, 'annotations'):
+            if hasattr(assistant_message, "annotations"):
                 self.logger.debug(
                     "Found annotations in message.annotations",
                     component="Citation",
                     subcomponent="ExtractAnnotations",
-                    annotation_count=len(assistant_message.annotations)
+                    annotation_count=len(assistant_message.annotations),
                 )
                 return assistant_message.annotations
 
             self.logger.warning(
                 "Could not find annotations in expected locations",
                 component="Citation",
-                subcomponent="ExtractAnnotations"
+                subcomponent="ExtractAnnotations",
             )
             return []
 
@@ -155,11 +157,13 @@ class CitationManager:
                 "Error extracting annotations",
                 component="Citation",
                 subcomponent="ExtractAnnotations",
-                error=str(e)
+                error=str(e),
             )
             return []
 
-    def _create_citation_from_annotation(self, annotation: Any, citation_number: int) -> Optional[Dict[str, str]]:
+    def _create_citation_from_annotation(
+        self, annotation: Any, citation_number: int
+    ) -> Optional[Dict[str, str]]:
         """
         Create a citation dictionary from an annotation object.
 
@@ -176,42 +180,38 @@ class CitationManager:
             Citation dictionary or None if extraction fails.
         """
         try:
-            citation = {
-                'number': str(citation_number),
-                'filename': '',
-                'file_id': ''
-            }
+            citation = {"number": str(citation_number), "filename": "", "file_id": ""}
 
             # Extract filename - this is the primary field we need
-            if hasattr(annotation, 'filename'):
-                citation['filename'] = str(annotation.filename)
-            elif isinstance(annotation, dict) and 'filename' in annotation:
-                citation['filename'] = str(annotation['filename'])
+            if hasattr(annotation, "filename"):
+                citation["filename"] = str(annotation.filename)
+            elif isinstance(annotation, dict) and "filename" in annotation:
+                citation["filename"] = str(annotation["filename"])
 
             # Extract file_id if available
-            if hasattr(annotation, 'file_id'):
-                citation['file_id'] = str(annotation.file_id)
-            elif isinstance(annotation, dict) and 'file_id' in annotation:
-                citation['file_id'] = str(annotation['file_id'])
+            if hasattr(annotation, "file_id"):
+                citation["file_id"] = str(annotation.file_id)
+            elif isinstance(annotation, dict) and "file_id" in annotation:
+                citation["file_id"] = str(annotation["file_id"])
 
             # If we don't have a filename, try to construct one from file_id
-            if not citation['filename'] and citation['file_id']:
-                citation['filename'] = f"Document {citation['file_id'][:8]}"
+            if not citation["filename"] and citation["file_id"]:
+                citation["filename"] = f"Document {citation['file_id'][:8]}"
                 self.logger.debug(
                     "Using file_id to construct filename",
                     component="Citation",
                     subcomponent="CreateCitation",
-                    filename=citation['filename']
+                    filename=citation["filename"],
                 )
 
             # Only return citation if we have at least a filename
-            if citation['filename']:
+            if citation["filename"]:
                 self.logger.debug(
                     "Citation created successfully",
                     component="Citation",
                     subcomponent="CreateCitation",
                     citation_number=citation_number,
-                    filename=citation['filename']
+                    filename=citation["filename"],
                 )
                 return citation
             else:
@@ -219,7 +219,7 @@ class CitationManager:
                     "Could not extract filename from annotation",
                     component="Citation",
                     subcomponent="CreateCitation",
-                    annotation_type=type(annotation).__name__
+                    annotation_type=type(annotation).__name__,
                 )
                 return None
 
@@ -228,7 +228,7 @@ class CitationManager:
                 "Error creating citation from annotation",
                 component="Citation",
                 subcomponent="CreateCitation",
-                error=str(e)
+                error=str(e),
             )
             return None
 
@@ -250,7 +250,7 @@ class CitationManager:
                 "Formatting citations section",
                 component="Citation",
                 subcomponent="FormatCitationsSection",
-                citation_count=len(citations)
+                citation_count=len(citations),
             )
 
             # Create References header
@@ -260,16 +260,16 @@ class CitationManager:
             seen_filenames = set()
             for citation in citations:
                 # Avoid duplicate filenames
-                if citation['filename'] not in seen_filenames:
+                if citation["filename"] not in seen_filenames:
                     ref_text = f"[{citation['number']}] {citation['filename']}"
                     references_text += ref_text + "\n"
-                    seen_filenames.add(citation['filename'])
+                    seen_filenames.add(citation["filename"])
 
             self.logger.info(
                 "Citations section formatted successfully",
                 component="Citation",
                 subcomponent="FormatCitationsSection",
-                unique_sources=len(seen_filenames)
+                unique_sources=len(seen_filenames),
             )
 
             return references_text
@@ -279,11 +279,13 @@ class CitationManager:
                 "Error formatting citations section",
                 component="Citation",
                 subcomponent="FormatCitationsSection",
-                error=str(e)
+                error=str(e),
             )
             return "## References\n\n[Error formatting citations]"
 
-    def append_citations_to_content(self, content: str, citations: List[Dict[str, str]]) -> str:
+    def append_citations_to_content(
+        self, content: str, citations: List[Dict[str, str]]
+    ) -> str:
         """
         Append formatted citations to content.
 
@@ -303,7 +305,7 @@ class CitationManager:
                 component="Citation",
                 subcomponent="AppendCitationsToContent",
                 content_length=len(content),
-                citation_count=len(citations)
+                citation_count=len(citations),
             )
 
             # Format citations section
@@ -319,7 +321,7 @@ class CitationManager:
                 "Citations appended successfully",
                 component="Citation",
                 subcomponent="AppendCitationsToContent",
-                final_length=len(result)
+                final_length=len(result),
             )
 
             return result
@@ -329,12 +331,14 @@ class CitationManager:
                 "Error appending citations to content",
                 component="Citation",
                 subcomponent="AppendCitationsToContent",
-                error=str(e)
+                error=str(e),
             )
             return content
 
     # Legacy method for backward compatibility
-    async def extract_citations_from_tool_calls(self, tool_calls: List[Any]) -> List[Dict[str, str]]:
+    async def extract_citations_from_tool_calls(
+        self, tool_calls: List[Any]
+    ) -> List[Dict[str, str]]:
         """
         Legacy method - tool_calls don't contain citation info in Responses API.
 
@@ -351,6 +355,6 @@ class CitationManager:
             "extract_citations_from_tool_calls() called but tool_calls don't contain "
             "citation information in Responses API. Use extract_citations_from_response() instead.",
             component="Citation",
-            subcomponent="ExtractCitationsFromToolCalls"
+            subcomponent="ExtractCitationsFromToolCalls",
         )
         return []
