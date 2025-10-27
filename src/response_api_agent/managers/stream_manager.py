@@ -5,10 +5,12 @@ This module provides functionality to stream responses from the OpenAI Responses
 using Server-Sent Events (SSE).
 """
 
+import asyncio
 from typing import Dict, Any, List, Optional, AsyncGenerator, Callable
 from openai import OpenAI, AsyncOpenAI
 from src.config import get_settings
 from src.response_api_agent.managers.exceptions import StreamConnectionError, ContentParsingError
+from src.response_api_agent.managers.citation_manager import CitationManager
 from src.logs import get_component_logger, time_execution
 from src.prompts.asclepius_system_prompt import get_system_prompt
 
@@ -24,6 +26,7 @@ class StreamManager:
         self.settings = get_settings()
         self.client = OpenAI(api_key=self.settings.openai_api_key)
         self.async_client = AsyncOpenAI(api_key=self.settings.openai_api_key)
+        self.citation_manager = CitationManager(client=self.async_client)
         self.logger = get_component_logger("Stream")
 
     @time_execution("Stream", "StreamResponse")
@@ -73,6 +76,7 @@ class StreamManager:
             
             chunk_count = 0
             response_id = None
+            collected_tool_calls = []  # Track tool calls during stream
             self.logger.info(
                 "Beginning to process stream chunks",
                 component="Stream",
@@ -116,12 +120,16 @@ class StreamManager:
                                 "text": text,
                                 "response_id": response_id
                             }
-                        else:
-                            self.logger.debug(
-                                "Empty text in ResponseTextDeltaEvent",
-                                component="Stream",
-                                subcomponent="StreamResponse"
-                            )
+                    
+                    # Collect tool calls from stream
+                    if hasattr(chunk, 'tool_calls') and chunk.tool_calls:
+                        collected_tool_calls.extend(chunk.tool_calls)
+                        self.logger.info(
+                            "Tool calls found in stream",
+                            component="Stream",
+                            subcomponent="StreamResponse",
+                            tool_call_count=len(chunk.tool_calls)
+                        )
                     else:
                         # Log other chunk types for debugging
                         self.logger.debug(
@@ -130,7 +138,8 @@ class StreamManager:
                             subcomponent="StreamResponse",
                             chunk_type=chunk_type,
                             has_delta=hasattr(chunk, 'delta'),
-                            delta_value=getattr(chunk, 'delta', None) if hasattr(chunk, 'delta') else None
+                            has_tool_calls=hasattr(chunk, 'tool_calls'),
+                            chunk_attrs=dir(chunk)
                         )
                         
                 except Exception as e:
@@ -143,6 +152,69 @@ class StreamManager:
                     )
                     # Don't raise - continue processing other chunks
                     continue
+            
+            # Get final response to extract tool calls and citations
+            if response_id:
+                try:
+                    self.logger.info(
+                        "Retrieving final response for citations",
+                        component="Stream",
+                        subcomponent="StreamResponse",
+                        response_id=response_id
+                    )
+                    
+                    # Get the final response to extract tool calls
+                    final_response = await asyncio.to_thread(
+                        self.async_client.responses.retrieve,
+                        response_id=response_id
+                    )
+                    
+                    # Extract tool calls from final response
+                    tool_calls = []
+                    if hasattr(final_response, 'output') and final_response.output:
+                        for item in final_response.output:
+                            if hasattr(item, 'type') and 'call' in item.type:
+                                tool_calls.append(item)
+                    elif hasattr(final_response, 'tool_calls') and final_response.tool_calls:
+                        tool_calls = final_response.tool_calls
+                    
+                    self.logger.info(
+                        "Tool calls extracted from final response",
+                        component="Stream",
+                        subcomponent="StreamResponse",
+                        tool_call_count=len(tool_calls)
+                    )
+                    
+                    # Extract and emit citations
+                    if tool_calls:
+                        citations = await self.citation_manager.extract_citations_from_response(final_response)
+                        self.logger.info(
+                            "Citations extracted from tool calls",
+                            component="Stream",
+                            subcomponent="StreamResponse",
+                            citation_count=len(citations)
+                        )
+                        if citations:
+                            citation_text = "\n\n" + self.citation_manager.format_citations_section(citations)
+                            yield {
+                                "text": citation_text,
+                                "response_id": response_id,
+                                "is_citation": True  # Mark as citation chunk
+                            }
+                    else:
+                        self.logger.warning(
+                            "No tool calls found in final response",
+                            component="Stream",
+                            subcomponent="StreamResponse"
+                        )
+                        
+                except Exception as e:
+                    self.logger.error(
+                        "Error retrieving final response for citations",
+                        component="Stream",
+                        subcomponent="StreamResponse",
+                        error=str(e)
+                    )
             
             self.logger.info(
                 "Response stream completed",
@@ -207,6 +279,7 @@ class StreamManager:
             
             chunk_count = 0
             response_id = None
+            collected_tool_calls = []  # Track tool calls during stream
             # Process streaming response
             async for chunk in stream:
                 try:
@@ -243,12 +316,10 @@ class StreamManager:
                                 "text": text,
                                 "response_id": response_id
                             }
-                        else:
-                            self.logger.debug(
-                                "Empty text in chat continuation ResponseTextDeltaEvent",
-                                component="Stream",
-                                subcomponent="StreamChatContinuation"
-                            )
+                    
+                    # Collect tool calls from stream
+                    if hasattr(chunk, 'tool_calls') and chunk.tool_calls:
+                        collected_tool_calls.extend(chunk.tool_calls)
                     else:
                         # Log other chunk types for debugging
                         self.logger.debug(
@@ -268,6 +339,69 @@ class StreamManager:
                     )
                     # Don't raise - continue processing other chunks
                     continue
+            
+            # Get final response to extract tool calls and citations
+            if response_id:
+                try:
+                    self.logger.info(
+                        "Retrieving final response for citations (chat continuation)",
+                        component="Stream",
+                        subcomponent="StreamChatContinuation",
+                        response_id=response_id
+                    )
+                    
+                    # Get the final response to extract tool calls
+                    final_response = await asyncio.to_thread(
+                        self.async_client.responses.retrieve,
+                        response_id=response_id
+                    )
+                    
+                    # Extract tool calls from final response
+                    tool_calls = []
+                    if hasattr(final_response, 'output') and final_response.output:
+                        for item in final_response.output:
+                            if hasattr(item, 'type') and 'call' in item.type:
+                                tool_calls.append(item)
+                    elif hasattr(final_response, 'tool_calls') and final_response.tool_calls:
+                        tool_calls = final_response.tool_calls
+                    
+                    self.logger.info(
+                        "Tool calls extracted from final response (chat continuation)",
+                        component="Stream",
+                        subcomponent="StreamChatContinuation",
+                        tool_call_count=len(tool_calls)
+                    )
+                    
+                    # Extract and emit citations
+                    if tool_calls:
+                        citations = await self.citation_manager.extract_citations_from_response(final_response)
+                        self.logger.info(
+                            "Citations extracted from tool calls (chat continuation)",
+                            component="Stream",
+                            subcomponent="StreamChatContinuation",
+                            citation_count=len(citations)
+                        )
+                        if citations:
+                            citation_text = "\n\n" + self.citation_manager.format_citations_section(citations)
+                            yield {
+                                "text": citation_text,
+                                "response_id": response_id,
+                                "is_citation": True  # Mark as citation chunk
+                            }
+                    else:
+                        self.logger.warning(
+                            "No tool calls found in final response (chat continuation)",
+                            component="Stream",
+                            subcomponent="StreamChatContinuation"
+                        )
+                        
+                except Exception as e:
+                    self.logger.error(
+                        "Error retrieving final response for citations (chat continuation)",
+                        component="Stream",
+                        subcomponent="StreamChatContinuation",
+                        error=str(e)
+                    )
             
             self.logger.info(
                 "Chat continuation stream completed",

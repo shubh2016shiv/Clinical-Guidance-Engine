@@ -19,6 +19,7 @@ from src.response_api_agent.managers.vector_store_manager import VectorStoreMana
 from src.response_api_agent.managers.tool_manager import ToolManager
 from src.response_api_agent.managers.chat_manager import ChatManager
 from src.response_api_agent.managers.stream_manager import StreamManager
+from src.response_api_agent.managers.citation_manager import CitationManager
 from src.response_api_agent.managers.exceptions import (
     ResponsesAPIError,
     VectorStoreError,
@@ -88,6 +89,7 @@ class OpenAIResponseManager:
             chat_history_limit=chat_history_limit
         )
         self.stream_manager = StreamManager()
+        self.citation_manager = CitationManager(client=self.chat_manager.client)
         
         self.logger.info(
             "OpenAI Response Manager initialized",
@@ -251,15 +253,15 @@ class OpenAIResponseManager:
     async def _extract_response_content(
         self, 
         response: Any
-    ) -> tuple[str, List[Any]]:
+    ) -> tuple[str, List[Any], List[Dict[str, str]]]:
         """
-        Extract text content and tool calls from response object.
+        Extract text content, tool calls, and citations from response object.
         
         Args:
             response: OpenAI API response object.
             
         Returns:
-            Tuple of (content_text, tool_calls_list).
+            Tuple of (content_text, tool_calls_list, citations_list).
         """
         content = self.chat_manager._extract_text_content(response)
         
@@ -272,7 +274,14 @@ class OpenAIResponseManager:
         else:
             tool_calls = getattr(response, 'tool_calls', [])
         
-        return content, tool_calls
+        # Extract citations from response
+        citations = await self.citation_manager.extract_citations_from_response(response)
+        
+        # Append citations if present
+        if citations:
+            content = self.citation_manager.append_citations_to_content(content, citations)
+        
+        return content, tool_calls, citations
 
     @time_execution("OpenAIResponseManager", "process_query")
     async def process_query(
@@ -471,7 +480,8 @@ class OpenAIResponseManager:
                 "conversation_id": conversation_id,
                 "content": result["content"],
                 "tool_calls": result["tool_calls"],
-                "tools": tools
+                "tools": tools,
+                "citations": result.get("citations", [])
             }
         else:
             # Start new conversation
@@ -492,7 +502,7 @@ class OpenAIResponseManager:
                 self.chat_manager.client.responses.retrieve,
                 response_id=conversation_id
             )
-            content, tool_calls = await self._extract_response_content(response)
+            content, tool_calls, citations = await self._extract_response_content(response)
             
             self.logger.info(
                 "New conversation created successfully",
@@ -506,7 +516,8 @@ class OpenAIResponseManager:
                 "conversation_id": conversation_id,
                 "content": content,
                 "tool_calls": tool_calls,
-                "tools": tools
+                "tools": tools,
+                "citations": citations
             }
 
     @time_execution("OpenAIResponseManager", "process_streaming_query")
@@ -585,7 +596,8 @@ class OpenAIResponseManager:
                     yield {
                         "chunk": chunk_data.get("text", ""),
                         "conversation_id": conversation_id,
-                        "tools": tools
+                        "tools": tools,
+                        "is_citation": chunk_data.get("is_citation", False)
                     }
                 
                 self.logger.info(
@@ -619,7 +631,8 @@ class OpenAIResponseManager:
                     yield {
                         "chunk": chunk_data.get("text", ""),
                         "conversation_id": response_id,  # Use extracted response_id instead of None
-                        "tools": tools
+                        "tools": tools,
+                        "is_citation": chunk_data.get("is_citation", False)
                     }
                 
                 self.logger.info(

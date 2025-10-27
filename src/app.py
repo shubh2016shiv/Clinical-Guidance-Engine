@@ -147,6 +147,15 @@ class HealthcareAgentApplication:
                 response_length=len(response_content)
             )
             
+            # Log citations if present
+            if result.get("citations"):
+                self.logger.info(
+                    "Citations included in response",
+                    component="Application",
+                    subcomponent="ProcessConsultation",
+                    citation_count=len(result.get("citations", []))
+                )
+            
             return response_content
             
         except ResponsesAPIError as e:
@@ -224,7 +233,7 @@ async def main():
         print("="*80 + "\n")
         
         # Test question for consultation
-        test_question = "What are the recommended treatments for type 2 diabetes? Please include information about common medications, their mechanisms of action, and potential side effects."
+        test_question = "as per guidelines what are Pharmacological Therapy for Hypertension"
         
         print(f"Question:\n{test_question}\n")
         print("-"*80 + "\n")

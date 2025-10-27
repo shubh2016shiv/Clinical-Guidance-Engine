@@ -151,6 +151,7 @@ class AsclepiusHealthcareAgent:
                     "content": result["content"],
                     "conversation_id": result["conversation_id"],
                     "tool_calls": result.get("tool_calls", []),
+                    "citations": result.get("citations", []),
                     "guidelines_used": vector_store_id is not None
                 }
 

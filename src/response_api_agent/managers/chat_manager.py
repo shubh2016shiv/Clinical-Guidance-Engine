@@ -3,6 +3,7 @@ from typing import Dict, Any, List, Optional
 from openai import OpenAI, AsyncOpenAI
 from src.config import get_settings
 from src.response_api_agent.managers.tool_manager import ToolManager  # Optional integration for tools
+from src.response_api_agent.managers.citation_manager import CitationManager
 from src.response_api_agent.managers.exceptions import ResponsesAPIError, ContentParsingError, ToolConfigurationError
 from src.logs import get_component_logger, time_execution
 from src.prompts.asclepius_system_prompt import get_system_prompt
@@ -29,6 +30,7 @@ class ChatManager:
         self.tool_manager = tool_manager
         self.chat_history_limit = chat_history_limit
         self._chat_cache: Dict[str, str] = {}  # Cache: chat_id -> last_response_id
+        self.citation_manager = CitationManager(client=self.client)
         self.logger = get_component_logger("Chat")
 
     @time_execution("Chat", "ExtractTextContent")
@@ -421,6 +423,11 @@ class ChatManager:
             elif hasattr(response, 'tool_calls') and response.tool_calls:
                 tool_calls = response.tool_calls
             
+            # Extract and append citations
+            citations = await self.citation_manager.extract_citations_from_response(response)
+            if citations:
+                content = self.citation_manager.append_citations_to_content(content, citations)
+            
             self.logger.info(
                 "Chat with tools continued successfully",
                 component="Chat",
@@ -433,7 +440,8 @@ class ChatManager:
             return {
                 "response_id": response_id,
                 "content": content,
-                "tool_calls": tool_calls
+                "tool_calls": tool_calls,
+                "citations": citations
             }
         
         except (ContentParsingError, ToolConfigurationError, ResponsesAPIError) as e:
