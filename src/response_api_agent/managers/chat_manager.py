@@ -6,6 +6,7 @@ from src.response_api_agent.managers.tool_manager import (
     ToolManager,
 )  # Optional integration for tools
 from src.response_api_agent.managers.citation_manager import CitationManager
+from src.response_api_agent.managers.llm_provider_adapter import ResponseAPIAdapter
 from src.response_api_agent.managers.exceptions import (
     ResponsesAPIError,
     ContentParsingError,
@@ -36,6 +37,7 @@ class ChatManager:
         self.settings = get_settings()
         self.client = OpenAI(api_key=self.settings.openai_api_key)
         self.async_client = AsyncOpenAI(api_key=self.settings.openai_api_key)
+        self.response_adapter = ResponseAPIAdapter(self.client, self.async_client)
         self.tool_manager = tool_manager
         self.chat_history_limit = chat_history_limit
         self._chat_cache: Dict[str, str] = {}  # Cache: chat_id -> last_response_id
@@ -176,8 +178,7 @@ class ChatManager:
                 return chat_id
 
             # Non-streaming: create full response
-            response = await asyncio.to_thread(
-                self.client.responses.create,
+            response = await self.response_adapter.create_response(
                 model=model,
                 input=message,  # User input; API handles as first message
                 instructions=get_system_prompt(),
@@ -261,8 +262,7 @@ class ChatManager:
                 summary = await self._summarize_history(history, model)
                 # Create new root response from summary + new message
                 reset_message = f"{summary}\n\nNew query: {message}"
-                new_response = await asyncio.to_thread(
-                    self.client.responses.create,
+                new_response = await self.response_adapter.create_response(
                     model=model,
                     input=reset_message,
                     instructions=get_system_prompt(),
@@ -282,8 +282,7 @@ class ChatManager:
                 return chat_id
             else:
                 # Chain new response normally
-                response = await asyncio.to_thread(
-                    self.client.responses.create,
+                response = await self.response_adapter.create_response(
                     model=model,
                     previous_response_id=last_response_id,
                     input=message,
@@ -520,8 +519,7 @@ class ChatManager:
             )  # Truncate for prompt
             summary_prompt = f"Summarize this conversation history concisely (under 1000 tokens):\n{history_text}"
 
-            summary_response = await asyncio.to_thread(
-                self.client.responses.create,
+            summary_response = await self.response_adapter.create_response(
                 model=model,
                 input=summary_prompt,
                 instructions="Summarize the conversation history concisely.",

@@ -40,6 +40,7 @@ from openai import OpenAI, AsyncOpenAI
 from src.config import get_settings
 from src.response_api_agent.managers.exceptions import StreamConnectionError
 from src.response_api_agent.managers.citation_manager import CitationManager
+from src.response_api_agent.managers.llm_provider_adapter import ResponseAPIAdapter
 from src.logs import get_component_logger, time_execution
 from src.prompts.asclepius_system_prompt import get_system_prompt
 
@@ -56,6 +57,7 @@ class StreamManager:
         self.settings = get_settings()
         self.client = OpenAI(api_key=self.settings.openai_api_key)
         self.async_client = AsyncOpenAI(api_key=self.settings.openai_api_key)
+        self.response_adapter = ResponseAPIAdapter(self.client, self.async_client)
         self.citation_manager = CitationManager(client=self.async_client)
         self.logger = get_component_logger("Stream")
 
@@ -95,7 +97,7 @@ class StreamManager:
             )
 
             # Create streaming response
-            stream = await self.async_client.responses.create(
+            stream = await self.response_adapter.create_streaming_response(
                 model=model,
                 input=message,
                 previous_response_id=previous_response_id,
@@ -316,7 +318,7 @@ class StreamManager:
             )
 
             # Create streaming response with previous_response_id
-            stream = await self.async_client.responses.create(
+            stream = await self.response_adapter.create_streaming_response(
                 model=model,
                 input=message,
                 previous_response_id=chat_id,  # Use chat_id as previous_response_id
@@ -496,7 +498,7 @@ class StreamManager:
             )
 
             # Create streaming response with tools
-            stream = await self.async_client.responses.create(
+            stream = await self.response_adapter.create_streaming_response(
                 model=model,
                 input=message,
                 previous_response_id=previous_response_id,

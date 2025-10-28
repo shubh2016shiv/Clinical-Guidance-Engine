@@ -20,6 +20,7 @@ from src.response_api_agent.managers.tool_manager import ToolManager
 from src.response_api_agent.managers.chat_manager import ChatManager
 from src.response_api_agent.managers.stream_manager import StreamManager
 from src.response_api_agent.managers.citation_manager import CitationManager
+from src.response_api_agent.managers.adapter_monitoring import start_metrics_reporting
 from src.response_api_agent.managers.exceptions import (
     ResponsesAPIError,
     VectorStoreError,
@@ -72,6 +73,9 @@ class OpenAIResponseManager:
         """
         self.settings = get_settings()
         self.logger = get_component_logger("OpenAIResponseManager")
+
+        # Start adapter metrics reporting
+        start_metrics_reporting()
 
         # Initialize or use provided vector store manager
         if vector_store_manager:

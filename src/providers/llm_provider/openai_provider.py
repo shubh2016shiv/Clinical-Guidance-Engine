@@ -227,7 +227,10 @@ class OpenAIProvider(LLMProvider):
 
             # Execute based on streaming mode
             if stream:
-                return self._stream_responses_api(params)
+                # For streaming Responses API, return raw stream object directly
+                # This allows StreamManager to process OpenAI SDK events properly
+                logger.info("Returning raw Responses API stream for StreamManager")
+                return await self.async_client.responses.create(**params)
             else:
                 return await self._execute_responses_api(params)
 
