@@ -5,3 +5,4 @@ pydantic_settings
 pre-commit
 ruff
 google-generativeai>=0.8.0
+pandas[excel]==2.3.3

@@ -150,8 +150,11 @@ class StandardizedDrugRecord:
         """Generate rich search text for embedding."""
         parts = []
 
-        # Drug name is always present
-        parts.append(f"Drug: {self.drug_name}")
+        # Drug name is always present (use base_drug_name if available, otherwise drug_name)
+        drug_name_display = (
+            self.base_drug_name if self.base_drug_name else self.drug_name
+        )
+        parts.append(f"Drug: {drug_name_display}")
 
         # Add dosages if available
         if self.dosages:
@@ -167,6 +170,14 @@ class StandardizedDrugRecord:
 
         if self.therapeutic_category:
             parts.append(f"Therapeutic: {self.therapeutic_category}")
+
+        # Add route of administration if available
+        if self.route_of_administration:
+            parts.append(f"Route of Administration: {self.route_of_administration}")
+
+        # Add formulation if available
+        if self.formulation:
+            parts.append(f"Formulation: {self.formulation}")
 
         return " | ".join(parts)
 
