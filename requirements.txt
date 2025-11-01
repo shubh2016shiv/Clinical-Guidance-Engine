@@ -1,8 +1,12 @@
 openai
 python-dotenv
 structlog>=24.1.0
+pydantic>=2.0.0
 pydantic_settings
 pre-commit
 ruff
 google-generativeai>=0.8.0
 pandas[excel]==2.3.3
+PyYAML>=6.0.0
+pymilvus==2.6.3
+tqdm>=4.67.1

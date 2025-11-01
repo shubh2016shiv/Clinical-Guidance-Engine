@@ -1,0 +1,415 @@
+# Pharmaceutical Data Ingestion Configuration
+# ============================================
+
+# Data Sources Configuration
+data_sources:
+  # Input file paths (supports CSV and Excel)
+  # Paths are relative to the config file location (drug_data_ingestion_pipeline folder)
+  input_files:
+    - "../pharmaceutical_knowledge_base/rxnorm_complete_drug_classification.csv"
+    - "../pharmaceutical_knowledge_base/drug_class_subclass_reference.xlsx"
+  
+  # Output paths
+  # Output directory relative to project root (use "." for current config directory or "drug_data_ingestion_pipeline" for explicit)
+  output_directory: "drug_data_ingestion_pipeline"
+  standardized_data_file: "standardized_drugs.csv"
+  
+  # File processing options
+  encoding: "utf-8"
+  fallback_encoding: "latin-1"
+  skip_empty_rows: true
+  
+  # Data validation
+  min_drug_name_length: 2
+  deduplicate: true
+
+
+# ETL Pipeline Configuration
+etl:
+  # Logging configuration
+  log_level: "INFO"  # Options: DEBUG, INFO, WARNING, ERROR, CRITICAL
+  log_file: "logs/etl_pipeline.log"
+
+  # Processing options
+  batch_size: 1000
+  parallel_processing: false
+  max_workers: 4
+
+  # Data quality checks
+  validate_fields: true
+  remove_invalid_records: true
+
+  # Parser settings
+  parser:
+    extract_dosages: true
+    extract_routes: true
+    extract_formulations: true
+    normalize_drug_names: true
+
+    # Route of Administration (ROA) options - standardized globally
+    recognized_routes:
+      - "oral"
+      - "buccal"
+      - "sublingual"
+      - "enteral"
+      - "gastric"
+      - "nasogastric"
+      - "jejunal"
+      - "colonic"
+      - "rectal"
+      - "vaginal"
+      - "urethral"
+      - "intravenous"
+      - "intra-arterial"
+      - "intraosseous"
+      - "intramuscular"
+      - "subcutaneous"
+      - "intradermal"
+      - "epidural"
+      - "intrathecal"
+      - "intracerebral"
+      - "intracerebroventricular"
+      - "intraarticular"
+      - "intrasynovial"
+      - "intraperitoneal"
+      - "intravesical"
+      - "intravitreal"
+      - "intratumoral"
+      - "intrapleural"
+      - "intra-amniotic"
+      - "topical"
+      - "transdermal"
+      - "cutaneous"
+      - "dermal"
+      - "ocular"
+      - "ophthalmic"
+      - "otic"
+      - "auricular"
+      - "nasal"
+      - "inhalation"
+      - "pulmonary"
+      - "nasal inhalation"
+      - "mucosal"
+      - "sublabial"
+      - "extracorporeal"
+      - "implant"
+      - "infusion"
+      - "aerosol"
+      - "inhalational"
+
+    # Formulation types (Dosage Forms) - standardized globally
+    recognized_formulations:
+      # Solid oral
+      - "tablet"
+      - "film-coated tablet"
+      - "chewable tablet"
+      - "dispersible tablet"
+      - "effervescent tablet"
+      - "extended-release tablet"
+      - "delayed-release tablet"
+      - "oral tablet"
+      - "capsule"
+      - "hard capsule"
+      - "soft capsule"
+      - "liquid-filled capsule"
+      - "pellet"
+      - "lozenge"
+      - "troche"
+      - "wafer"
+      - "oral powder"
+      - "granules"
+      - "oral granules"
+      - "oral film"
+
+      # Liquid oral
+      - "solution"
+      - "oral solution"
+      - "syrup"
+      - "elixir"
+      - "suspension"
+      - "emulsion"
+      - "oral spray"
+      - "mouthwash"
+
+      # Parenteral / Injectable
+      - "injection"
+      - "injectable solution"
+      - "injectable suspension"
+      - "infusion solution"
+      - "infusion"
+      - "lyophilized powder for reconstitution"
+
+      # Topical / Skin
+      - "cream"
+      - "ointment"
+      - "gel"
+      - "lotion"
+      - "paste"
+      - "foam"
+      - "spray"
+      - "powder topical"
+      - "topical solution"
+      - "topical suspension"
+      - "medicated patch"
+      - "transdermal patch"
+      - "transdermal system"
+      - "medicated tape"
+      - "medicated pad"
+
+      # Ophthalmic / Otic / Nasal
+      - "eye drops"
+      - "ophthalmic solution"
+      - "ophthalmic suspension"
+      - "ophthalmic gel"
+      - "ophthalmic ointment"
+      - "ear drops"
+      - "otic solution"
+      - "otic suspension"
+      - "nasal spray"
+      - "nasal drops"
+      - "nasal gel"
+      - "nasal powder"
+
+      # Rectal / Vaginal / Urethral
+      - "suppository"
+      - "rectal cream"
+      - "rectal gel"
+      - "rectal ointment"
+      - "rectal solution"
+      - "rectal spray"
+      - "vaginal tablet"
+      - "vaginal cream"
+      - "vaginal gel"
+      - "vaginal film"
+      - "vaginal ring"
+      - "vaginal insert"
+      - "urethral gel"
+      - "urethral suppository"
+
+      # Inhalation
+      - "inhaler"
+      - "metered-dose inhaler"
+      - "dry powder inhaler"
+      - "inhalation powder"
+      - "inhalation solution"
+      - "nebuliser solution"
+      - "inhalation suspension"
+
+      # Implantable / Other
+      - "implant"
+      - "pellet implant"
+      - "reservoir device"
+      - "osmotic pump"
+
+# Gemini API Configuration
+gemini:
+  # API credentials
+  api_key: "${GEMINI_API_KEY}"  # Use environment variable
+  
+  # Model configuration
+  model_name: "models/text-embedding-004"
+  task_type: "retrieval_document"  # Options: retrieval_document, retrieval_query, semantic_similarity
+  
+  # Embedding settings
+  embedding:
+    dimensions: 768  # Options: 256, 512, 768, 1024 (text-embedding-004 supports configurable dims)
+    normalize: true  # Normalize embeddings to unit length
+
+# Milvus Configuration
+milvus:
+  # Connection settings
+  connection:
+    host: "localhost"
+    port: 19530
+    alias: "default"
+    timeout: 30
+    
+    # Authentication (if enabled)
+    user: ""
+    password: ""
+    
+  
+  # Collection settings
+  collection:
+    name: "pharmaceutical_drugs"
+    description: "Pharmaceutical drug database with embeddings for LLM lookup"
+    drop_existing: true  # WARNING: Set to true to recreate collection
+    embedding_dimension: 768  # Must match gemini.embedding.dimensions
+    
+    # Schema configuration
+    schema:
+      # Primary key
+      primary_field:
+        name: "id"
+        auto_id: true
+        
+      # Field definitions
+      fields:
+        - name: "drug_name"
+          type: "VARCHAR"
+          max_length: 300
+          description: "Base drug name without dosage/route"
+        
+        - name: "drug_class"
+          type: "VARCHAR"
+          max_length: 200
+          description: "Drug classification"
+        
+        - name: "drug_sub_class"
+          type: "VARCHAR"
+          max_length: 200
+          description: "Drug sub-classification"
+        
+        - name: "therapeutic_category"
+          type: "VARCHAR"
+          max_length: 200
+          description: "Therapeutic category"
+        
+        - name: "route_of_administration"
+          type: "VARCHAR"
+          max_length: 100
+          description: "Route of administration"
+        
+        - name: "formulation"
+          type: "VARCHAR"
+          max_length: 100
+          description: "Drug formulation type"
+        
+        - name: "dosage_strengths"
+          type: "VARCHAR"
+          max_length: 2000
+          description: "Available Dosage Strengths for the drug"
+        
+        - name: "search_text"
+          type: "VARCHAR"
+          max_length: 2000
+          description: "Combined searchable text"
+        
+        - name: "embedding"
+          type: "FLOAT_VECTOR"
+          description: "Gemini embedding vector"
+  
+  # Index configuration
+  index:
+    # Index type options:
+    # - FLAT: Exact search, 100% accuracy, slow for large datasets
+    # - IVF_FLAT: Fast approximate search, good accuracy
+    # - IVF_SQ8: Memory-efficient, quantized version
+    # - IVF_PQ: Most memory-efficient, lower accuracy
+    # - HNSW: Best accuracy/speed tradeoff, higher memory
+    # - AUTOINDEX: Automatic selection based on data
+    type: "HNSW"
+    
+    # Metric type options:
+    # - IP: Inner product (recommended for normalized embeddings - same as cosine similarity)
+    # - L2: Euclidean distance
+    metric_type: "IP"
+    
+    # Index-specific parameters
+    params:
+      # For HNSW
+      M: 16                    # Number of connections per node (8-64, higher = better accuracy, more memory)
+      efConstruction: 200      # Build-time search depth (100-500, higher = better index quality, slower build)
+      
+      # For IVF_FLAT / IVF_SQ8 / IVF_PQ
+      nlist: 128               # Number of clusters (64-1024, higher = better accuracy, slower search)
+      
+      # For IVF_PQ
+      m: 8                     # Number of subquantizers (dimension must be divisible by m)
+      nbits: 8                 # Bits per subvector
+  
+  # Search configuration
+  search:
+    # Search parameters
+    params:
+      # For HNSW
+      ef: 64                   # Search-time depth (higher = better accuracy, slower)
+      
+      # For IVF indexes
+      nprobe: 10               # Number of clusters to search (higher = better accuracy, slower)
+    
+    # Result settings
+    top_k: 10                  # Default number of results to return
+    offset: 0
+    
+    # Output fields to return
+    output_fields:
+      - "drug_name"
+      - "drug_class"
+      - "drug_sub_class"
+      - "therapeutic_category"
+      - "route_of_administration"
+      - "formulation"
+      - "dosages_json"
+      - "search_text"
+    
+    # Search behavior
+    consistency_level: "Strong"  # Options: Strong, Bounded, Eventually, Session
+    guarantee_timestamp: 0
+    graceful_time: 5000
+  
+  # Insertion configuration
+  insertion:
+    batch_size: 100            # Records per batch insert
+    timeout: 300               # Timeout for insert operations (seconds)
+    
+    # Data preprocessing
+    validate_before_insert: true
+    skip_invalid_vectors: false
+  
+  # Performance tuning
+  performance:
+    # Collection loading
+    load_on_startup: true
+    replicas: 1
+    
+    # Resource allocation
+    max_memory_usage: "2GB"
+    cpu_threads: 4
+    
+    # Cache settings
+    cache_enabled: true
+    cache_size: "500MB"
+
+
+# Search Text Generation Configuration
+search_text:
+  # Template for generating searchable text
+  template: "Drug: {drug_name} | Dosages: [{dosages}] | Form: {formulation} | Route: {route} | Class: {drug_class} | Subclass: {drug_sub_class} | Therapeutic: {therapeutic_category}"
+  
+  # Field inclusion (set to false to exclude from search text)
+  include_fields:
+    drug_name: true
+    dosages: true
+    formulation: true
+    route_of_administration: true
+    drug_class: true
+    drug_sub_class: true
+    therapeutic_category: true
+  
+  # Formatting options
+  separator: " | "
+  dosage_delimiter: ", "
+  empty_field_placeholder: ""
+  include_empty_fields: false
+  
+  # Progress reporting
+  progress:
+    enabled: true
+    interval: 100  # Log progress every N records
+    detailed: false
+
+
+# Error Handling
+error_handling:
+  # Behavior on errors
+  continue_on_error: true
+  max_errors: 2  # Stop pipeline after this many errors
+  
+  # Validation errors
+  strict_validation: true
+  
+  # Retry configuration
+  retry_on_failure: true
+  max_retries: 3
+  retry_delay: 2

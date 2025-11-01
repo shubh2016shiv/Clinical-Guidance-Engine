@@ -11,16 +11,46 @@ import re
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple, TYPE_CHECKING
 
 import pandas as pd
 
-# Configure minimal logging - only stages and exceptions
-logging.basicConfig(
-    level=logging.ERROR,  # Only log errors
-    format="%(message)s",
-)
+if TYPE_CHECKING:
+    from config_loader import IngestionConfig, ETLParserConfig, SearchTextConfig
+
 logger = logging.getLogger(__name__)
+
+
+def _setup_logging(
+    log_level: str = "ERROR",
+    log_file: Optional[str] = None,
+    format_str: str = "%(message)s",
+):
+    """Setup logging configuration from config values."""
+    # Convert string log level to logging constant
+    log_level_map = {
+        "DEBUG": logging.DEBUG,
+        "INFO": logging.INFO,
+        "WARNING": logging.WARNING,
+        "ERROR": logging.ERROR,
+        "CRITICAL": logging.CRITICAL,
+    }
+    level = log_level_map.get(log_level.upper(), logging.ERROR)
+
+    handlers = [logging.StreamHandler()]
+
+    if log_file:
+        # Ensure log directory exists
+        log_path = Path(log_file)
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        handlers.append(logging.FileHandler(log_file))
+
+    logging.basicConfig(
+        level=level,
+        format=format_str,
+        handlers=handlers,
+        force=True,  # Override existing configuration
+    )
 
 
 @dataclass
@@ -146,8 +176,98 @@ class StandardizedDrugRecord:
         # Merge source files
         self.source_files.update(other.source_files)
 
-    def generate_search_text(self) -> str:
-        """Generate rich search text for embedding."""
+    def generate_search_text(
+        self, search_text_config: Optional["SearchTextConfig"] = None
+    ) -> str:
+        """Generate rich search text for embedding using config template if provided."""
+        # Use config if provided, otherwise fall back to hardcoded format
+        if search_text_config:
+            # Extract all template placeholder keys from template string
+            template_placeholders = set(
+                re.findall(r"\{(\w+)\}", search_text_config.template)
+            )
+
+            # Build field values
+            drug_name_display = (
+                self.base_drug_name if self.base_drug_name else self.drug_name
+            )
+
+            dosages_str = ""
+            if self.dosages:
+                dosages_str = search_text_config.dosage_delimiter.join(self.dosages)
+
+            # Build template values
+            # Map config key "route_of_administration" to template key "route"
+            template_values = {
+                "drug_name": drug_name_display,
+                "dosages": dosages_str,
+                "formulation": self.formulation or "",
+                "route": self.route_of_administration or "",
+                "drug_class": self.drug_class or "",
+                "drug_sub_class": self.drug_sub_class or "",
+                "therapeutic_category": self.therapeutic_category or "",
+            }
+
+            # Map config field names to template field names
+            # Config uses "route_of_administration" but template uses "route"
+            field_mapping = {
+                "route": "route_of_administration",  # Map template key to config key
+            }
+
+            # Filter fields based on include_fields config and ensure all template keys are present
+            filtered_values = {}
+
+            # First, process fields from template_values
+            for field_name, value in template_values.items():
+                # Get config field name (may differ from template field name)
+                config_field_name = field_mapping.get(field_name, field_name)
+                include_field = search_text_config.include_fields.get(
+                    config_field_name, True
+                )
+
+                if include_field:
+                    if search_text_config.include_empty_fields or value:
+                        # Use placeholder if empty and include_empty_fields is False
+                        filtered_values[field_name] = (
+                            value
+                            if value
+                            else search_text_config.empty_field_placeholder
+                        )
+                    elif value:
+                        filtered_values[field_name] = value
+
+            # Ensure all template placeholders are present in filtered_values
+            # Use empty placeholder for missing keys to prevent KeyError
+            for placeholder_key in template_placeholders:
+                if placeholder_key not in filtered_values:
+                    # Check if field should be included
+                    config_field_name = field_mapping.get(
+                        placeholder_key, placeholder_key
+                    )
+                    include_field = search_text_config.include_fields.get(
+                        config_field_name, True
+                    )
+
+                    if include_field:
+                        # Field should be included but is missing, use empty placeholder
+                        filtered_values[placeholder_key] = (
+                            search_text_config.empty_field_placeholder
+                        )
+                    else:
+                        # Field excluded from config, use empty placeholder for template compatibility
+                        filtered_values[placeholder_key] = (
+                            search_text_config.empty_field_placeholder
+                        )
+
+            # Format using template
+            try:
+                return search_text_config.template.format(**filtered_values)
+            except KeyError as e:
+                # If template has keys not in filtered_values, fall back to default
+                logger.warning(f"Template key error: {e}, using default format")
+                # Fall through to default format
+
+        # Default format (backward compatible)
         parts = []
 
         # Drug name is always present (use base_drug_name if available, otherwise drug_name)
@@ -181,7 +301,7 @@ class StandardizedDrugRecord:
 
         return " | ".join(parts)
 
-    def to_dict(self) -> Dict:
+    def to_dict(self, search_text_config: Optional["SearchTextConfig"] = None) -> Dict:
         """Convert to dictionary for storage."""
         return {
             "drug_name": self.drug_name,
@@ -192,7 +312,7 @@ class StandardizedDrugRecord:
             "dosages": self.dosages,
             "route_of_administration": self.route_of_administration,
             "formulation": self.formulation,
-            "search_text": self.generate_search_text(),
+            "search_text": self.generate_search_text(search_text_config),
             "source_files": list(self.source_files),
         }
 
@@ -251,8 +371,62 @@ class DataExtractor:
 class DataTransformer:
     """Transform raw data into standardized format."""
 
-    @staticmethod
-    def parse_drug_details(drug_name: str) -> Dict[str, Any]:
+    def __init__(self, parser_config: Optional["ETLParserConfig"] = None):
+        """
+        Initialize DataTransformer with optional parser configuration.
+
+        Args:
+            parser_config: ETLParserConfig containing recognized_routes and recognized_formulations
+        """
+        if parser_config:
+            self.recognized_routes = set(
+                route.lower() for route in parser_config.recognized_routes
+            )
+            self.recognized_formulations = set(
+                form.lower() for form in parser_config.recognized_formulations
+            )
+        else:
+            # Default fallback values for backward compatibility
+            self.recognized_routes = {
+                "oral",
+                "intravenous",
+                "subcutaneous",
+                "intramuscular",
+                "topical",
+                "inhalation",
+                "nasal",
+                "ophthalmic",
+                "otic",
+                "rectal",
+                "vaginal",
+                "transdermal",
+                "sublingual",
+                "buccal",
+                "injection",
+                "infusion",
+            }
+            self.recognized_formulations = {
+                "tablet",
+                "capsule",
+                "solution",
+                "suspension",
+                "cream",
+                "ointment",
+                "gel",
+                "lotion",
+                "patch",
+                "spray",
+                "powder",
+                "syrup",
+                "elixir",
+                "aerosol",
+                "film",
+                "suppository",
+                "insert",
+                "device",
+            }
+
+    def parse_drug_details(self, drug_name: str) -> Dict[str, Any]:
         """
         Enhanced parser to extract drug components: base name, strength(s), route, and formulation.
 
@@ -286,47 +460,9 @@ class DataTransformer:
                 "original_name": drug_name,
             }
 
-        # Define routes of administration (last token candidates)
-        routes = {
-            "oral",
-            "intravenous",
-            "subcutaneous",
-            "intramuscular",
-            "topical",
-            "inhalation",
-            "nasal",
-            "ophthalmic",
-            "otic",
-            "rectal",
-            "vaginal",
-            "transdermal",
-            "sublingual",
-            "buccal",
-            "injection",
-            "infusion",
-        }
-
-        # Define formulations
-        formulations = {
-            "tablet",
-            "capsule",
-            "solution",
-            "suspension",
-            "cream",
-            "ointment",
-            "gel",
-            "lotion",
-            "patch",
-            "spray",
-            "powder",
-            "syrup",
-            "elixir",
-            "aerosol",
-            "film",
-            "suppository",
-            "insert",
-            "device",
-        }
+        # Use instance variables for routes and formulations
+        routes = self.recognized_routes
+        formulations = self.recognized_formulations
 
         # Extract route (usually last token)
         route = None
@@ -426,13 +562,14 @@ class DataTransformer:
             "original_name": drug_name,
         }
 
-    @staticmethod
-    def extract_dosage_from_drug_name(drug_name: str) -> Tuple[str, Optional[str]]:
+    def extract_dosage_from_drug_name(
+        self, drug_name: str
+    ) -> Tuple[str, Optional[str]]:
         """
         Extract dosage and clean name using enhanced parser.
         Returns: (clean_name, primary_strength)
         """
-        parsed = DataTransformer.parse_drug_details(drug_name)
+        parsed = self.parse_drug_details(drug_name)
 
         # Reconstruct clean name without strengths
         clean_parts = []
@@ -453,9 +590,8 @@ class DataTransformer:
 
         return clean_name, primary_strength
 
-    @staticmethod
     def transform_format_1(
-        df: pd.DataFrame, source_file: str
+        self, df: pd.DataFrame, source_file: str
     ) -> List[StandardizedDrugRecord]:
         """
         Transform dataset with format: drug_name, drug_class, drug_sub_class
@@ -495,7 +631,7 @@ class DataTransformer:
                 continue
 
             # Parse drug details using enhanced parser
-            parsed_details = DataTransformer.parse_drug_details(str(drug_name_raw))
+            parsed_details = self.parse_drug_details(str(drug_name_raw))
 
             # Use clean name as drug_name, keep original as base_drug_name
             drug_name_clean = parsed_details["base_name"]
@@ -523,9 +659,8 @@ class DataTransformer:
 
         return records
 
-    @staticmethod
     def transform_format_2(
-        df: pd.DataFrame, source_file: str
+        self, df: pd.DataFrame, source_file: str
     ) -> List[StandardizedDrugRecord]:
         """
         Transform dataset with format:
@@ -566,7 +701,7 @@ class DataTransformer:
                 continue
 
             # Parse drug details using enhanced parser
-            parsed_details = DataTransformer.parse_drug_details(str(drug_name_raw))
+            parsed_details = self.parse_drug_details(str(drug_name_raw))
 
             # Use clean name as drug_name, keep original as base_drug_name
             drug_name_clean = parsed_details["base_name"]
@@ -597,9 +732,8 @@ class DataTransformer:
 
         return records
 
-    @staticmethod
     def auto_detect_and_transform(
-        df: pd.DataFrame, source_file: str
+        self, df: pd.DataFrame, source_file: str
     ) -> List[StandardizedDrugRecord]:
         """Automatically detect dataset format and transform."""
         df_columns_lower = {col.lower() for col in df.columns}
@@ -609,9 +743,9 @@ class DataTransformer:
             col in df_columns_lower
             for col in ["therapeutic_class_l2", "primary_drug_name", "ingredient_rxcui"]
         ):
-            return DataTransformer.transform_format_2(df, source_file)
+            return self.transform_format_2(df, source_file)
         else:
-            return DataTransformer.transform_format_1(df, source_file)
+            return self.transform_format_1(df, source_file)
 
 
 class DataDeduplicator:
@@ -664,9 +798,23 @@ class DataDeduplicator:
 class PharmaceuticalETLPipeline:
     """Main ETL pipeline orchestrator."""
 
-    def __init__(self):
+    def __init__(self, config: Optional["IngestionConfig"] = None):
+        """
+        Initialize ETL pipeline with optional configuration.
+
+        Args:
+            config: IngestionConfig containing all pipeline configuration
+        """
+        self.config = config
+
+        # Setup logging from config if provided
+        if config:
+            _setup_logging(log_level=config.etl.log_level, log_file=config.etl.log_file)
+
+        # Initialize components with config
+        parser_config = config.etl.parser if config else None
         self.extractor = DataExtractor()
-        self.transformer = DataTransformer()
+        self.transformer = DataTransformer(parser_config=parser_config)
         self.deduplicator = DataDeduplicator()
         self.raw_records: List[StandardizedDrugRecord] = []
         self.standardized_records: List[StandardizedDrugRecord] = []
@@ -728,7 +876,12 @@ class PharmaceuticalETLPipeline:
         if not self.standardized_records:
             return pd.DataFrame()
 
-        data = [record.to_dict() for record in self.standardized_records]
+        # Use search_text config if available
+        search_text_config = self.config.search_text if self.config else None
+        data = [
+            record.to_dict(search_text_config=search_text_config)
+            for record in self.standardized_records
+        ]
         df = pd.DataFrame(data)
 
         return df
@@ -742,29 +895,43 @@ class PharmaceuticalETLPipeline:
 
 
 if __name__ == "__main__":
-    # Initialize pipeline
-    pipeline = PharmaceuticalETLPipeline()
+    # Import here to avoid circular import issues
+    from config_loader import ConfigLoader
 
-    # Define file paths relative to project root
+    # Load configuration
+    config_file = Path(__file__).parent / "ingestion_config.yaml"
+    config_loader = ConfigLoader(config_file)
+    config = config_loader.load()
+
+    # Initialize pipeline with config
+    pipeline = PharmaceuticalETLPipeline(config=config)
+
+    # Use file paths from config
     base_path = Path(__file__).parent.parent
-    file_paths = [
-        str(
-            base_path
-            / "pharmaceutical_knowledge_base"
-            / "drug_class_subclass_reference.xlsx"
-        ),
-        str(
-            base_path
-            / "pharmaceutical_knowledge_base"
-            / "rxnorm_complete_drug_classification.csv"
-        ),
-    ]
+    file_paths = []
+
+    for file_path in config.data_sources.input_files:
+        # Resolve relative paths relative to config file location
+        config_dir = config_file.parent
+        resolved_path = (config_dir / file_path).resolve()
+        if resolved_path.exists():
+            file_paths.append(str(resolved_path))
+        else:
+            # Try relative to project root
+            project_path = (base_path / file_path).resolve()
+            if project_path.exists():
+                file_paths.append(str(project_path))
+            else:
+                logger.warning(f"Input file not found: {file_path}")
+
+    if not file_paths:
+        raise ValueError("No valid input files found. Check configuration.")
 
     # Run pipeline
     standardized_records = pipeline.run_pipeline(file_paths)
 
-    # Save output
-    output_path = str(
-        base_path / "drug_data_ingestion_pipeline" / "standardized_drugs.csv"
-    )
+    # Save output using config paths
+    output_dir = base_path / config.data_sources.output_directory
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_path = str(output_dir / config.data_sources.standardized_data_file)
     pipeline.save_to_csv(output_path)
