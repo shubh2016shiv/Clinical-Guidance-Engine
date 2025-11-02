@@ -27,16 +27,16 @@ class Settings(BaseSettings):
     # OpenAI Model Parameters
     # Used by: response_api_agent/managers/*, llm_provider/*
     openai_temperature: float = Field(
-        default=0.1,
-        description="Creativity vs consistency (0.0-2.0). Lower = more deterministic. Used by response API managers.",
+        default=0.0,
+        description="Creativity vs consistency (0.0-2.0). 0.0 = fully deterministic, higher = more creative. Used by response API managers.",
     )
     openai_top_p: float = Field(
         default=0.9,
-        description="Nucleus sampling parameter (0.0-1.0). Used by response API managers.",
+        description="Nucleus sampling parameter (0.0-1.0). Used by response API managers. Note: Some Responses API models may not support this parameter.",
     )
     openai_max_output_tokens: int = Field(
         default=2000,
-        description="Maximum response length in tokens. Used by response API managers.",
+        description="Maximum response length in tokens. Used by response API managers. Note: Some Responses API models may not support this parameter.",
     )
 
     # Gemini API Configuration
@@ -140,7 +140,7 @@ class Settings(BaseSettings):
     # Response Mode Configuration
     # Used by: response_api_agent/managers/stream_manager.py, chat_manager.py
     enable_streaming: bool = Field(
-        default=True,
+        default=False,
         description="Global streaming mode control. Used by stream_manager.py and chat_manager.py.",
     )
     enable_cleanup: bool = Field(

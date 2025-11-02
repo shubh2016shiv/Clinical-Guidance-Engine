@@ -64,13 +64,20 @@ class ResponseAPIAdapter:
         self.llm_provider = None
 
     async def _init_llm_provider(self):
-        """Lazy initialization of LLM provider"""
+        """
+        Lazy initialization of LLM provider.
+
+        Note: Settings from config.py (temperature, top_p, max_output_tokens) are
+        automatically pulled by the provider's __init__ method, ensuring centralized control.
+        """
         if self.llm_provider is None:
             try:
                 self.llm_provider = create_llm_provider(
                     provider_type="openai",
                     api_type=APIType.RESPONSES,
                     stream_mode=StreamMode.AUTO,
+                    # Settings from config.py (temperature, top_p, max_output_tokens) are
+                    # automatically applied by OpenAIProvider.__init__ for centralized control
                 )
                 logger.info("Successfully initialized LLM provider for Response API")
             except Exception as e:
@@ -101,6 +108,9 @@ class ResponseAPIAdapter:
             logger.warning(f"Unexpected error with LLM provider, falling back: {e}")
 
         # Fallback to direct Response API
+        # Note: Responses API may not support temperature/top_p/max_tokens on all models.
+        # These parameters are not automatically added here to avoid API errors.
+        # If needed, they should be explicitly passed in kwargs.
         logger.info("Falling back to direct Response API execution")
         return await asyncio.to_thread(self.client.responses.create, **kwargs)
 
@@ -128,6 +138,9 @@ class ResponseAPIAdapter:
             )
 
         # Fallback to direct streaming API
+        # Note: Responses API may not support temperature/top_p/max_tokens on all models.
+        # These parameters are not automatically added here to avoid API errors.
+        # If needed, they should be explicitly passed in kwargs.
         logger.info("Falling back to direct streaming Response API execution")
         return await self.async_client.responses.create(**kwargs)
 

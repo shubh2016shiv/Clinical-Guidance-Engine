@@ -20,6 +20,7 @@ from src.response_api_agent.managers.tool_manager import ToolManager
 from src.response_api_agent.managers.chat_manager import ChatManager
 from src.response_api_agent.managers.stream_manager import StreamManager
 from src.response_api_agent.managers.citation_manager import CitationManager
+from src.response_api_agent.managers.drug_data_manager import DrugDataManager
 from src.response_api_agent.managers.adapter_monitoring import start_metrics_reporting
 from src.response_api_agent.managers.exceptions import (
     ResponsesAPIError,
@@ -92,6 +93,26 @@ class OpenAIResponseManager:
         )
         self.stream_manager = StreamManager()
         self.citation_manager = CitationManager(client=self.chat_manager.client)
+
+        # Initialize drug data manager for Milvus integration
+        try:
+            self.drug_data_manager = DrugDataManager()
+            # Register the drug search function with chat manager
+            self.chat_manager.register_function_executor(
+                "search_drug_database", self.drug_data_manager.search_drug_database
+            )
+            self.logger.info(
+                "Drug data manager initialized and registered",
+                component="OpenAIResponseManager",
+                subcomponent="Init",
+            )
+        except Exception as e:
+            self.logger.warning(
+                f"Failed to initialize drug data manager: {e}. Drug search will not be available.",
+                component="OpenAIResponseManager",
+                subcomponent="Init",
+            )
+            self.drug_data_manager = None
 
         self.logger.info(
             "OpenAI Response Manager initialized",
@@ -297,6 +318,8 @@ class OpenAIResponseManager:
         function_definitions: Optional[List[Dict[str, Any]]] = None,
         model_name: Optional[str] = None,
         enable_streaming: bool = False,
+        use_drug_database: bool = True,
+        enable_tool_execution: bool = True,
     ) -> Dict[str, Any]:
         """
         Process a user query with optional tools and streaming.
@@ -305,6 +328,8 @@ class OpenAIResponseManager:
         - New conversations and continuation of existing ones
         - Vector store integration for semantic search
         - Custom function tools
+        - Drug database queries via Milvus
+        - Automatic tool execution
         - Streaming and non-streaming responses
 
         Args:
@@ -314,13 +339,16 @@ class OpenAIResponseManager:
             function_definitions: Optional list of custom function definitions.
             model_name: Optional model override. Uses default if not specified.
             enable_streaming: If True, returns a streaming generator function.
+            use_drug_database: If True, enables drug database search tool (default: True).
+            enable_tool_execution: If True, automatically executes tool calls (default: True).
 
         Returns:
             Dictionary containing:
                 - conversation_id: ID for the conversation
                 - content: Response text (if not streaming)
                 - stream_generator: Async generator function (if streaming)
-                - tool_calls: List of tool calls made
+                - tool_calls: List of tool calls made (if not auto-executed)
+                - tool_execution_history: History of tool executions (if auto-executed)
                 - tools: Tools configuration used
 
         Raises:
@@ -338,6 +366,8 @@ class OpenAIResponseManager:
                 has_vector_store=bool(vector_store_id),
                 has_functions=bool(function_definitions),
                 streaming_enabled=enable_streaming,
+                use_drug_database=use_drug_database,
+                enable_tool_execution=enable_tool_execution,
             )
 
             # Resolve model configuration
@@ -348,6 +378,25 @@ class OpenAIResponseManager:
                 subcomponent="process_query",
                 model=resolved_model,
             )
+
+            # Add drug database function if enabled and available
+            if use_drug_database and self.drug_data_manager:
+                drug_function = self.drug_data_manager.get_function_schema()
+                if function_definitions is None:
+                    function_definitions = [drug_function]
+                else:
+                    # Add drug function to existing functions if not already present
+                    if not any(
+                        f.get("name") == "search_drug_database"
+                        for f in function_definitions
+                    ):
+                        function_definitions = function_definitions + [drug_function]
+
+                self.logger.info(
+                    "Drug database tool added to function definitions",
+                    component="OpenAIResponseManager",
+                    subcomponent="process_query",
+                )
 
             # Prepare tools if needed
             tools = await self._prepare_tools_configuration(
@@ -360,7 +409,13 @@ class OpenAIResponseManager:
                 )
             else:
                 return await self._handle_standard_query(
-                    user_message, conversation_id, resolved_model, tools
+                    user_message,
+                    conversation_id,
+                    resolved_model,
+                    tools,
+                    vector_store_id,
+                    function_definitions,
+                    enable_tool_execution,
                 )
 
         except (ToolConfigurationError, VectorStoreError) as e:
@@ -438,18 +493,14 @@ class OpenAIResponseManager:
         conversation_id: Optional[str],
         model_name: str,
         tools: List[Dict[str, Any]],
+        vector_store_id: Optional[str],
+        function_definitions: Optional[List[Dict[str, Any]]],
+        enable_tool_execution: bool = True,
     ) -> Dict[str, Any]:
         """
         Handle a standard (non-streaming) query request.
 
-        Args:
-            user_message: User's message text.
-            conversation_id: Optional conversation ID.
-            model_name: Resolved model name.
-            tools: Prepared tools configuration.
-
-        Returns:
-            Dictionary with conversation_id, content, tool_calls, and tools.
+        CRITICAL FIX: Properly handles tool execution by passing the initial response object.
         """
         if conversation_id:
             # Continue existing conversation
@@ -458,50 +509,132 @@ class OpenAIResponseManager:
                 component="OpenAIResponseManager",
                 subcomponent="_handle_standard_query",
                 conversation_id=conversation_id,
+                enable_tool_execution=enable_tool_execution,
             )
 
-            result = await self.chat_manager.continue_chat_with_tools(
-                chat_id=conversation_id,
-                message=user_message,
-                vector_store_id=None,  # Already included in tools
-                functions=None,  # Already included in tools
-                model=model_name,
-            )
+            if enable_tool_execution and function_definitions:
+                # For existing conversations, use the regular continue_chat_with_tools
+                # which will detect tool calls and execute them
+                result = await self.chat_manager.continue_chat_with_tools(
+                    chat_id=conversation_id,
+                    message=user_message,
+                    vector_store_id=vector_store_id,
+                    functions=function_definitions,
+                    model=model_name,
+                )
 
-            self.logger.info(
-                "Conversation continued successfully",
-                component="OpenAIResponseManager",
-                subcomponent="_handle_standard_query",
-                conversation_id=conversation_id,
-                has_tool_calls=bool(result.get("tool_calls", [])),
-            )
+                # Check if there are tool calls to execute
+                if result.get("tool_calls"):
+                    # Retrieve the response object
+                    response = await asyncio.to_thread(
+                        self.chat_manager.client.responses.retrieve,
+                        response_id=result["response_id"],
+                    )
 
-            return {
-                "conversation_id": conversation_id,
-                "content": result["content"],
-                "tool_calls": result["tool_calls"],
-                "tools": tools,
-                "citations": result.get("citations", []),
-            }
+                    # Execute tools using the response object
+                    execution_result = (
+                        await self.chat_manager.continue_chat_with_tool_execution(
+                            chat_id=conversation_id,
+                            initial_response=response,
+                            vector_store_id=vector_store_id,
+                            functions=function_definitions,
+                            model=model_name,
+                        )
+                    )
+
+                    return {
+                        "conversation_id": execution_result["response_id"],
+                        "content": execution_result["content"],
+                        "tool_execution_history": execution_result[
+                            "tool_execution_history"
+                        ],
+                        "tools": tools,
+                        "citations": execution_result.get("citations", []),
+                    }
+
+                # No tool calls, return as-is
+                return {
+                    "conversation_id": result["response_id"],
+                    "content": result["content"],
+                    "tool_calls": result.get("tool_calls", []),
+                    "tools": tools,
+                    "citations": result.get("citations", []),
+                }
+            else:
+                # Original behavior without tool execution
+                result = await self.chat_manager.continue_chat_with_tools(
+                    chat_id=conversation_id,
+                    message=user_message,
+                    vector_store_id=vector_store_id,
+                    functions=function_definitions,
+                    model=model_name,
+                )
+
+                return {
+                    "conversation_id": result["response_id"],
+                    "content": result["content"],
+                    "tool_calls": result.get("tool_calls", []),
+                    "tools": tools,
+                    "citations": result.get("citations", []),
+                }
         else:
             # Start new conversation
             self.logger.info(
                 "Starting new conversation",
                 component="OpenAIResponseManager",
                 subcomponent="_handle_standard_query",
+                enable_tool_execution=enable_tool_execution,
             )
 
+            # Create initial chat
             conversation_id = await self.chat_manager.create_chat(
                 message=user_message, model=model_name, tools=tools
             )
 
-            # Retrieve and parse response
+            # Retrieve the response object
             response = await asyncio.to_thread(
                 self.chat_manager.client.responses.retrieve, response_id=conversation_id
             )
+
+            # Extract content and tool calls
             content, tool_calls, citations = await self._extract_response_content(
                 response
             )
+
+            self.logger.info(
+                f"Initial response created with {len(tool_calls)} tool calls",
+                component="OpenAIResponseManager",
+                subcomponent="_handle_standard_query",
+                conversation_id=conversation_id,
+                has_tool_calls=bool(tool_calls),
+            )
+
+            # CRITICAL FIX: If tool execution is enabled and there are tool calls,
+            # pass the RESPONSE OBJECT (not a message)
+            if enable_tool_execution and tool_calls and function_definitions:
+                self.logger.info(
+                    "Tool calls detected in new conversation, executing tools",
+                    component="OpenAIResponseManager",
+                    subcomponent="_handle_standard_query",
+                    tool_call_count=len(tool_calls),
+                )
+
+                # Pass the response object that already contains tool calls
+                result = await self.chat_manager.continue_chat_with_tool_execution(
+                    chat_id=conversation_id,
+                    initial_response=response,  # Pass response object, not empty message
+                    vector_store_id=vector_store_id,
+                    functions=function_definitions,
+                    model=model_name,
+                )
+
+                return {
+                    "conversation_id": result["response_id"],
+                    "content": result["content"],
+                    "tool_execution_history": result["tool_execution_history"],
+                    "tools": tools,
+                    "citations": result.get("citations", []),
+                }
 
             self.logger.info(
                 "New conversation created successfully",

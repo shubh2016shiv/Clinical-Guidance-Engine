@@ -93,7 +93,9 @@ class AsclepiusHealthcareAgent:
         query: str,
         conversation_id: Optional[str] = None,
         use_clinical_guidelines: bool = True,
+        use_drug_database: bool = True,
         streaming: bool = False,
+        enable_tool_execution: bool = True,
     ) -> Dict[str, Any]:
         """
         Consult the agent on a healthcare or medication-related question.
@@ -102,15 +104,19 @@ class AsclepiusHealthcareAgent:
             query: The user's healthcare question or concern.
             conversation_id: Optional ID to continue an existing consultation session.
             use_clinical_guidelines: Whether to enhance responses with clinical guidelines.
+            use_drug_database: Whether to enable drug database search tool (default: True).
             streaming: If True, return streaming response for real-time delivery.
+            enable_tool_execution: Whether to automatically execute tool calls (default: True).
 
         Returns:
             Dictionary containing:
                 - content: The agent's response (if not streaming)
                 - stream_generator: Async generator for streaming response chunks
                 - conversation_id: ID for tracking this consultation session
-                - tool_calls: Any tool calls made to fetch data
+                - tool_calls: Any tool calls made to fetch data (if tool execution disabled)
+                - tool_execution_history: History of executed tools (if tool execution enabled)
                 - guidelines_used: Whether clinical guidelines enhanced this response
+                - drug_database_used: Whether drug database was available
 
         Raises:
             ResponsesAPIError: If consultation fails.
@@ -124,7 +130,9 @@ class AsclepiusHealthcareAgent:
                 subcomponent="Consult",
                 query_length=len(query),
                 use_clinical_guidelines=use_clinical_guidelines,
+                use_drug_database=use_drug_database,
                 streaming=streaming,
+                enable_tool_execution=enable_tool_execution,
             )
 
             if streaming:
@@ -139,22 +147,29 @@ class AsclepiusHealthcareAgent:
                     "stream_generator": stream_gen,
                     "conversation_id": conversation_id,
                     "guidelines_used": vector_store_id is not None,
+                    "drug_database_used": use_drug_database
+                    and self.response_manager.drug_data_manager is not None,
                 }
             else:
-                # Standard response
+                # Standard response with drug database and tool execution support
                 result = await self.response_manager.process_query(
                     user_message=query,
                     conversation_id=conversation_id,
                     vector_store_id=vector_store_id,
                     enable_streaming=False,
+                    use_drug_database=use_drug_database,
+                    enable_tool_execution=enable_tool_execution,
                 )
 
                 return {
                     "content": result["content"],
                     "conversation_id": result["conversation_id"],
                     "tool_calls": result.get("tool_calls", []),
+                    "tool_execution_history": result.get("tool_execution_history", []),
                     "citations": result.get("citations", []),
                     "guidelines_used": vector_store_id is not None,
+                    "drug_database_used": use_drug_database
+                    and self.response_manager.drug_data_manager is not None,
                 }
 
         except Exception as e:
@@ -171,6 +186,7 @@ class AsclepiusHealthcareAgent:
         conversation_id: str,
         follow_up_query: str,
         use_clinical_guidelines: bool = True,
+        use_drug_database: bool = True,
     ) -> Dict[str, Any]:
         """
         Continue an ongoing healthcare consultation with a follow-up question.
@@ -179,6 +195,7 @@ class AsclepiusHealthcareAgent:
             conversation_id: The existing consultation session ID to continue.
             follow_up_query: The follow-up healthcare question or request.
             use_clinical_guidelines: Whether to enhance response with clinical guidelines.
+            use_drug_database: Whether to enable drug database search tool (default: True).
 
         Returns:
             Dictionary with response content and metadata (same as consult method).
@@ -187,6 +204,7 @@ class AsclepiusHealthcareAgent:
             query=follow_up_query,
             conversation_id=conversation_id,
             use_clinical_guidelines=use_clinical_guidelines,
+            use_drug_database=use_drug_database,
             streaming=False,
         )
 
@@ -275,15 +293,27 @@ class AsclepiusHealthcareAgent:
         Get the current status and configuration of Asclepius.
 
         Returns:
-            Dictionary with agent status information including knowledge base readiness
-            and manager configuration.
+            Dictionary with agent status information including knowledge base readiness,
+            drug database availability, and manager configuration.
         """
         manager_info = self.response_manager.get_manager_info()
+
+        drug_db_available = self.response_manager.drug_data_manager is not None
+        drug_db_info = None
+        if drug_db_available:
+            try:
+                drug_db_info = (
+                    self.response_manager.drug_data_manager.get_provider_info()
+                )
+            except Exception as e:
+                self.logger.warning(f"Failed to get drug database info: {e}")
 
         return {
             "agent_type": "AsclepiusHealthcareAgent",
             "knowledge_base_ready": self._vector_store_id is not None,
             "vector_store_id": self._vector_store_id,
+            "drug_database_available": drug_db_available,
+            "drug_database_info": drug_db_info,
             "response_manager": manager_info,
         }
 
@@ -302,6 +332,7 @@ class AsclepiusHealthcareAgent:
         question: str,
         conversation_id: Optional[str] = None,
         use_clinical_context: bool = True,
+        use_drug_database: bool = True,
         streaming: bool = False,
     ) -> Dict[str, Any]:
         """
@@ -311,6 +342,7 @@ class AsclepiusHealthcareAgent:
             question: The user's question about drugs/treatments.
             conversation_id: Optional existing conversation to continue.
             use_clinical_context: Whether to use clinical guidelines for enhanced responses.
+            use_drug_database: Whether to enable drug database search tool (default: True).
             streaming: If True, return streaming response.
 
         Returns:
@@ -320,5 +352,6 @@ class AsclepiusHealthcareAgent:
             query=question,
             conversation_id=conversation_id,
             use_clinical_guidelines=use_clinical_context,
+            use_drug_database=use_drug_database,
             streaming=streaming,
         )

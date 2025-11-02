@@ -162,19 +162,35 @@ def monitor_adapter_call(func: Callable) -> Callable:
 
     @wraps(func)
     async def wrapper(*args, **kwargs):
+        global _metrics_reporting_started, _metrics_reporting_task
+
+        # Start metrics reporting if it hasn't been started yet
+        # (this can happen if start_metrics_reporting() was called without a running event loop)
+        if not _metrics_reporting_started:
+            try:
+                loop = asyncio.get_running_loop()
+                # Create task and store reference to prevent duplicate creation
+                _metrics_reporting_task = loop.create_task(schedule_metrics_reporting())
+                _metrics_reporting_started = True
+                logger.debug("Started deferred metrics reporting in decorator")
+            except RuntimeError:
+                # Still no loop - should not happen in async context, but handle gracefully
+                logger.warning(
+                    "Cannot start metrics reporting - no event loop available"
+                )
+
         start_time = time.time()
-        provider_used = False
         model = kwargs.get("model")
         streaming = kwargs.get("stream", False)
 
         try:
-            # Check if provider is available
-            self = args[0]
-            await self._init_llm_provider()
-            provider_used = self.llm_provider is not None
-
-            # Call the function
+            # Call the function (it will initialize provider itself if needed)
             result = await func(*args, **kwargs)
+
+            # Determine provider_used after function execution
+            # by checking if provider is available
+            self = args[0]
+            provider_used = self.llm_provider is not None
 
             # Calculate response time
             response_time_ms = (time.time() - start_time) * 1000
@@ -187,6 +203,10 @@ def monitor_adapter_call(func: Callable) -> Callable:
         except Exception as e:
             # Calculate response time
             response_time_ms = (time.time() - start_time) * 1000
+
+            # Check provider status on error too
+            self = args[0]
+            provider_used = self.llm_provider is not None
 
             # Log metrics with error
             log_adapter_metrics(
@@ -209,6 +229,35 @@ async def schedule_metrics_reporting(interval_seconds: int = 3600):
         # get_metrics().reset()
 
 
+# Global flag and task reference to track if metrics reporting has been started
+_metrics_reporting_started = False
+_metrics_reporting_task = None
+
+
 def start_metrics_reporting():
-    """Start metrics reporting in the background."""
-    asyncio.create_task(schedule_metrics_reporting())
+    """Start metrics reporting in the background.
+
+    This function can be called from synchronous contexts (like __init__).
+    If an event loop is running, it will create the task immediately.
+    If no event loop is running, it will defer task creation to the first
+    async operation (via the decorator).
+    """
+    global _metrics_reporting_started, _metrics_reporting_task
+
+    # If already started, don't create another task
+    if _metrics_reporting_started:
+        return
+
+    try:
+        # Try to get the running event loop
+        loop = asyncio.get_running_loop()
+        # Event loop is running, create task immediately
+        _metrics_reporting_task = loop.create_task(schedule_metrics_reporting())
+        _metrics_reporting_started = True
+        logger.debug("Started metrics reporting in existing event loop")
+    except RuntimeError:
+        # No event loop running - defer to first async call
+        # This is safe because we're in a synchronous context (like __init__)
+        # The task will be created when the first decorated async method runs
+        _metrics_reporting_started = False
+        logger.debug("Deferred metrics reporting start - no event loop running")

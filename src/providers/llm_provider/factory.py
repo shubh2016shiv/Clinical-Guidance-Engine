@@ -148,6 +148,8 @@ def create_llm_provider(
     try:
         # Create provider instance
         # Pass all parameters and let the provider handle them
+        # Note: Settings from config.py are automatically pulled by provider __init__
+        # if not explicitly provided in kwargs. This ensures centralized control.
         provider = provider_class(
             config=config,
             model_name=model_name,

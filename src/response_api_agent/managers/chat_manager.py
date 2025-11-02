@@ -1,5 +1,6 @@
 import asyncio
-from typing import Dict, Any, List, Optional
+import json
+from typing import Dict, Any, List, Optional, Callable
 from openai import OpenAI, AsyncOpenAI
 from src.config import get_settings
 from src.response_api_agent.managers.tool_manager import (
@@ -43,6 +44,76 @@ class ChatManager:
         self._chat_cache: Dict[str, str] = {}  # Cache: chat_id -> last_response_id
         self.citation_manager = CitationManager(client=self.client)
         self.logger = get_component_logger("Chat")
+
+        # Registry for function tool executors
+        self._function_executors: Dict[str, Callable] = {}
+
+    def register_function_executor(
+        self, function_name: str, executor: Callable
+    ) -> None:
+        """
+        Register a function executor for tool calls.
+
+        Args:
+            function_name: Name of the function tool
+            executor: Callable that executes the function (can be async or sync)
+        """
+        self._function_executors[function_name] = executor
+        self.logger.info(
+            f"Registered function executor: {function_name}",
+            component="Chat",
+            subcomponent="RegisterFunctionExecutor",
+        )
+
+    async def _execute_function_call(
+        self, function_name: str, arguments: Dict[str, Any]
+    ) -> str:
+        """
+        Execute a function tool call.
+
+        Args:
+            function_name: Name of the function to execute
+            arguments: Dictionary of function arguments
+
+        Returns:
+            JSON string result from function execution
+        """
+        if function_name not in self._function_executors:
+            error_msg = f"No executor registered for function: {function_name}"
+            self.logger.error(
+                error_msg,
+                component="Chat",
+                subcomponent="ExecuteFunctionCall",
+            )
+            return json.dumps({"error": error_msg})
+
+        try:
+            executor = self._function_executors[function_name]
+
+            # Execute (handle both sync and async executors)
+            if asyncio.iscoroutinefunction(executor):
+                result = await executor(**arguments)
+            else:
+                result = executor(**arguments)
+
+            self.logger.info(
+                f"Successfully executed function: {function_name}",
+                component="Chat",
+                subcomponent="ExecuteFunctionCall",
+                arguments=arguments,
+            )
+
+            return result if isinstance(result, str) else json.dumps(result)
+
+        except Exception as e:
+            error_msg = f"Error executing function {function_name}: {str(e)}"
+            self.logger.error(
+                error_msg,
+                component="Chat",
+                subcomponent="ExecuteFunctionCall",
+                exc_info=True,
+            )
+            return json.dumps({"error": error_msg})
 
     @time_execution("Chat", "ExtractTextContent")
     def _extract_text_content(self, response):
@@ -130,6 +201,156 @@ class ChatManager:
                 error=str(e),
             )
             raise ContentParsingError(f"Failed to parse response content: {str(e)}")
+
+    def _extract_tool_calls_from_response(self, response) -> List[Dict[str, Any]]:
+        """
+        Extract tool calls from a response object in normalized format.
+
+        Handles both new (response.output) and legacy (response.tool_calls) structures.
+
+        Args:
+            response: Response object from the Responses API.
+
+        Returns:
+            List of dicts with keys: 'call_id', 'type', 'function_name', 'arguments'
+        """
+        tool_calls = []
+
+        try:
+            # Check for new response structure with output field
+            if hasattr(response, "output") and response.output:
+                for item in response.output:
+                    if hasattr(item, "type") and item.type == "function_call":
+                        # Extract function call details from new format
+                        call_id = getattr(item, "call_id", None)
+                        function_name = getattr(item, "name", None)
+                        # Handle None, empty string, or missing attribute cases
+                        arguments_raw = getattr(item, "arguments", None)
+                        arguments_str = (
+                            arguments_raw if arguments_raw not in (None, "") else "{}"
+                        )
+
+                        # Debug logging to inspect raw arguments value
+                        if arguments_raw is None or arguments_raw == "":
+                            self.logger.debug(
+                                "Function call has None or empty arguments, using default",
+                                component="Chat",
+                                subcomponent="ExtractToolCalls",
+                                call_id=call_id,
+                                function_name=function_name,
+                                raw_arguments=arguments_raw,
+                                item_type=type(item).__name__,
+                                item_attrs=[
+                                    attr
+                                    for attr in dir(item)
+                                    if not attr.startswith("_")
+                                ],
+                            )
+
+                        if call_id and function_name:
+                            try:
+                                # Parse arguments JSON string if needed
+                                arguments = (
+                                    json.loads(arguments_str)
+                                    if isinstance(arguments_str, str)
+                                    else arguments_str
+                                )
+                            except json.JSONDecodeError:
+                                self.logger.warning(
+                                    "Failed to parse function call arguments as JSON",
+                                    component="Chat",
+                                    subcomponent="ExtractToolCalls",
+                                    call_id=call_id,
+                                    arguments_str=arguments_str,
+                                )
+                                arguments = {}
+
+                            tool_calls.append(
+                                {
+                                    "call_id": call_id,
+                                    "type": "function_call",
+                                    "function_name": function_name,
+                                    "arguments": arguments,
+                                }
+                            )
+
+            # Legacy format check - response.tool_calls
+            elif hasattr(response, "tool_calls") and response.tool_calls:
+                for tool_call in response.tool_calls:
+                    if hasattr(tool_call, "function"):
+                        call_id = getattr(tool_call, "id", None)
+                        function_name = tool_call.function.name
+                        # Handle None, empty string, or missing attribute cases
+                        arguments_raw = getattr(tool_call.function, "arguments", None)
+                        arguments_str = (
+                            arguments_raw if arguments_raw not in (None, "") else "{}"
+                        )
+
+                        # Debug logging to inspect raw arguments value
+                        if arguments_raw is None or arguments_raw == "":
+                            self.logger.debug(
+                                "Function call has None or empty arguments, using default",
+                                component="Chat",
+                                subcomponent="ExtractToolCalls",
+                                call_id=call_id,
+                                function_name=function_name,
+                                raw_arguments=arguments_raw,
+                                tool_call_type=type(tool_call).__name__,
+                            )
+
+                        if call_id and function_name:
+                            try:
+                                # Parse arguments JSON string if needed
+                                arguments = (
+                                    json.loads(arguments_str)
+                                    if isinstance(arguments_str, str)
+                                    else arguments_str
+                                )
+                            except json.JSONDecodeError:
+                                self.logger.warning(
+                                    "Failed to parse function call arguments as JSON",
+                                    component="Chat",
+                                    subcomponent="ExtractToolCalls",
+                                    call_id=call_id,
+                                    arguments_str=arguments_str,
+                                )
+                                arguments = {}
+
+                            tool_calls.append(
+                                {
+                                    "call_id": call_id,
+                                    "type": "function_call",
+                                    "function_name": function_name,
+                                    "arguments": arguments,
+                                }
+                            )
+
+            if tool_calls:
+                self.logger.info(
+                    f"Extracted {len(tool_calls)} tool calls from response",
+                    component="Chat",
+                    subcomponent="ExtractToolCalls",
+                )
+                # Log extracted arguments for debugging
+                for tool_call in tool_calls:
+                    self.logger.debug(
+                        "Extracted tool call details",
+                        component="Chat",
+                        subcomponent="ExtractToolCalls",
+                        call_id=tool_call.get("call_id"),
+                        function_name=tool_call.get("function_name"),
+                        arguments=tool_call.get("arguments"),
+                    )
+
+        except Exception as e:
+            self.logger.error(
+                f"Error extracting tool calls: {e}",
+                component="Chat",
+                subcomponent="ExtractToolCalls",
+                exc_info=True,
+            )
+
+        return tool_calls
 
     @time_execution("Chat", "CreateChat")
     async def create_chat(
@@ -428,17 +649,8 @@ class ChatManager:
             # Process response content
             content = self._extract_text_content(response)
 
-            # Process tool calls if present
-            tool_calls = []
-            # Check for new response structure with output field
-            if hasattr(response, "output") and response.output:
-                for item in response.output:
-                    # Look for tool call items
-                    if hasattr(item, "type") and "call" in item.type:
-                        tool_calls.append(item)
-            # Fallback to legacy format
-            elif hasattr(response, "tool_calls") and response.tool_calls:
-                tool_calls = response.tool_calls
+            # Extract tool calls using normalized extraction method
+            tool_calls = self._extract_tool_calls_from_response(response)
 
             # Extract and append citations
             citations = await self.citation_manager.extract_citations_from_response(
@@ -486,6 +698,353 @@ class ChatManager:
             raise ResponsesAPIError(
                 message=f"Failed to continue chat with tools: {str(e)}"
             )
+
+    @time_execution("Chat", "ContinueChatWithToolOutputs")
+    async def continue_chat_with_tool_outputs(
+        self,
+        previous_response_id: str,
+        tool_outputs: List[Dict[str, Any]],
+        model: Optional[str] = None,
+        tools: Optional[List[Dict[str, Any]]] = None,
+    ) -> str:
+        """
+        Continue a conversation by submitting function call outputs.
+
+        This is the CORRECT way to handle function calling with Responses API.
+        The API requires function outputs to be submitted as structured
+        function_call_output items with matching call_id values.
+
+        Args:
+            previous_response_id: ID of the response that made the tool calls
+            tool_outputs: List of dicts with 'call_id' and 'output' keys
+            model: Optional model override
+            tools: Optional tools to include in the next response
+
+        Returns:
+            New response ID
+
+        Raises:
+            ResponsesAPIError: If submission fails
+        """
+        try:
+            model = model or self.settings.openai_model_name
+
+            self.logger.info(
+                "Continuing chat with tool outputs",
+                component="Chat",
+                subcomponent="ContinueChatWithToolOutputs",
+                previous_response_id=previous_response_id,
+                tool_output_count=len(tool_outputs),
+            )
+
+            # Format input as function_call_output items
+            # NOTE: Response API requires structured function_call_output items,
+            # not plain text messages. Each item must have:
+            # - type: "function_call_output"
+            # - call_id: matching the original tool call ID
+            # - output: the result string from function execution
+            input_items = []
+            for tool_output in tool_outputs:
+                input_items.append(
+                    {
+                        "type": "function_call_output",
+                        "call_id": tool_output["call_id"],
+                        "output": tool_output["output"],
+                    }
+                )
+
+            # Create response with tool outputs
+            # The input parameter accepts a list of structured items for function outputs
+            response = await self.response_adapter.create_response(
+                model=model,
+                previous_response_id=previous_response_id,
+                input=input_items,  # Send structured tool outputs, not text
+                instructions=get_system_prompt(),
+                tools=tools or [],
+            )
+
+            self.logger.info(
+                "Continued chat with tool outputs successfully",
+                component="Chat",
+                subcomponent="ContinueChatWithToolOutputs",
+                response_id=response.id,
+            )
+
+            return response.id
+
+        except Exception as e:
+            self.logger.error(
+                "Failed to continue chat with tool outputs",
+                component="Chat",
+                subcomponent="ContinueChatWithToolOutputs",
+                error=str(e),
+                exc_info=True,
+            )
+            raise ResponsesAPIError(
+                message=f"Failed to continue chat with tool outputs: {str(e)}"
+            )
+
+    @time_execution("Chat", "ContinueChatWithToolExecution")
+    async def continue_chat_with_tool_execution(
+        self,
+        chat_id: str,
+        message: Optional[str] = None,
+        initial_response: Optional[Any] = None,
+        vector_store_id: Optional[str] = None,
+        functions: Optional[List[Dict[str, Any]]] = None,
+        model: Optional[str] = None,
+        max_iterations: int = 5,
+    ) -> Dict[str, Any]:
+        """
+        Continue chat with automatic tool execution loop.
+
+        When the model makes tool calls, this method automatically executes them
+        and continues the conversation with the tool results until the model
+        provides a final text response (or max iterations is reached).
+
+        Args:
+            chat_id: Existing chat ID (or response ID for initial_response case)
+            message: New user message (required if initial_response is not provided)
+            initial_response: Response object with tool calls already present
+                (required if message is not provided). When provided, skips
+                the initial API call and extracts tool calls directly.
+            vector_store_id: Optional vector store ID for file_search
+            functions: Optional function definitions for function calling
+            model: Optional model override
+            max_iterations: Maximum number of tool execution iterations (default: 5)
+
+        Returns:
+            Dict with final response content, tool_calls history, and citations
+
+        Raises:
+            ResponsesAPIError: If neither message nor initial_response is provided
+        """
+        try:
+            # Parameter validation
+            if not message and not initial_response:
+                raise ResponsesAPIError(
+                    "Either 'message' or 'initial_response' must be provided"
+                )
+            if message and initial_response:
+                raise ResponsesAPIError(
+                    "Cannot provide both 'message' and 'initial_response'. "
+                    "Use 'message' for continuing conversations, "
+                    "'initial_response' for new conversations with existing tool calls."
+                )
+
+            self.logger.info(
+                "Starting chat with tool execution loop",
+                component="Chat",
+                subcomponent="ContinueChatWithToolExecution",
+                chat_id=chat_id,
+                max_iterations=max_iterations,
+                has_initial_response=initial_response is not None,
+                has_message=message is not None,
+            )
+
+            tool_execution_history = []
+            current_response_id = None
+            iteration = 0
+            content = ""
+            tool_calls = []
+            citations = []
+
+            # Handle initial_response case: extract tool calls directly from response
+            if initial_response:
+                self.logger.info(
+                    "Using provided initial_response, extracting tool calls directly",
+                    component="Chat",
+                    subcomponent="ContinueChatWithToolExecution",
+                    response_id=getattr(initial_response, "id", chat_id),
+                )
+
+                # Extract tool calls, content, and citations from the response object
+                current_response_id = getattr(initial_response, "id", chat_id)
+                content = self._extract_text_content(initial_response)
+                tool_calls = self._extract_tool_calls_from_response(initial_response)
+                citations = await self.citation_manager.extract_citations_from_response(
+                    initial_response
+                )
+
+                if citations:
+                    content = self.citation_manager.append_citations_to_content(
+                        content, citations
+                    )
+            else:
+                # Handle message case: get initial response with tools via API call
+                self.logger.info(
+                    "Getting initial response with tools via API call",
+                    component="Chat",
+                    subcomponent="ContinueChatWithToolExecution",
+                )
+
+                result = await self.continue_chat_with_tools(
+                    chat_id=chat_id,
+                    message=message,
+                    vector_store_id=vector_store_id,
+                    functions=functions,
+                    model=model,
+                )
+
+                current_response_id = result["response_id"]
+                content = result["content"]
+                tool_calls = result.get("tool_calls", [])
+                citations = result.get("citations", [])
+
+            # Get tools for subsequent iterations
+            if self.tool_manager:
+                tools = await self.tool_manager.get_tools_for_response(
+                    vector_store_id=vector_store_id, functions=functions
+                )
+            else:
+                tools = []
+
+            # Tool execution loop
+            while tool_calls and iteration < max_iterations:
+                iteration += 1
+                self.logger.info(
+                    f"Tool execution iteration {iteration}/{max_iterations}",
+                    component="Chat",
+                    subcomponent="ContinueChatWithToolExecution",
+                    tool_call_count=len(tool_calls),
+                )
+
+                # Execute all tool calls and collect outputs
+                # NOTE: Tool calls are now normalized dicts with 'call_id', 'function_name', 'arguments'
+                tool_outputs = []
+                for tool_call in tool_calls:
+                    try:
+                        call_id = tool_call["call_id"]
+                        function_name = tool_call["function_name"]
+                        arguments = tool_call["arguments"]
+
+                        self.logger.info(
+                            f"Executing tool: {function_name}",
+                            component="Chat",
+                            subcomponent="ContinueChatWithToolExecution",
+                            call_id=call_id,
+                            arguments=arguments,
+                        )
+
+                        # Execute function
+                        result_str = await self._execute_function_call(
+                            function_name, arguments
+                        )
+
+                        # Collect tool output in format required by continue_chat_with_tool_outputs
+                        tool_outputs.append(
+                            {
+                                "call_id": call_id,
+                                "output": result_str,
+                            }
+                        )
+
+                        tool_execution_history.append(
+                            {
+                                "iteration": iteration,
+                                "call_id": call_id,
+                                "function": function_name,
+                                "arguments": arguments,
+                                "result": result_str,
+                            }
+                        )
+
+                    except Exception as e:
+                        error_msg = f"Error processing tool call: {str(e)}"
+                        self.logger.error(
+                            error_msg,
+                            component="Chat",
+                            subcomponent="ContinueChatWithToolExecution",
+                            exc_info=True,
+                        )
+                        # Still submit error output with call_id if available
+                        tool_outputs.append(
+                            {
+                                "call_id": tool_call.get(
+                                    "call_id", f"error_{iteration}"
+                                ),
+                                "output": json.dumps({"error": error_msg}),
+                            }
+                        )
+
+                if not tool_outputs:
+                    break
+
+                # CRITICAL FIX: Use the proper method to submit tool outputs
+                # Response API requires structured function_call_output items with call_id,
+                # not plain text messages
+                current_response_id = await self.continue_chat_with_tool_outputs(
+                    previous_response_id=current_response_id,
+                    tool_outputs=tool_outputs,
+                    model=model,
+                    tools=tools,
+                )
+
+                # Retrieve the new response
+                response = await asyncio.to_thread(
+                    self.client.responses.retrieve, response_id=current_response_id
+                )
+
+                # Extract content and tool calls from new response
+                content = self._extract_text_content(response)
+                tool_calls = self._extract_tool_calls_from_response(response)
+                new_citations = (
+                    await self.citation_manager.extract_citations_from_response(
+                        response
+                    )
+                )
+                citations.extend(new_citations)
+
+            # Check if we hit max iterations
+            if iteration >= max_iterations and tool_calls:
+                self.logger.warning(
+                    f"Reached max iterations ({max_iterations}) with pending tool calls",
+                    component="Chat",
+                    subcomponent="ContinueChatWithToolExecution",
+                )
+
+            self.logger.info(
+                f"Tool execution loop completed in {iteration} iterations",
+                component="Chat",
+                subcomponent="ContinueChatWithToolExecution",
+                final_response_id=current_response_id,
+            )
+
+            return {
+                "response_id": current_response_id,
+                "content": content,
+                "tool_execution_history": tool_execution_history,
+                "citations": citations,
+                "iterations": iteration,
+            }
+
+        except Exception as e:
+            self.logger.error(
+                "Failed in tool execution loop",
+                component="Chat",
+                subcomponent="ContinueChatWithToolExecution",
+                error=str(e),
+                exc_info=True,
+            )
+            raise ResponsesAPIError(message=f"Failed in tool execution loop: {str(e)}")
+
+    def _format_tool_results_message(self, tool_results: List[Dict[str, Any]]) -> str:
+        """
+        Format tool execution results as a message for the next conversation turn.
+
+        Args:
+            tool_results: List of tool execution results
+
+        Returns:
+            Formatted message string
+        """
+        formatted_parts = []
+        for result in tool_results:
+            formatted_parts.append(
+                f"Tool '{result['function_name']}' returned:\n{result['result']}"
+            )
+
+        return "Tool execution results:\n\n" + "\n\n".join(formatted_parts)
 
     @time_execution("Chat", "SummarizeHistory")
     async def _summarize_history(

@@ -68,11 +68,28 @@ class OpenAIProvider(LLMProvider):
 
         # Build configuration if not provided
         if config is None:
+            # Pull settings from config.py as fallback values if not in kwargs
+            # This ensures centralized control via config.py
+            temperature = kwargs.pop("temperature", None)
+            if temperature is None:
+                temperature = settings.openai_temperature
+
+            top_p = kwargs.pop("top_p", None)
+            if top_p is None:
+                top_p = settings.openai_top_p
+
+            max_tokens = kwargs.pop("max_tokens", None)
+            if max_tokens is None:
+                max_tokens = settings.openai_max_output_tokens
+
             config = LLMConfig(
                 model_name=model_name or settings.openai_model_name or "gpt-4",
                 api_type=api_type or APIType.CHAT_COMPLETION,
                 stream_mode=stream_mode or StreamMode.DISABLED,
                 token_limit=kwargs.pop("token_limit", 8192),
+                temperature=temperature,
+                top_p=top_p,
+                max_tokens=max_tokens,
                 **kwargs,
             )
 
@@ -270,6 +287,9 @@ class OpenAIProvider(LLMProvider):
 
         Priority: kwargs > config > defaults
 
+        CRITICAL: Responses API may not support temperature, top_p, max_output_tokens
+        on all models. These parameters are conditionally included based on API type.
+
         Args:
             **kwargs: Parameter overrides
 
@@ -277,42 +297,56 @@ class OpenAIProvider(LLMProvider):
             Dictionary of generation parameters
         """
         params = {}
+        is_responses_api = self.config.api_type == APIType.RESPONSES
 
-        # Temperature
+        # Temperature - only include if explicitly in kwargs for Responses API
+        # For Chat Completions, always include from config if available
         if "temperature" in kwargs:
-            params["temperature"] = kwargs["temperature"]
-        elif self.config.temperature is not None:
+            if not is_responses_api:
+                params["temperature"] = kwargs["temperature"]
+            # For Responses API, only include if explicitly requested
+            elif is_responses_api and kwargs.get("temperature") is not None:
+                params["temperature"] = kwargs["temperature"]
+        elif self.config.temperature is not None and not is_responses_api:
+            # Include from config only for Chat Completions API
             params["temperature"] = self.config.temperature
 
-        # Max tokens
+        # Max tokens - only include if explicitly in kwargs for Responses API
         if "max_tokens" in kwargs:
-            params["max_tokens"] = kwargs["max_tokens"]
-        elif self.config.max_tokens is not None:
+            if not is_responses_api:
+                params["max_tokens"] = kwargs["max_tokens"]
+            elif is_responses_api and kwargs.get("max_tokens") is not None:
+                params["max_tokens"] = kwargs["max_tokens"]
+        elif self.config.max_tokens is not None and not is_responses_api:
             params["max_tokens"] = self.config.max_tokens
 
-        # Top P
+        # Top P - only include if explicitly in kwargs for Responses API
         if "top_p" in kwargs:
-            params["top_p"] = kwargs["top_p"]
-        elif self.config.top_p is not None:
+            if not is_responses_api:
+                params["top_p"] = kwargs["top_p"]
+            elif is_responses_api and kwargs.get("top_p") is not None:
+                params["top_p"] = kwargs["top_p"]
+        elif self.config.top_p is not None and not is_responses_api:
             params["top_p"] = self.config.top_p
 
-        # Frequency penalty
-        if "frequency_penalty" in kwargs:
-            params["frequency_penalty"] = kwargs["frequency_penalty"]
-        elif self.config.frequency_penalty is not None:
-            params["frequency_penalty"] = self.config.frequency_penalty
+        # Frequency penalty - only for Chat Completions
+        if not is_responses_api:
+            if "frequency_penalty" in kwargs:
+                params["frequency_penalty"] = kwargs["frequency_penalty"]
+            elif self.config.frequency_penalty is not None:
+                params["frequency_penalty"] = self.config.frequency_penalty
 
-        # Presence penalty
-        if "presence_penalty" in kwargs:
-            params["presence_penalty"] = kwargs["presence_penalty"]
-        elif self.config.presence_penalty is not None:
-            params["presence_penalty"] = self.config.presence_penalty
+            # Presence penalty - only for Chat Completions
+            if "presence_penalty" in kwargs:
+                params["presence_penalty"] = kwargs["presence_penalty"]
+            elif self.config.presence_penalty is not None:
+                params["presence_penalty"] = self.config.presence_penalty
 
-        # Stop sequences
-        if "stop" in kwargs:
-            params["stop"] = kwargs["stop"]
-        elif self.config.stop is not None:
-            params["stop"] = self.config.stop
+            # Stop sequences - only for Chat Completions
+            if "stop" in kwargs:
+                params["stop"] = kwargs["stop"]
+            elif self.config.stop is not None:
+                params["stop"] = self.config.stop
 
         return params
 

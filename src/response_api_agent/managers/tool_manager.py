@@ -166,8 +166,14 @@ class ToolManager:
                 )
 
             # Configure function tool (Responses API schema)
+            # NOTE: Response API requires 'name' at root level when tools array contains multiple tools
+            # The error "Missing required parameter: 'tools[1].name'" occurs when this is missing.
+            # Reference: OpenAI Response API requires name at root level for function tools
             tool_config = {
                 "type": "function",
+                "name": function[
+                    "name"
+                ],  # Required at root level by Response API when mixing tool types
                 "function": {
                     "name": function["name"],
                     "description": function["description"],
