@@ -235,6 +235,29 @@ class OpenAIProvider(LLMProvider):
                 params["previous_response_id"] = previous_response_id
             if tools:
                 params["tools"] = tools
+                # CRITICAL DEBUG: Log tools being sent to API
+                logger.info(
+                    "[DEBUG] Tools being sent to Response API via LLM Provider",
+                    tool_count=len(tools),
+                    tools=tools,
+                )
+                # Log detailed parameters for each function tool
+                for i, tool in enumerate(tools):
+                    if isinstance(tool, dict) and tool.get("type") == "function":
+                        # CRITICAL FIX: Responses API uses flat structure (not nested "function" object)
+                        # The tool dict has: {"type": "function", "name": "...", "description": "...", "parameters": {...}}
+                        func_name = tool.get("name", "unknown")
+                        params_dict = tool.get("parameters", {})
+                        props = params_dict.get("properties", {})
+                        logger.info(
+                            f"[DEBUG] LLM Provider Tool {i} before API call",
+                            function_name=func_name,
+                            has_parameters=bool(params_dict),
+                            properties_count=len(props),
+                            property_names=list(props.keys()) if props else [],
+                            required_fields=params_dict.get("required", []),
+                            full_parameters=params_dict,
+                        )
 
             # Add streaming flag
             params["stream"] = stream

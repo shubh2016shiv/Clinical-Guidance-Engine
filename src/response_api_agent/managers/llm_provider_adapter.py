@@ -112,6 +112,31 @@ class ResponseAPIAdapter:
         # These parameters are not automatically added here to avoid API errors.
         # If needed, they should be explicitly passed in kwargs.
         logger.info("Falling back to direct Response API execution")
+
+        # CRITICAL DEBUG: Log tools being sent to API
+        if "tools" in kwargs and kwargs["tools"]:
+            logger.debug(
+                "DEBUG: Tools being sent to Response API",
+                tool_count=len(kwargs["tools"]),
+                tools=kwargs["tools"],
+            )
+            # Log detailed parameters for each function tool
+            for i, tool in enumerate(kwargs["tools"]):
+                if isinstance(tool, dict) and tool.get("type") == "function":
+                    func_def = tool.get("function", {})
+                    func_name = func_def.get("name", "unknown")
+                    params = func_def.get("parameters", {})
+                    props = params.get("properties", {})
+                    logger.debug(
+                        f"DEBUG: Tool {i} before API call",
+                        function_name=func_name,
+                        has_parameters=bool(params),
+                        properties_count=len(props),
+                        property_names=list(props.keys()) if props else [],
+                        required_fields=params.get("required", []),
+                        full_parameters=params,
+                    )
+
         return await asyncio.to_thread(self.client.responses.create, **kwargs)
 
     @monitor_adapter_call

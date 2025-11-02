@@ -165,24 +165,62 @@ class ToolManager:
                     f"Function {function_name} missing required fields"
                 )
 
+            # NEW: Validate that parameters.properties is not empty
+            parameters = function.get("parameters", {})
+            properties = parameters.get("properties", {})
+
+            if not properties:
+                self.logger.info(
+                    "[WARNING] Function parameters.properties is empty - this will result in empty tool call arguments",
+                    component="Tool",
+                    subcomponent="ConfigureFunctionTool",
+                    function_name=function_name,
+                    parameters_structure=parameters,
+                )
+
+            # Log the complete function schema for debugging
+            self.logger.info(
+                "DEBUG: Function schema received for configuration",
+                component="Tool",
+                subcomponent="ConfigureFunctionTool",
+                function_name=function_name,
+                has_parameters=bool(parameters),
+                properties_count=len(properties),
+                required_fields=parameters.get("required", []),
+            )
+
             # Configure function tool (Responses API schema)
-            # NOTE: Response API requires 'name' at root level when tools array contains multiple tools
-            # The error "Missing required parameter: 'tools[1].name'" occurs when this is missing.
-            # Reference: OpenAI Response API requires name at root level for function tools
+            # CRITICAL FIX: Responses API expects FLAT structure (not nested "function" object)
+            # Reference: https://learn.microsoft.com/en-us/azure/ai-foundry/openai/how-to/responses?tabs=python-key#function-calling
+            # The Responses API requires: {"type": "function", "name": "...", "description": "...", "parameters": {...}}
             tool_config = {
                 "type": "function",
-                "name": function[
-                    "name"
-                ],  # Required at root level by Response API when mixing tool types
-                "function": {
-                    "name": function["name"],
-                    "description": function["description"],
-                    "parameters": function["parameters"],
-                    "strict": function.get(
-                        "strict", True
-                    ),  # Use provided strict value or default to True
-                },
+                "name": function["name"],
+                "description": function["description"],
+                "parameters": function["parameters"],
             }
+
+            # NEW: Validate that parameters were preserved in the tool config
+            tool_parameters = tool_config.get("parameters", {})
+            tool_properties = tool_parameters.get("properties", {})
+
+            if not tool_properties:
+                self.logger.warning(
+                    "ALERT: Tool configuration resulted in empty properties - this is the root cause of empty arguments",
+                    component="Tool",
+                    subcomponent="ConfigureFunctionTool",
+                    function_name=function_name,
+                    tool_config_parameters=tool_parameters,
+                )
+            else:
+                self.logger.info(
+                    "[DEBUG] Tool configuration preserves parameters successfully",
+                    component="Tool",
+                    subcomponent="ConfigureFunctionTool",
+                    function_name=function_name,
+                    preserved_properties_count=len(tool_properties),
+                    property_names=list(tool_properties.keys()),
+                )
 
             # Cache tool configuration
             cache_key = f"function_{function['name']}"
@@ -375,8 +413,11 @@ class ToolManager:
                             return False
 
                 elif tool["type"] == "function":
-                    function = tool.get("function", {})
-                    function_name = function.get("name", "unknown")
+                    # CRITICAL FIX: Responses API uses flat structure (not nested "function" object)
+                    # The tool dict has: {"type": "function", "name": "...", "description": "...", "parameters": {...}}
+                    function_name = tool.get("name", "unknown")
+                    description = tool.get("description")
+                    parameters = tool.get("parameters", {})
 
                     self.logger.info(
                         "Validating function tool",
@@ -385,26 +426,45 @@ class ToolManager:
                         function_name=function_name,
                     )
 
-                    if not function:
+                    # Validate required fields are at root level (flat structure)
+                    if not function_name or function_name == "unknown":
                         self.logger.error(
-                            "function tool missing function definition",
+                            "function tool missing name field",
                             component="Tool",
                             subcomponent="ValidateTools",
                         )
                         return False
 
+                    if not description:
+                        self.logger.error(
+                            "function tool missing description field",
+                            component="Tool",
+                            subcomponent="ValidateTools",
+                            function_name=function_name,
+                        )
+                        return False
+
+                    if not parameters:
+                        self.logger.error(
+                            "function tool missing parameters field",
+                            component="Tool",
+                            subcomponent="ValidateTools",
+                            function_name=function_name,
+                        )
+                        return False
+
                     if not all(
-                        key in function for key in ["name", "description", "parameters"]
+                        key in tool for key in ["name", "description", "parameters"]
                     ):
                         self.logger.error(
-                            "Function missing required fields",
+                            "Function tool missing required fields",
                             component="Tool",
                             subcomponent="ValidateTools",
                             function_name=function_name,
                             missing_fields=[
                                 key
                                 for key in ["name", "description", "parameters"]
-                                if key not in function
+                                if key not in tool
                             ],
                         )
                         return False

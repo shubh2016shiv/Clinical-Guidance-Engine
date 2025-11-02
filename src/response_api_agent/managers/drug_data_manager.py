@@ -246,60 +246,83 @@ class DrugDataManager:
         Returns:
             Function schema dictionary compatible with Responses API
         """
+        # return {
+        #     "name": "search_drug_database",
+        #     "description": (
+        #         "Search the pharmaceutical drug database for detailed medication information. "
+        #         "This tool MUST be used when the user asks about:\n"
+        #         "- Specific drug names (e.g., 'metformin', 'lisinopril', 'aspirin')\n"
+        #         "- Drug formulations and dosage strengths\n"
+        #         "- Drug classifications or therapeutic categories\n"
+        #         "- Routes of administration\n"
+        #         "- Any medication-specific details\n\n"
+        #         "IMPORTANT: Always extract the drug name or class from the user's query and pass it as a parameter. "
+        #         "If the user mentions a specific drug name, extract it and use the drug_name parameter. "
+        #         "If the user asks about a drug class, extract it and use the drug_class parameter."
+        #     ),
+        #     "parameters": {
+        #         "type": "object",
+        #         "properties": {
+        #             "drug_name": {
+        #                 "type": "string",
+        #                 "description": (
+        #                     "The name of the drug to search for. Extract this from the user's question. "
+        #                     "Examples: 'metformin', 'lisinopril', 'aspirin', 'ibuprofen'. "
+        #                     "REQUIRED when the user mentions a specific medication name."
+        #                 ),
+        #             },
+        #             "drug_class": {
+        #                 "type": "string",
+        #                 "description": (
+        #                     "The drug class or category to search for. "
+        #                     "Examples: 'ACE inhibitor', 'beta blocker', 'NSAID', 'antidiabetic'. "
+        #                     "Use this parameter when the user asks about a class of medications."
+        #                 ),
+        #             },
+        #             "limit": {
+        #                 "type": "integer",
+        #                 "description": (
+        #                     "Maximum number of results to return (1-20). "
+        #                     "Default is 5. Use higher values for broader searches."
+        #                 ),
+        #                 "default": 5,
+        #                 "minimum": 1,
+        #                 "maximum": 20,
+        #             },
+        #         },
+        #         "anyOf": [
+        #             {"required": ["drug_name"]},
+        #             {"required": ["drug_class"]},
+        #         ],
+        #         # Make drug_name required by default - this handles the most common use case
+        #         # When user asks about a drug class, the model should still extract it as drug_class
+        #         # "required": ["drug_name"],
+        #         "additionalProperties": False,
+        #     },
+        #     "strict": True,
+        # }
         return {
             "name": "search_drug_database",
-            "description": (
-                "Search the pharmaceutical drug database for detailed medication information. "
-                "This tool MUST be used when the user asks about:\n"
-                "- Specific drug names (e.g., 'metformin', 'lisinopril', 'aspirin')\n"
-                "- Drug formulations and dosage strengths\n"
-                "- Drug classifications or therapeutic categories\n"
-                "- Routes of administration\n"
-                "- Any medication-specific details\n\n"
-                "IMPORTANT: Always extract the drug name or class from the user's query and pass it as a parameter. "
-                "If the user mentions a specific drug name, extract it and use the drug_name parameter. "
-                "If the user asks about a drug class, extract it and use the drug_class parameter."
-            ),
+            "description": "Search the pharmaceutical drug database for medication information.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "drug_name": {
-                        "type": "string",
-                        "description": (
-                            "The name of the drug to search for. Extract this from the user's question. "
-                            "Examples: 'metformin', 'lisinopril', 'aspirin', 'ibuprofen'. "
-                            "REQUIRED when the user mentions a specific medication name."
-                        ),
-                    },
                     "drug_class": {
                         "type": "string",
-                        "description": (
-                            "The drug class or category to search for. "
-                            "Examples: 'ACE inhibitor', 'beta blocker', 'NSAID', 'antidiabetic'. "
-                            "Use this parameter when the user asks about a class of medications."
-                        ),
+                        "description": "The drug class or category (REQUIRED).",
+                    },
+                    "drug_name": {
+                        "type": "string",
+                        "description": "Specific drug name (optional).",
                     },
                     "limit": {
                         "type": "integer",
-                        "description": (
-                            "Maximum number of results to return (1-20). "
-                            "Default is 5. Use higher values for broader searches."
-                        ),
-                        "default": 5,
-                        "minimum": 1,
-                        "maximum": 20,
+                        "description": "Max results to return.",
                     },
                 },
-                "anyOf": [
-                    {"required": ["drug_name"]},
-                    {"required": ["drug_class"]},
-                ],
-                # Make drug_name required by default - this handles the most common use case
-                # When user asks about a drug class, the model should still extract it as drug_class
-                # "required": ["drug_name"],
-                "additionalProperties": False,
+                "required": ["drug_class"],
             },
-            "strict": True,
+            "strict": False,
         }
 
     async def connect(self) -> None:
