@@ -123,9 +123,10 @@ class ResponseAPIAdapter:
             # Log detailed parameters for each function tool
             for i, tool in enumerate(kwargs["tools"]):
                 if isinstance(tool, dict) and tool.get("type") == "function":
-                    func_def = tool.get("function", {})
-                    func_name = func_def.get("name", "unknown")
-                    params = func_def.get("parameters", {})
+                    # CRITICAL FIX: Responses API uses flat structure (not nested "function" object)
+                    # The tool dict has: {"type": "function", "name": "...", "description": "...", "parameters": {...}}
+                    func_name = tool.get("name", "unknown")
+                    params = tool.get("parameters", {})
                     props = params.get("properties", {})
                     logger.debug(
                         f"DEBUG: Tool {i} before API call",
