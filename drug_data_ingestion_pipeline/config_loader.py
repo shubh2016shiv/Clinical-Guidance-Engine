@@ -502,8 +502,8 @@ class ConfigLoader:
                 load_dotenv(cwd_env, override=False)
                 self.logger.info(f"Loaded .env file from: {cwd_env}")
             else:
-                self.logger.debug(
-                    "No .env file found. Environment variables must be set manually."
+                self.logger.info(
+                    "[DEBUG] No .env file found. Environment variables must be set manually."
                 )
 
     def load(self) -> IngestionConfig:
@@ -627,8 +627,8 @@ class ConfigLoader:
             self.logger.error(error_msg)
             raise ValueError(error_msg)
 
-        self.logger.debug(
-            f"Embedding dimensions validated: {gemini_dims} (Gemini and Milvus match)"
+        self.logger.info(
+            f"[DEBUG] Embedding dimensions validated: {gemini_dims} (Gemini and Milvus match)"
         )
 
     def save_config(self, config: IngestionConfig, output_path: Union[str, Path]):

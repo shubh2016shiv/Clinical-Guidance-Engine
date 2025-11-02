@@ -129,8 +129,8 @@ class ChatManager:
         try:
             response_id = getattr(response, "id", "unknown")
 
-            self.logger.debug(
-                "Extracting text content from response",
+            self.logger.info(
+                "[DEBUG] Extracting text content from response",
                 component="Chat",
                 subcomponent="ExtractTextContent",
                 response_id=response_id,
@@ -154,8 +154,8 @@ class ChatManager:
                                         text_parts.append(content_block.text)
 
                             if text_parts:
-                                self.logger.debug(
-                                    "Extracted text from output structure",
+                                self.logger.info(
+                                    "[DEBUG] Extracted text from output structure",
                                     component="Chat",
                                     subcomponent="ExtractTextContent",
                                     response_id=response_id,
@@ -174,8 +174,8 @@ class ChatManager:
                         text_parts.append(content_block.text.value)
 
                 if text_parts:
-                    self.logger.debug(
-                        "Extracted text from legacy content structure",
+                    self.logger.info(
+                        "[DEBUG] Extracted text from legacy content structure",
                         component="Chat",
                         subcomponent="ExtractTextContent",
                         response_id=response_id,
@@ -217,6 +217,15 @@ class ChatManager:
         tool_calls = []
 
         try:
+            # DEBUG: Log the entire response object structure
+            self.logger.info(
+                "DEBUG: Full response object for tool call extraction",
+                component="Chat",
+                subcomponent="ExtractToolCalls",
+                response_vars=vars(response)
+                if hasattr(response, "__dict__")
+                else str(response),
+            )
             # Check for new response structure with output field
             if hasattr(response, "output") and response.output:
                 for item in response.output:
@@ -232,8 +241,8 @@ class ChatManager:
 
                         # Debug logging to inspect raw arguments value
                         if arguments_raw is None or arguments_raw == "":
-                            self.logger.debug(
-                                "Function call has None or empty arguments, using default",
+                            self.logger.info(
+                                "[DEBUG] Function call has None or empty arguments, using default",
                                 component="Chat",
                                 subcomponent="ExtractToolCalls",
                                 call_id=call_id,
@@ -288,8 +297,8 @@ class ChatManager:
 
                         # Debug logging to inspect raw arguments value
                         if arguments_raw is None or arguments_raw == "":
-                            self.logger.debug(
-                                "Function call has None or empty arguments, using default",
+                            self.logger.info(
+                                "[DEBUG] Function call has None or empty arguments, using default",
                                 component="Chat",
                                 subcomponent="ExtractToolCalls",
                                 call_id=call_id,
@@ -333,13 +342,31 @@ class ChatManager:
                 )
                 # Log extracted arguments for debugging
                 for tool_call in tool_calls:
-                    self.logger.debug(
-                        "Extracted tool call details",
+                    self.logger.info(
+                        "[DEBUG] Extracted tool call details",
                         component="Chat",
                         subcomponent="ExtractToolCalls",
                         call_id=tool_call.get("call_id"),
                         function_name=tool_call.get("function_name"),
                         arguments=tool_call.get("arguments"),
+                    )
+
+            # CRITICAL INFO LOG: Function calls detected with arguments - visible in logs
+            if tool_calls:
+                for tool_call in tool_calls:
+                    function_name = tool_call.get("function_name", "unknown")
+                    arguments = tool_call.get("arguments", {})
+                    call_id = tool_call.get("call_id", "unknown")
+
+                    self.logger.info(
+                        f"✓ Function Call Detected: {function_name}",
+                        component="Chat",
+                        subcomponent="ExtractToolCalls",
+                        function_name=function_name,
+                        call_id=call_id,
+                        arguments_extracted=arguments,
+                        arguments_count=len(arguments),
+                        is_empty=not bool(arguments),
                     )
 
         except Exception as e:
@@ -615,9 +642,62 @@ class ChatManager:
 
             # Get tools from tool manager
             try:
+                # NEW: Log functions before tool preparation
+                if functions:
+                    self.logger.info(
+                        "[DEBUG] Functions received for tool preparation",
+                        component="Chat",
+                        subcomponent="ContinueChatWithTools",
+                        function_count=len(functions),
+                        function_names=[f.get("name") for f in functions],
+                    )
+                    # Log detailed parameters for each function
+                    for func in functions:
+                        func_name = func.get("name", "unknown")
+                        params = func.get("parameters", {})
+                        props = params.get("properties", {})
+                        self.logger.info(
+                            f"[DEBUG] Function '{func_name}' parameters detail",
+                            component="Chat",
+                            subcomponent="ContinueChatWithTools",
+                            function_name=func_name,
+                            has_parameters=bool(params),
+                            properties_count=len(props),
+                            property_names=list(props.keys()) if props else [],
+                            required_fields=params.get("required", []),
+                        )
+
                 tools = await self.tool_manager.get_tools_for_response(
                     vector_store_id=vector_store_id, functions=functions
                 )
+
+                # NEW: Log tools after preparation
+                if tools:
+                    self.logger.info(
+                        "[DEBUG] Tools prepared successfully",
+                        component="Chat",
+                        subcomponent="ContinueChatWithTools",
+                        tool_count=len(tools),
+                        tool_types=[t.get("type") for t in tools],
+                    )
+                    # Log detailed parameters for each function tool
+                    for tool in tools:
+                        if tool.get("type") == "function":
+                            func_def = tool.get("function", {})
+                            func_name = func_def.get("name", "unknown")
+                            params = func_def.get("parameters", {})
+                            props = params.get("properties", {})
+                            self.logger.info(
+                                f"[DEBUG] Tool function '{func_name}' configuration",
+                                component="Chat",
+                                subcomponent="ContinueChatWithTools",
+                                function_name=func_name,
+                                has_parameters=bool(params),
+                                properties_count=len(props),
+                                property_names=list(props.keys()) if props else [],
+                                required_fields=params.get("required", []),
+                            )
+
                 # Validate tools
                 is_valid = await self.tool_manager.validate_tools(tools)
                 if not is_valid:
@@ -862,6 +942,25 @@ class ChatManager:
                 current_response_id = getattr(initial_response, "id", chat_id)
                 content = self._extract_text_content(initial_response)
                 tool_calls = self._extract_tool_calls_from_response(initial_response)
+
+                # INFO LOG: Tool calls detected after extraction
+                if tool_calls:
+                    self.logger.info(
+                        f"🔧 {len(tool_calls)} Tool Call(s) Detected in Response",
+                        component="Chat",
+                        subcomponent="ContinueChatWithToolExecution",
+                        response_id=current_response_id,
+                        tool_call_count=len(tool_calls),
+                        tool_calls=[
+                            {
+                                "function": tc.get("function_name"),
+                                "arguments": tc.get("arguments"),
+                                "call_id": tc.get("call_id"),
+                            }
+                            for tc in tool_calls
+                        ],
+                    )
+
                 citations = await self.citation_manager.extract_citations_from_response(
                     initial_response
                 )
@@ -918,12 +1017,16 @@ class ChatManager:
                         function_name = tool_call["function_name"]
                         arguments = tool_call["arguments"]
 
+                        # CRITICAL INFO LOG: Function call execution with arguments
                         self.logger.info(
-                            f"Executing tool: {function_name}",
+                            f"→ Executing Function: {function_name}",
                             component="Chat",
                             subcomponent="ContinueChatWithToolExecution",
+                            function_name=function_name,
                             call_id=call_id,
-                            arguments=arguments,
+                            arguments_extracted=arguments,
+                            arguments_count=len(arguments),
+                            is_empty=not bool(arguments),
                         )
 
                         # Execute function

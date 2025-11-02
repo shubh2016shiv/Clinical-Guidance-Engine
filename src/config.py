@@ -20,7 +20,7 @@ class Settings(BaseSettings):
         description="OpenAI API Key loaded from .env. Required for OpenAI API access.",
     )
     openai_model_name: str = Field(
-        default="gpt-4",
+        default="gpt-4o",
         description="OpenAI model name, can be overridden in .env. Used by response API managers and LLM providers.",
     )
 
