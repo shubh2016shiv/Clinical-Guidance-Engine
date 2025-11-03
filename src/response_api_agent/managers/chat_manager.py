@@ -233,6 +233,8 @@ class ChatManager:
             List of dicts with keys: 'call_id', 'type', 'function_name', 'arguments'
         """
         tool_calls = []
+        file_search_detected = False
+        function_calls_detected = []
 
         try:
             # DEBUG: Log the entire response object structure
@@ -246,6 +248,18 @@ class ChatManager:
             )
             # Check for new response structure with output field
             if hasattr(response, "output") and response.output:
+                # First pass: detect file_search tool
+                for item in response.output:
+                    if hasattr(item, "type") and item.type == "file_search":
+                        file_search_detected = True
+                        self.logger.info(
+                            "FILE_SEARCH TOOL DETECTED IN RESPONSE OUTPUT",
+                            component="Chat",
+                            subcomponent="ExtractToolCalls",
+                            tool_type="file_search",
+                        )
+
+                # Second pass: extract function calls
                 for item in response.output:
                     if hasattr(item, "type") and item.type == "function_call":
                         # Extract function call details from new format
@@ -300,6 +314,7 @@ class ChatManager:
                                     "arguments": arguments,
                                 }
                             )
+                            function_calls_detected.append(function_name)
 
             # Legacy format check - response.tool_calls
             elif hasattr(response, "tool_calls") and response.tool_calls:
@@ -351,6 +366,7 @@ class ChatManager:
                                     "arguments": arguments,
                                 }
                             )
+                            function_calls_detected.append(function_name)
 
             if tool_calls:
                 self.logger.info(
@@ -369,6 +385,31 @@ class ChatManager:
                         arguments=tool_call.get("arguments"),
                     )
 
+            # Emphasized logging: determine which tools were triggered
+            tool_trigger_type = None
+            if file_search_detected and function_calls_detected:
+                tool_trigger_type = "BOTH"
+            elif file_search_detected:
+                tool_trigger_type = "FILE_SEARCH"
+            elif function_calls_detected:
+                tool_trigger_type = "FUNCTION_CALL"
+
+            if tool_trigger_type:
+                self.logger.info(
+                    f"--- TOOL TRIGGER DETECTED ---\n"
+                    f"TYPE: {tool_trigger_type}\n"
+                    f"FILE_SEARCH: {file_search_detected}\n"
+                    f"FUNCTION_CALLS: {len(function_calls_detected)}\n"
+                    f"FUNCTION_NAMES: {function_calls_detected}\n"
+                    f"-----------------------------",
+                    component="Chat",
+                    subcomponent="ExtractToolCalls",
+                    file_search_detected=file_search_detected,
+                    function_calls_count=len(function_calls_detected),
+                    function_names=function_calls_detected,
+                    total_tool_calls=len(tool_calls),
+                )
+
             # CRITICAL INFO LOG: Function calls detected with arguments - visible in logs
             if tool_calls:
                 for tool_call in tool_calls:
@@ -377,7 +418,7 @@ class ChatManager:
                     call_id = tool_call.get("call_id", "unknown")
 
                     self.logger.info(
-                        f"✓ Function Call Detected: {function_name}",
+                        f"FUNCTION CALL DETECTED: {function_name}",
                         component="Chat",
                         subcomponent="ExtractToolCalls",
                         function_name=function_name,
@@ -734,6 +775,21 @@ class ChatManager:
                 )
                 tools = []
 
+            # Emphasized logging: Initial LLM input context before API call
+            tool_types_list = [t.get("type", "unknown") for t in (tools or [])]
+
+            self.logger.info(
+                f"--- LLM INPUT CONTEXT (INITIAL QUERY) ---\n"
+                f"MESSAGE_LENGTH: {len(message)} chars\n"
+                f"TOOLS_AVAILABLE: {tool_types_list}\n"
+                f"-----------------------------------------",
+                component="Chat",
+                subcomponent="ContinueChatWithTools",
+                message_length=len(message),
+                tools_available=tool_types_list,
+                tools_count=len(tools or []),
+            )
+
             # Continue chat with tools
             response_id = await self.continue_chat(
                 chat_id=chat_id, message=message, model=model, tools=tools
@@ -851,6 +907,30 @@ class ChatManager:
                     }
                 )
 
+            # Emphasized logging: LLM input context before API call
+            tools_available = [t.get("type", "unknown") for t in (tools or [])]
+
+            # Calculate total output size
+            total_output_size = sum(
+                len(str(item.get("output", ""))) for item in input_items
+            )
+
+            self.logger.info(
+                f"--- LLM INPUT CONTEXT (TOOL OUTPUTS) ---\n"
+                f"PREVIOUS_RESPONSE_ID: {previous_response_id}\n"
+                f"TOOL_OUTPUTS_COUNT: {len(input_items)}\n"
+                f"TOOL_OUTPUTS_TOTAL_SIZE: {total_output_size} chars\n"
+                f"TOOLS_AVAILABLE: {tools_available}\n"
+                f"----------------------------------------",
+                component="Chat",
+                subcomponent="ContinueChatWithToolOutputs",
+                previous_response_id=previous_response_id,
+                tool_outputs_count=len(input_items),
+                total_output_size=total_output_size,
+                tools_available=tools_available,
+                tools_count=len(tools or []),
+            )
+
             # Create response with tool outputs
             # The input parameter accepts a list of structured items for function outputs
             response = await self.response_adapter.create_response(
@@ -964,7 +1044,7 @@ class ChatManager:
                 # INFO LOG: Tool calls detected after extraction
                 if tool_calls:
                     self.logger.info(
-                        f"🔧 {len(tool_calls)} Tool Call(s) Detected in Response",
+                        "TOOL CALLS DETECTED IN RESPONSE",
                         component="Chat",
                         subcomponent="ContinueChatWithToolExecution",
                         response_id=current_response_id,
@@ -977,6 +1057,22 @@ class ChatManager:
                             }
                             for tc in tool_calls
                         ],
+                    )
+
+                    # Log tool trigger summary
+                    file_search_count = sum(
+                        1 for tc in tool_calls if tc.get("type") == "file_search"
+                    )
+                    function_call_count = sum(
+                        1 for tc in tool_calls if tc.get("type") == "function_call"
+                    )
+                    self.logger.info(
+                        f"TOOLS TRIGGERED: FILE_SEARCH={file_search_count}, FUNCTION_CALL={function_call_count}, TOTAL={len(tool_calls)}",
+                        component="Chat",
+                        subcomponent="ContinueChatWithToolExecution",
+                        file_search_count=file_search_count,
+                        function_call_count=function_call_count,
+                        total_tools=len(tool_calls),
                     )
 
                 citations = await self.citation_manager.extract_citations_from_response(

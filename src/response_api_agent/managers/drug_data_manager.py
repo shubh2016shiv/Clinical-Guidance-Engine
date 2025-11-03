@@ -120,6 +120,23 @@ class DrugDataManager:
             # Format results as table for LLM consumption
             formatted_table = self._format_results_as_table(results)
 
+            # Emphasized logging: Function call result with chunk count
+            self.logger.info(
+                f"=== FUNCTION CALL RESULT ===\n"
+                f"FUNCTION: search_drug_database\n"
+                f"CHUNKS_RETRIEVED: {len(results)}\n"
+                f"DRUG_NAME: {drug_name}\n"
+                f"DRUG_CLASS: {drug_class}\n"
+                f"LIMIT_REQUESTED: {limit}\n"
+                f"===========================",
+                component="DrugData",
+                subcomponent="SearchDrugDatabase",
+                chunk_count=len(results),
+                drug_name=drug_name,
+                drug_class=drug_class,
+                limit_requested=limit,
+            )
+
             self.logger.info(
                 f"Drug database search completed - Found {len(results)} results",
                 component="DrugData",
