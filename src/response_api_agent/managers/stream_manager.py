@@ -469,7 +469,85 @@ class StreamManager:
                         if not tool_outputs:
                             break
 
-                        # Continue chat with tool outputs
+                        # # Continue chat with tool outputs
+                        # self.logger.info(
+                        #     "Submitting tool outputs and continuing stream",
+                        #     component="Stream",
+                        #     subcomponent="StreamResponseWithToolExecution",
+                        #     tool_output_count=len(tool_outputs),
+                        # )
+
+                        # current_response_id = (
+                        #     await self.chat_manager.continue_chat_with_tool_outputs(
+                        #         previous_response_id=current_response_id,
+                        #         tool_outputs=tool_outputs,
+                        #         model=model,
+                        #         tools=tools,
+                        #     )
+                        # )
+
+                        # # Retrieve the continuation response (continue_chat_with_tool_outputs creates non-streaming response)
+                        # self.logger.info(
+                        #     f"Retrieving continuation response (iteration {iteration})",
+                        #     component="Stream",
+                        #     subcomponent="StreamResponseWithToolExecution",
+                        #     response_id=current_response_id,
+                        # )
+
+                        # # Retrieve the response that was just created
+                        # continuation_response = (
+                        #     await self.async_client.responses.retrieve(
+                        #         current_response_id
+                        #     )
+                        # )
+
+                        # # Extract text content from the continuation response
+                        # text_content = self.chat_manager._extract_text_content(
+                        #     continuation_response
+                        # )
+
+                        # # Yield the text content in chunks for streaming-like behavior
+                        # if text_content:
+                        #     # Yield text in reasonable chunks
+                        #     chunk_size = 100
+                        #     for i in range(0, len(text_content), chunk_size):
+                        #         chunk = text_content[i : i + chunk_size]
+                        #         if callback:
+                        #             callback(chunk)
+                        #         print(chunk, end="", flush=True)
+                        #         yield {
+                        #             "text": chunk,
+                        #             "response_id": current_response_id,
+                        #             "is_citation": False,
+                        #         }
+
+                        # # Extract citations from continuation response
+                        # continuation_citations = (
+                        #     await self.citation_manager.extract_citations_from_response(
+                        #         continuation_response
+                        #     )
+                        # )
+
+                        # # Yield citations if any
+                        # if continuation_citations:
+                        #     citation_text = (
+                        #         "\n\n"
+                        #         + self.citation_manager.format_citations_section(
+                        #             continuation_citations
+                        #         )
+                        #     )
+                        #     print(citation_text, end="", flush=True)
+                        #     yield {
+                        #         "text": citation_text,
+                        #         "response_id": current_response_id,
+                        #         "is_citation": True,
+                        #         "citations": continuation_citations,
+                        #     }
+
+                        # # Use this response to check for more tool calls
+                        # final_response = continuation_response
+
+                        # Continue chat with tool outputs using STREAMING
                         self.logger.info(
                             "Submitting tool outputs and continuing stream",
                             component="Stream",
@@ -477,82 +555,159 @@ class StreamManager:
                             tool_output_count=len(tool_outputs),
                         )
 
-                        current_response_id = (
-                            await self.chat_manager.continue_chat_with_tool_outputs(
-                                previous_response_id=current_response_id,
-                                tool_outputs=tool_outputs,
-                                model=model,
-                                tools=tools,
+                        # Format tool outputs as function_call_output items
+                        input_items = []
+                        for tool_output in tool_outputs:
+                            input_items.append(
+                                {
+                                    "type": "function_call_output",
+                                    "call_id": tool_output["call_id"],
+                                    "output": tool_output["output"],
+                                }
                             )
+
+                        # CRITICAL FIX: Create STREAMING response with tool outputs
+                        # This enables true streaming instead of manual chunking
+                        stream = await self.response_adapter.create_streaming_response(
+                            model=model,
+                            previous_response_id=current_response_id,
+                            input=input_items,  # Tool outputs as structured items
+                            instructions=get_system_prompt(),
+                            tools=tools or [],
+                            stream=True,  # Enable streaming
                         )
 
-                        # Retrieve the continuation response (continue_chat_with_tool_outputs creates non-streaming response)
+                        # Stream the continuation response in real-time
                         self.logger.info(
-                            f"Retrieving continuation response (iteration {iteration})",
+                            f"Streaming continuation response (iteration {iteration})",
                             component="Stream",
                             subcomponent="StreamResponseWithToolExecution",
                             response_id=current_response_id,
                         )
 
-                        # Retrieve the response that was just created
-                        continuation_response = (
-                            await self.async_client.responses.retrieve(
-                                current_response_id
+                        # Process streaming response chunks
+                        continuation_response_id = None
+                        collected_annotations = []  # Track citations during stream
+                        async for chunk in stream:
+                            try:
+                                chunk_type = type(chunk).__name__
+
+                                # Extract response ID from ResponseCreatedEvent
+                                if chunk_type == "ResponseCreatedEvent" and hasattr(
+                                    chunk, "response"
+                                ):
+                                    continuation_response_id = chunk.response.id
+                                    if continuation_response_id:
+                                        current_response_id = continuation_response_id
+
+                                # Handle ResponseTextDeltaEvent for text content
+                                elif chunk_type == "ResponseTextDeltaEvent" and hasattr(
+                                    chunk, "delta"
+                                ):
+                                    text = chunk.delta
+                                    if text and text.strip():
+                                        if callback:
+                                            callback(text)
+                                        print(text, end="", flush=True)
+                                        yield {
+                                            "text": text,
+                                            "response_id": current_response_id,
+                                            "is_citation": False,
+                                        }
+
+                                # CRITICAL: Capture annotation events during streaming (for inline citations)
+                                elif (
+                                    chunk_type
+                                    == "ResponseOutputTextAnnotationAddedEvent"
+                                ):
+                                    if hasattr(chunk, "annotation"):
+                                        collected_annotations.append(chunk.annotation)
+                                        self.logger.debug(
+                                            "Annotation captured during continuation stream",
+                                            component="Stream",
+                                            subcomponent="StreamResponseWithToolExecution",
+                                            annotation_count=len(collected_annotations),
+                                        )
+
+                                # Log file search completion (informational)
+                                elif chunk_type == "ResponseFileSearchCallCompleted":
+                                    self.logger.info(
+                                        "File search call completed in continuation stream",
+                                        component="Stream",
+                                        subcomponent="StreamResponseWithToolExecution",
+                                    )
+
+                            except Exception as e:
+                                self.logger.warning(
+                                    "Error processing continuation stream chunk",
+                                    component="Stream",
+                                    subcomponent="StreamResponseWithToolExecution",
+                                    error=str(e),
+                                )
+                                continue
+
+                        # Log collected annotations if any were captured during streaming
+                        if collected_annotations:
+                            self.logger.info(
+                                "Captured annotations during continuation stream",
+                                component="Stream",
+                                subcomponent="StreamResponseWithToolExecution",
+                                annotation_count=len(collected_annotations),
                             )
-                        )
 
-                        # Extract text content from the continuation response
-                        text_content = self.chat_manager._extract_text_content(
-                            continuation_response
-                        )
-
-                        # Yield the text content in chunks for streaming-like behavior
-                        if text_content:
-                            # Yield text in reasonable chunks
-                            chunk_size = 100
-                            for i in range(0, len(text_content), chunk_size):
-                                chunk = text_content[i : i + chunk_size]
-                                if callback:
-                                    callback(chunk)
-                                print(chunk, end="", flush=True)
-                                yield {
-                                    "text": chunk,
-                                    "response_id": current_response_id,
-                                    "is_citation": False,
-                                }
-
-                        # Extract citations from continuation response
-                        continuation_citations = (
-                            await self.citation_manager.extract_citations_from_response(
-                                continuation_response
-                            )
-                        )
-
-                        # Yield citations if any
-                        if continuation_citations:
-                            citation_text = (
-                                "\n\n"
-                                + self.citation_manager.format_citations_section(
-                                    continuation_citations
+                        # After streaming completes, retrieve final response for tool call checking
+                        if current_response_id:
+                            continuation_response = (
+                                await self.async_client.responses.retrieve(
+                                    current_response_id
                                 )
                             )
-                            print(citation_text, end="", flush=True)
-                            yield {
-                                "text": citation_text,
-                                "response_id": current_response_id,
-                                "is_citation": True,
-                                "citations": continuation_citations,
-                            }
 
-                        # Use this response to check for more tool calls
-                        final_response = continuation_response
+                            # Extract citations from continuation response
+                            continuation_citations = await self.citation_manager.extract_citations_from_response(
+                                continuation_response
+                            )
+
+                            # Yield citations if any
+                            if continuation_citations:
+                                citation_text = (
+                                    "\n\n"
+                                    + self.citation_manager.format_citations_section(
+                                        continuation_citations
+                                    )
+                                )
+                                print(citation_text, end="", flush=True)
+                                yield {
+                                    "text": citation_text,
+                                    "response_id": current_response_id,
+                                    "is_citation": True,
+                                    "citations": continuation_citations,
+                                }
+
+                            # Use this response to check for more tool calls
+                            final_response = continuation_response
+                        else:
+                            self.logger.warning(
+                                "No response_id from continuation stream",
+                                component="Stream",
+                                subcomponent="StreamResponseWithToolExecution",
+                            )
+                            final_response = None
 
                         # Extract tool calls for next iteration
-                        tool_calls = (
-                            self.chat_manager._extract_tool_calls_from_response(
-                                final_response
+                        if final_response:
+                            tool_calls = (
+                                self.chat_manager._extract_tool_calls_from_response(
+                                    final_response
+                                )
                             )
-                        )
+                        else:
+                            tool_calls = []  # No more tool calls if response is None
+                            self.logger.warning(
+                                "Cannot extract tool calls - final_response is None",
+                                component="Stream",
+                                subcomponent="StreamResponseWithToolExecution",
+                            )
 
                     # Check if we hit max iterations with pending tool calls
                     if iteration >= max_iterations and tool_calls:
