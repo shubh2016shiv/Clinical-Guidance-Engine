@@ -141,6 +141,8 @@ class AsclepiusHealthcareAgent:
                     user_message=query,
                     conversation_id=conversation_id,
                     vector_store_id=vector_store_id,
+                    use_drug_database=use_drug_database,
+                    enable_tool_execution=enable_tool_execution,
                 )
 
                 return {

@@ -91,7 +91,7 @@ class OpenAIResponseManager:
         self.chat_manager = ChatManager(
             tool_manager=self.tool_manager, chat_history_limit=chat_history_limit
         )
-        self.stream_manager = StreamManager()
+        self.stream_manager = StreamManager(chat_manager=self.chat_manager)
         self.citation_manager = CitationManager(client=self.chat_manager.client)
 
         # Initialize drug data manager for Milvus integration
@@ -660,6 +660,8 @@ class OpenAIResponseManager:
         vector_store_id: Optional[str] = None,
         function_definitions: Optional[List[Dict[str, Any]]] = None,
         model_name: Optional[str] = None,
+        use_drug_database: bool = True,
+        enable_tool_execution: bool = True,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """
         Process a query with streaming response and conversation history.
@@ -673,6 +675,8 @@ class OpenAIResponseManager:
             vector_store_id: Optional vector store ID for file_search capability.
             function_definitions: Optional list of custom function definitions.
             model_name: Optional model override. Uses default if not specified.
+            use_drug_database: If True, enables drug database search tool (default: True).
+            enable_tool_execution: If True, enables automatic tool execution (default: True).
 
         Yields:
             Dictionary containing:
@@ -690,6 +694,8 @@ class OpenAIResponseManager:
                 has_conversation_id=bool(conversation_id),
                 has_vector_store=bool(vector_store_id),
                 has_functions=bool(function_definitions),
+                use_drug_database=use_drug_database,
+                enable_tool_execution=enable_tool_execution,
             )
 
             # Resolve model configuration
@@ -700,6 +706,25 @@ class OpenAIResponseManager:
                 subcomponent="process_streaming_query",
                 model=resolved_model,
             )
+
+            # Add drug database function if enabled and available
+            if use_drug_database and self.drug_data_manager:
+                drug_function = self.drug_data_manager.get_function_schema()
+                if function_definitions is None:
+                    function_definitions = [drug_function]
+                else:
+                    # Add drug function to existing functions if not already present
+                    if not any(
+                        f.get("name") == "search_drug_database"
+                        for f in function_definitions
+                    ):
+                        function_definitions = function_definitions + [drug_function]
+
+                self.logger.info(
+                    "Drug database tool added to streaming function definitions",
+                    component="OpenAIResponseManager",
+                    subcomponent="process_streaming_query",
+                )
 
             # Prepare tools
             tools = await self._prepare_tools_configuration(
@@ -739,18 +764,74 @@ class OpenAIResponseManager:
                     chunk_count=chunk_count,
                 )
             else:
+                # # CRITICAL FIX: Stream directly without creating chat first
+                # self.logger.info(
+                #     "Starting new streaming conversation",
+                #     component="OpenAIResponseManager",
+                #     subcomponent="process_streaming_query",
+                # )
+
+                # # Stream the response directly - no create_chat call
+                # response_id = None
+                # async for chunk_data in self.stream_manager.stream_response(
+                #     message=user_message, model=resolved_model, tools=tools
+                # ):
+                #     chunk_count += 1
+
+                #     # Extract response_id from first chunk if available
+                #     if response_id is None and chunk_data.get("response_id"):
+                #         response_id = chunk_data["response_id"]
+
+                #     yield {
+                #         "chunk": chunk_data.get("text", ""),
+                #         "conversation_id": response_id,  # Use extracted response_id instead of None
+                #         "tools": tools,
+                #         "is_citation": chunk_data.get("is_citation", False),
+                #     }
+
+                # self.logger.info(
+                #     "New conversation streaming completed",
+                #     component="OpenAIResponseManager",
+                #     subcomponent="process_streaming_query",
+                #     chunk_count=chunk_count,
+                # )
                 # CRITICAL FIX: Stream directly without creating chat first
                 self.logger.info(
                     "Starting new streaming conversation",
                     component="OpenAIResponseManager",
                     subcomponent="process_streaming_query",
+                    enable_tool_execution=enable_tool_execution,
+                    has_function_definitions=bool(function_definitions),
                 )
 
                 # Stream the response directly - no create_chat call
                 response_id = None
-                async for chunk_data in self.stream_manager.stream_response(
-                    message=user_message, model=resolved_model, tools=tools
-                ):
+
+                # Choose streaming method based on tool execution needs
+                if enable_tool_execution and function_definitions:
+                    # Use tool execution streaming
+                    self.logger.info(
+                        "Using streaming with tool execution",
+                        component="OpenAIResponseManager",
+                        subcomponent="process_streaming_query",
+                        function_count=len(function_definitions),
+                    )
+                    stream_source = (
+                        self.stream_manager.stream_response_with_tool_execution(
+                            message=user_message,
+                            model=resolved_model,
+                            tools=tools,
+                            vector_store_id=vector_store_id,
+                            functions=function_definitions,
+                        )
+                    )
+                else:
+                    # Use regular streaming (no tool execution)
+                    stream_source = self.stream_manager.stream_response(
+                        message=user_message, model=resolved_model, tools=tools
+                    )
+
+                async for chunk_data in stream_source:
                     chunk_count += 1
 
                     # Extract response_id from first chunk if available
@@ -770,7 +851,6 @@ class OpenAIResponseManager:
                     subcomponent="process_streaming_query",
                     chunk_count=chunk_count,
                 )
-
         except (ToolConfigurationError, VectorStoreError, StreamConnectionError) as e:
             self.logger.error(
                 "Error in streaming query processing",
