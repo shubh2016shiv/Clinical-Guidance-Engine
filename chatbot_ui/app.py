@@ -212,23 +212,24 @@ async def on_message(message: cl.Message):
                 is_citation = chunk_data.get("is_citation", False)
                 is_complete = chunk_data.get("is_complete", False)
 
+                # Collect citations from citation chunks or final completion chunk
+                chunk_citations = chunk_data.get("citations", [])
+                if chunk_citations:
+                    citations.extend(chunk_citations)
+
                 # Stream text chunks (excluding citations)
                 if chunk_text and not is_citation:
                     await response_msg.stream_token(chunk_text)
 
-                # Collect citations from final chunk
-                if is_complete:
-                    citations = chunk_data.get("citations", [])
-
-                    # Check for errors
-                    if chunk_data.get("error"):
-                        logger.error(
-                            "Error during message processing",
-                            component="ChainlitUI",
-                            subcomponent="OnMessage",
-                            session_id=session_id,
-                            error=chunk_data.get("error"),
-                        )
+                # Check for errors in completion chunk
+                if is_complete and chunk_data.get("error"):
+                    logger.error(
+                        "Error during message processing",
+                        component="ChainlitUI",
+                        subcomponent="OnMessage",
+                        session_id=session_id,
+                        error=chunk_data.get("error"),
+                    )
 
             # Add citations as elements if available
             if citations and SHOW_CITATION_ELEMENTS:

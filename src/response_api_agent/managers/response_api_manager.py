@@ -754,6 +754,7 @@ class OpenAIResponseManager:
                         "conversation_id": conversation_id,
                         "tools": tools,
                         "is_citation": chunk_data.get("is_citation", False),
+                        "citations": chunk_data.get("citations", []),
                     }
 
                 self.logger.info(
@@ -843,6 +844,7 @@ class OpenAIResponseManager:
                         "conversation_id": response_id,  # Use extracted response_id instead of None
                         "tools": tools,
                         "is_citation": chunk_data.get("is_citation", False),
+                        "citations": chunk_data.get("citations", []),
                     }
 
                 self.logger.info(

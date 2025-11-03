@@ -115,6 +115,12 @@ class ChainlitChatHandler:
                 if current_response_id and response_id is None:
                     response_id = current_response_id
 
+                # Collect citations from citation chunks
+                if is_citation:
+                    chunk_citations = chunk_data.get("citations", [])
+                    if chunk_citations:
+                        citations.extend(chunk_citations)
+
                 # Collect response text (excluding citations)
                 if chunk_text and not is_citation:
                     full_response.append(chunk_text)
@@ -128,9 +134,10 @@ class ChainlitChatHandler:
                     "citations": [],
                 }
 
-            # After streaming completes, extract citations from result metadata
-            # Note: Citations might be included in the final chunks or in metadata
-            citations = result.get("citations", [])
+            # After streaming completes, check if we have citations from chunks
+            # If not, try to get from result metadata as fallback
+            if not citations:
+                citations = result.get("citations", [])
 
             # Combine full response text
             full_response_text = "".join(full_response)
