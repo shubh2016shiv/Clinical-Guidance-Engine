@@ -415,7 +415,65 @@ class MilvusProvider(VectorDBProvider):
 
             # Prepare search parameters
             top_k = limit or self.config.search.top_k
-            output_fields_to_use = output_fields or self.config.search.output_fields
+            output_fields_to_use = (
+                output_fields
+                if output_fields is not None
+                else self.config.search.output_fields
+            )
+
+            # Ensure output_fields is not an empty list - Milvus requires None or non-empty list
+            # Empty lists can cause "Unsupported field type: 0" error
+            if (
+                isinstance(output_fields_to_use, list)
+                and len(output_fields_to_use) == 0
+            ):
+                output_fields_to_use = None
+
+            # Validate output_fields against collection schema if provided
+            # This prevents "Unsupported field type: 0" errors from invalid field names
+            if output_fields_to_use is not None:
+                try:
+                    # Get collection schema field names
+                    schema_field_names = {
+                        field.name for field in self._collection.schema.fields
+                    }
+
+                    # Filter to only include fields that exist in schema
+                    # Exclude primary key and vector field (not allowed in output_fields)
+                    valid_fields = [
+                        field
+                        for field in output_fields_to_use
+                        if field in schema_field_names
+                        and field != "id"  # Primary key not allowed
+                        and field != "embedding"  # Vector field not allowed
+                    ]
+
+                    # If no valid fields, set to None instead of empty list
+                    if len(valid_fields) == 0:
+                        logger.warning(
+                            f"No valid output_fields found, using None. "
+                            f"Requested: {output_fields_to_use}, "
+                            f"Schema fields: {sorted(schema_field_names)}"
+                        )
+                        output_fields_to_use = None
+                    elif len(valid_fields) < len(output_fields_to_use):
+                        # Some fields were invalid, log warning but use valid ones
+                        invalid_fields = set(output_fields_to_use) - set(valid_fields)
+                        logger.warning(
+                            f"Removed invalid output_fields: {invalid_fields}. "
+                            f"Using valid fields: {valid_fields}"
+                        )
+                        output_fields_to_use = valid_fields
+                    else:
+                        output_fields_to_use = valid_fields
+
+                except Exception as e:
+                    # If schema validation fails, log and use None to be safe
+                    logger.warning(
+                        f"Failed to validate output_fields against schema: {str(e)}. "
+                        f"Using None for safety."
+                    )
+                    output_fields_to_use = None
 
             # Build search parameters
             search_params = kwargs.get(
@@ -431,7 +489,7 @@ class MilvusProvider(VectorDBProvider):
                 f"Searching Milvus collection - "
                 f"Top K: {top_k}, "
                 f"Filter: {filter_expression or 'None'}, "
-                f"Output fields: {len(output_fields_to_use)}"
+                f"Output fields: {len(output_fields_to_use) if output_fields_to_use else 0}"
             )
 
             search_results = self._collection.search(
@@ -440,7 +498,7 @@ class MilvusProvider(VectorDBProvider):
                 param=search_params,
                 limit=top_k,
                 expr=filter_expression,
-                output_fields=output_fields_to_use if output_fields_to_use else None,
+                output_fields=output_fields_to_use,
             )
 
             # Format results

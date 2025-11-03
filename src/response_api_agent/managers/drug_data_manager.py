@@ -13,7 +13,8 @@ Key Features:
 
 import json
 import asyncio
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple
+from tabulate import tabulate
 
 from src.providers.vector_db_provider import (
     create_vector_db_provider,
@@ -47,13 +48,15 @@ class DrugDataManager:
         # Initialize or use provided vector database provider
         if vector_db_provider is None:
             try:
-                self.provider = create_vector_db_provider(provider_type="milvus")
+                self.vector_db_provider = create_vector_db_provider(
+                    provider_type="milvus"
+                )
                 self.logger.info("Created default Milvus provider for drug data")
             except Exception as e:
                 self.logger.error(f"Failed to create Milvus provider: {e}")
                 raise
         else:
-            self.provider = vector_db_provider
+            self.vector_db_provider = vector_db_provider
             self.logger.info("Using provided vector database provider")
 
     @time_execution("DrugData", "SearchDrugDatabase")
@@ -75,7 +78,9 @@ class DrugDataManager:
             limit: Maximum number of results to return (default: 5)
 
         Returns:
-            JSON string containing search results with drug information
+            Formatted string containing search results:
+            - If successful: Tabulated format with drug information for LLM consumption
+            - If error: JSON error object with error message and empty results
 
         Examples:
             >>> # Search by drug name
@@ -84,7 +89,7 @@ class DrugDataManager:
             >>> # Search by drug class
             >>> await search_drug_database(drug_class="ACE inhibitor")
 
-            >>> # Search by both (uses filter)
+            >>> # Search by both (uses formatted query)
             >>> await search_drug_database(drug_name="hypertension", drug_class="ACE inhibitor")
         """
         try:
@@ -106,14 +111,14 @@ class DrugDataManager:
                 return json.dumps({"error": error_msg, "results": []}, indent=2)
 
             # Perform search using the vector database provider
-            results = await self.provider.search_by_text(
+            results = await self.vector_db_provider.search_by_text(
                 query_text=query,
                 limit=limit,
                 filter_expression=filter_expr,
             )
 
-            # Format results for LLM consumption
-            formatted_results = self._format_results_for_llm(results)
+            # Format results as table for LLM consumption
+            formatted_table = self._format_results_as_table(results)
 
             self.logger.info(
                 f"Drug database search completed - Found {len(results)} results",
@@ -121,7 +126,7 @@ class DrugDataManager:
                 subcomponent="SearchDrugDatabase",
             )
 
-            return json.dumps(formatted_results, indent=2)
+            return formatted_table
 
         except VectorDBSearchError as e:
             error_msg = f"Drug database search failed: {str(e)}"
@@ -167,38 +172,88 @@ class DrugDataManager:
             self.logger.error(error_msg, exc_info=True)
             return json.dumps({"error": error_msg, "results": []}, indent=2)
 
+    def _format_search_query_text(
+        self, drug_name: Optional[str], drug_class: Optional[str]
+    ) -> str:
+        """
+        Format drug name and/or class into structured query text for embedding generation.
+
+        This method creates a consistent query format that matches the ingestion pipeline's
+        search_text format to ensure better semantic similarity matching. The formatted text
+        is used for embedding generation before performing vector similarity search against
+        the Milvus collection.
+
+        Args:
+            drug_name: Drug name to search for (e.g., "metformin", "lisinopril").
+                      Case-insensitive; will be used as-is for semantic search.
+            drug_class: Drug class to search for (e.g., "antidiabetic", "ACE inhibitor").
+                       Case-insensitive; will be used as-is for semantic search.
+
+        Returns:
+            Formatted query string in the format: "Drug: <name> | Drug Class: <class>"
+            If only one parameter is provided, returns simplified format with just that field.
+            Examples:
+                - Both provided: "Drug: metformin | Drug Class: antidiabetic"
+                - Drug name only: "Drug: metformin"
+                - Drug class only: "Drug Class: antidiabetic"
+
+        Raises:
+            ValueError: If both drug_name and drug_class are None or empty strings.
+        """
+        # Build query text based on available parameters
+        query_parts = []
+
+        if drug_name and drug_name.strip():
+            query_parts.append(f"Drug: {drug_name.strip()}")
+
+        if drug_class and drug_class.strip():
+            query_parts.append(f"Drug Class: {drug_class.strip()}")
+
+        # Join parts with separator
+        formatted_query = " | ".join(query_parts)
+
+        if not formatted_query:
+            raise ValueError(
+                "At least one of drug_name or drug_class must be provided and non-empty"
+            )
+
+        return formatted_query
+
     def _build_query_and_filter(
         self, drug_name: Optional[str], drug_class: Optional[str]
-    ) -> tuple[str, Optional[str]]:
+    ) -> Tuple[str, Optional[str]]:
         """
-        Build search query and optional filter expression.
+        Build search query for semantic search.
+
+        This method constructs a formatted query text for embedding generation.
+        Note: Filter expressions are NOT used to avoid exact match issues with
+        LLM-generated values. Semantic search via embeddings is sufficient.
 
         Args:
             drug_name: Drug name for semantic search
-            drug_class: Drug class for filtering
+            drug_class: Drug class for semantic search
 
         Returns:
-            Tuple of (query_text, filter_expression)
+            Tuple of (query_text, filter_expression) where:
+            - query_text: Formatted text like "Drug: metformin | Drug Class: antidiabetic"
+            - filter_expression: Always None (filter expressions disabled for semantic search)
         """
-        # Build query text for semantic search
-        if drug_name and drug_class:
-            # Both provided: search by name, filter by class
-            query = f"{drug_name} {drug_class}"
-            filter_expr = f'drug_class == "{drug_class}"'
-        elif drug_name:
-            # Only drug name: semantic search
-            query = drug_name
-            filter_expr = None
-        elif drug_class:
-            # Only drug class: search broadly, filter by class
-            query = drug_class
-            filter_expr = f'drug_class == "{drug_class}"'
-        else:
-            # Neither provided
-            query = ""
+        try:
+            # Use the helper to format query text
+            query = self._format_search_query_text(drug_name, drug_class)
+
+            # DO NOT use filter expressions - rely on semantic search via embeddings.
+            # The embedding search will naturally find relevant drugs based on similarity.
+            # LLM-generated values may not exactly match database values, so exact-match
+            # filters are unreliable. Semantic similarity is sufficient.
             filter_expr = None
 
-        return query, filter_expr
+            return query, filter_expr
+
+        except ValueError as e:
+            # If formatting fails, return empty query (will be caught later)
+            self.logger.debug(f"Query formatting error: {str(e)}")
+            return "", None
 
     def _format_results_for_llm(self, results: List[SearchResult]) -> Dict[str, Any]:
         """
@@ -235,6 +290,112 @@ class DrugDataManager:
             formatted["results"].append(drug_info)
 
         return formatted
+
+    def _format_results_as_table(self, results: List[SearchResult]) -> str:
+        """
+        Format search results as a tabulated string for LLM consumption.
+
+        This method converts SearchResult objects into a clean tabular format using the
+        tabulate library. Tabular format helps the LLM understand structured data better
+        and reduces hallucinations in responses by presenting information in a clear,
+        organized table structure.
+
+        The table provides all essential drug information in columns that are easy for
+        the LLM to parse and reference when generating responses.
+
+        Args:
+            results: List of SearchResult objects from vector database search
+
+        Returns:
+            String containing formatted table with headers and drug information.
+            If no results are found, returns a message indicating no data available.
+
+        Logs:
+            Info level: Logs the number of rows formatted in the table with full context
+
+        Table Columns (in order):
+            - Relevance: Similarity score (0-1 scale, higher = better match)
+            - Drug Name: Name of the medication
+            - Drug Class: Pharmacological classification
+            - Sub-Class: More specific classification within the class
+            - Therapeutic: Medical use/therapeutic indication
+            - Route: Administration route (e.g., oral, IV, intramuscular)
+            - Formulation: Physical form (e.g., tablet, solution, capsule)
+            - Dosages: Available dosage strengths for the drug
+
+        Example output:
+            Relevance    Drug Name    Drug Class    Sub-Class    Therapeutic    Route    Formulation    Dosages
+            ----------   -----------  -----------   -----------  -----------    ------   -----------    --------
+            0.9523       Metformin    Antidiabetic  Biguanide    Type 2 DM      Oral     Tablet         500mg...
+            0.9412       Glimepiride  Antidiabetic  Sulfonylurea Type 2 DM      Oral     Tablet         1mg...
+        """
+        try:
+            if not results:
+                self.logger.info(
+                    "No search results available to format as table",
+                    component="DrugData",
+                    subcomponent="FormatResultsAsTable",
+                    row_count=0,
+                )
+                return "No drug information found matching the search criteria."
+
+            # Prepare table data
+            table_data = []
+            for result in results:
+                row = [
+                    round(result.score, 4),  # Relevance score
+                    result.get_field("drug_name", "N/A"),
+                    result.get_field("drug_class", "N/A"),
+                    result.get_field("drug_sub_class", "N/A"),
+                    result.get_field("therapeutic_category", "N/A"),
+                    result.get_field("route_of_administration", "N/A"),
+                    result.get_field("formulation", "N/A"),
+                    result.get_field("dosage_strengths", "N/A"),
+                ]
+                table_data.append(row)
+
+            # Define table headers
+            headers = [
+                "Relevance",
+                "Drug Name",
+                "Drug Class",
+                "Sub-Class",
+                "Therapeutic",
+                "Route",
+                "Formulation",
+                "Dosages",
+            ]
+
+            # Format as table using tabulate
+            formatted_table = tabulate(
+                table_data,
+                headers=headers,
+                tablefmt="grid",  # Grid format for clear visualization
+                stralign="left",
+                numalign="right",
+                showindex=False,
+            )
+
+            # Log the formatting operation with row count
+            self.logger.info(
+                f"Formatted {len(results)} search results as table",
+                component="DrugData",
+                subcomponent="FormatResultsAsTable",
+                row_count=len(results),
+            )
+
+            return formatted_table
+
+        except Exception as e:
+            error_msg = f"Failed to format results as table: {str(e)}"
+            self.logger.error(
+                error_msg,
+                component="DrugData",
+                subcomponent="FormatResultsAsTable",
+                exc_info=True,
+            )
+            # Fallback to unformatted text if tabulation fails
+            return f"Error formatting results: {error_msg}"
 
     def get_function_schema(self) -> Dict[str, Any]:
         """
@@ -328,7 +489,7 @@ class DrugDataManager:
     async def connect(self) -> None:
         """Connect to the vector database."""
         try:
-            await self.provider.connect()
+            await self.vector_db_provider.connect()
             self.logger.info("Connected to drug database")
         except Exception as e:
             self.logger.error(f"Failed to connect to drug database: {e}")
@@ -337,7 +498,7 @@ class DrugDataManager:
     async def disconnect(self) -> None:
         """Disconnect from the vector database."""
         try:
-            await self.provider.disconnect()
+            await self.vector_db_provider.disconnect()
             self.logger.info("Disconnected from drug database")
         except Exception as e:
             self.logger.error(f"Failed to disconnect from drug database: {e}")
@@ -351,10 +512,10 @@ class DrugDataManager:
         """
         try:
             return {
-                "provider_type": self.provider.provider_type,
-                "collection_name": self.provider.collection_name,
-                "embedding_dimension": self.provider.embedding_dimension,
-                "is_connected": self.provider._is_connected,
+                "provider_type": self.vector_db_provider.provider_type,
+                "collection_name": self.vector_db_provider.collection_name,
+                "embedding_dimension": self.vector_db_provider.embedding_dimension,
+                "is_connected": self.vector_db_provider._is_connected,
             }
         except Exception as e:
             self.logger.error(f"Failed to get provider info: {e}")

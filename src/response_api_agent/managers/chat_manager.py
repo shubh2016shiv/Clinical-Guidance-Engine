@@ -139,11 +139,17 @@ class ChatManager:
 
             # Check for the new response structure with output field
             if hasattr(response, "output") and response.output:
+                # CRITICAL FIX: Detect if response contains tool calls (valid scenario with no text)
+                has_tool_calls = any(
+                    getattr(item, "type", None) == "function_call"
+                    for item in response.output
+                )
+
+                text_parts = []
                 for item in response.output:
                     # Look for ResponseOutputMessage type items
                     if hasattr(item, "type") and item.type == "message":
                         if hasattr(item, "content") and item.content:
-                            text_parts = []
                             for content_block in item.content:
                                 # Extract text from ResponseOutputText
                                 if (
@@ -153,15 +159,27 @@ class ChatManager:
                                     if hasattr(content_block, "text"):
                                         text_parts.append(content_block.text)
 
-                            if text_parts:
-                                self.logger.info(
-                                    "[DEBUG] Extracted text from output structure",
-                                    component="Chat",
-                                    subcomponent="ExtractTextContent",
-                                    response_id=response_id,
-                                    text_parts_count=len(text_parts),
-                                )
-                                return "\n".join(text_parts)
+                if text_parts:
+                    self.logger.info(
+                        "[DEBUG] Extracted text from output structure",
+                        component="Chat",
+                        subcomponent="ExtractTextContent",
+                        response_id=response_id,
+                        text_parts_count=len(text_parts),
+                    )
+                    return "\n".join(text_parts)
+
+                # CRITICAL FIX: Handle tool-call-only responses gracefully
+                # When response contains only tool calls and no text, this is valid behavior
+                if has_tool_calls:
+                    self.logger.info(
+                        "Response contains tool calls but no text content (valid scenario - model chose to call tools)",
+                        component="Chat",
+                        subcomponent="ExtractTextContent",
+                        response_id=response_id,
+                        has_tool_calls=True,
+                    )
+                    return ""
 
             # Legacy format check
             elif hasattr(response, "content") and response.content:

@@ -10,3 +10,4 @@ pandas[excel]==2.3.3
 PyYAML>=6.0.0
 pymilvus==2.6.3
 tqdm>=4.67.1
+tabulate==0.9.0

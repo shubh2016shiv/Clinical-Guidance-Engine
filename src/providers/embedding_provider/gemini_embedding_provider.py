@@ -11,6 +11,7 @@ Supported Models:
 
 import asyncio
 from typing import List, Optional, Dict, Any
+import math
 import google.generativeai as genai
 
 from src.config import get_settings
@@ -155,8 +156,12 @@ class GeminiEmbeddingProvider(EmbeddingProvider):
             if not self.validate_embedding(embedding):
                 raise EmbeddingProviderError("Invalid embedding dimension")
 
-            logger.debug(
-                f"Generated Gemini embedding - "
+            # Normalize embedding for similarity search consistency
+            # This ensures query embeddings match the normalized embeddings in the database
+            embedding = self._normalize_vector(embedding)
+
+            logger.info(
+                f"[DEBUG] Generated Gemini embedding - "
                 f"Text length: {len(text)}, Dimension: {len(embedding)}"
             )
 
@@ -202,6 +207,10 @@ class GeminiEmbeddingProvider(EmbeddingProvider):
             # Validate embedding
             if not self.validate_embedding(embedding):
                 raise EmbeddingProviderError("Invalid embedding dimension")
+
+            # Normalize embedding for similarity search consistency
+            # This ensures query embeddings match the normalized embeddings in the database
+            embedding = self._normalize_vector(embedding)
 
             logger.debug(
                 f"Generated Gemini embedding (sync) - "
@@ -374,6 +383,40 @@ class GeminiEmbeddingProvider(EmbeddingProvider):
             params["output_dimensionality"] = kwargs["output_dimensionality"]
 
         return params
+
+    def _normalize_vector(self, vector: List[float]) -> List[float]:
+        """
+        Normalize a vector to unit length (L2 norm).
+
+        This is critical for similarity search when using Inner Product (IP) metric,
+        as it makes IP equivalent to cosine similarity. Both query and database
+        embeddings must be normalized for accurate similarity calculations.
+
+        Args:
+            vector: Embedding vector as list of floats
+
+        Returns:
+            Normalized vector with unit length (magnitude = 1.0)
+        """
+        # Calculate L2 norm
+        magnitude = math.sqrt(sum(x * x for x in vector))
+
+        # Avoid division by zero (return zero vector if magnitude is 0)
+        if magnitude == 0:
+            logger.warning("Attempted to normalize zero vector, returning as-is")
+            return vector
+
+        # Normalize to unit length
+        normalized = [x / magnitude for x in vector]
+
+        # Verify normalization (should be ~1.0)
+        normalized_magnitude = math.sqrt(sum(x * x for x in normalized))
+        if abs(normalized_magnitude - 1.0) > 0.01:  # Allow small floating point errors
+            logger.warning(
+                f"Vector normalization check failed: magnitude={normalized_magnitude:.6f}"
+            )
+
+        return normalized
 
     def get_model_info(self) -> Dict[str, Any]:
         """
