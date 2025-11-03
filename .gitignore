@@ -21,3 +21,6 @@ logs/
 *_OBSELETE/
 *_DELETE*
 *_DELETE/
+
+# Chatbot conversation history
+chatbot_ui/conversations

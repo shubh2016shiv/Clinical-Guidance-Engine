@@ -1,0 +1,67 @@
+# Chainlit Configuration for Asclepius Healthcare AI Assistant
+
+[project]
+# Whether to enable telemetry (default: true). No personal data is collected.
+enable_telemetry = false
+
+# List of environment variables to be provided by each user to use the app.
+user_env = []
+
+# Duration (in seconds) during which the session is saved when the connection is lost
+session_timeout = 1800
+
+# Enable third parties caching (e.g LangChain cache)
+cache = false
+
+# Authorize users to upload files with messages
+[features]
+spontaneous_file_upload = {
+    enabled = false,
+    accept = ["*/*"],
+    max_files = 1,
+    max_size_mb = 2
+}
+
+[UI]
+# Name of the app and chatbot.
+name = "Asclepius Healthcare AI Assistant"
+
+# Show the readme while the conversation is empty.
+show_readme_as_default = false
+
+# Description of the app and chatbot. This is used for HTML tags.
+description = "Evidence-based medical guidance powered by clinical guidelines and drug databases"
+
+# Large size content are by default collapsed for a cleaner ui
+default_collapse_content = true
+
+# The default value for the expand messages settings.
+default_expand_messages = false
+
+# Hide the chain of thought details from the user in the UI.
+hide_cot = false
+
+[UI.theme]
+layout = "wide"
+
+[UI.theme.light]
+    background = "#FAFAFA"
+    paper = "#FFFFFF"
+
+    [UI.theme.light.primary]
+        main = "#2196F3"
+        dark = "#1976D2"
+        light = "#BBDEFB"
+
+[UI.theme.dark]
+    background = "#1E1E1E"
+    paper = "#252525"
+
+    [UI.theme.dark.primary]
+        main = "#42A5F5"
+        dark = "#1E88E5"
+        light = "#90CAF9"
+
+[meta]
+generated_by = "2.0.0"
+
