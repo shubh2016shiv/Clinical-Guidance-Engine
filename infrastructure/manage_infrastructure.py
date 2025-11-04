@@ -1,11 +1,15 @@
 """
-Infrastructure Management Script for Milvus and MongoDB Services.
+Asclepius Healthcare Chatbot - Infrastructure Management Script
 
-This script provides robust management of Docker Compose services including:
+This script manages Docker Compose infrastructure services for the Asclepius Healthcare Chatbot,
+including Milvus (vector database), MongoDB (document database), and Redis (cache).
+
+Features:
 - Starting services with health checks
 - Stopping services gracefully
 - Restarting services
 - Displaying connection information
+- Handling conflicting containers from other projects
 
 Usage:
     python manage_infrastructure.py --start
@@ -24,7 +28,7 @@ from tabulate import tabulate
 
 
 class InfrastructureManager:
-    """Manages Docker Compose infrastructure services."""
+    """Manages Docker Compose infrastructure services for Asclepius Healthcare Chatbot."""
 
     def __init__(self, compose_file_path: Optional[Path] = None):
         """
@@ -133,12 +137,24 @@ class InfrastructureManager:
         """
         Get the Docker Compose project name.
 
-        Docker Compose uses the directory name as the project name by default.
-        We'll use the compose file's directory name.
+        First tries to read the 'name' field from docker-compose.yml.
+        Falls back to directory name if not found.
 
         Returns:
             Project name string
         """
+        # Try to read the project name from docker-compose.yml
+        try:
+            import yaml
+
+            with open(self.compose_file_path, "r", encoding="utf-8") as f:
+                compose_data = yaml.safe_load(f)
+                if compose_data and "name" in compose_data:
+                    return compose_data["name"].lower()
+        except (ImportError, FileNotFoundError, KeyError, Exception):
+            # Fall back to directory name if YAML parsing fails or name not found
+            pass
+
         # Docker Compose uses the directory name (lowercased) as project name
         project_name = self.compose_dir.name.lower().replace(" ", "-").replace("_", "-")
         return project_name
@@ -204,6 +220,11 @@ class InfrastructureManager:
                 return False
 
             labels = json.loads(result.stdout.strip())
+
+            # Check for custom Asclepius project label first
+            custom_project = labels.get("project", "")
+            if custom_project == "asclepius-healthcare-chatbot":
+                return True
 
             # Check if container has compose project label
             compose_project = labels.get("com.docker.compose.project", "")
@@ -305,6 +326,7 @@ class InfrastructureManager:
             "attu",
             "milvus-standalone",
             "mongodb",
+            "redis",
         ]
 
         conflicting_containers = []
@@ -429,6 +451,7 @@ class InfrastructureManager:
                             "attu",
                             "milvus-standalone",
                             "mongodb",
+                            "redis",
                         ]
                         running_containers = []
                         for container in containers:
@@ -491,6 +514,7 @@ class InfrastructureManager:
                         "attu",
                         "milvus-standalone",
                         "mongodb",
+                        "redis",
                     ]
                     running_containers = []
                     for container in containers:
@@ -582,12 +606,13 @@ class InfrastructureManager:
             ["Attu UI", "http://localhost:8000", "-", "-"],
             ["MongoDB", "mongodb://localhost:27017", "admin", "password123"],
             ["MinIO", "http://localhost:9000", "minioadmin", "minioadmin"],
+            ["Redis", "redis://localhost:6379", "-", "redis123"],
         ]
 
         headers = ["Service", "URL/Connection String", "Username", "Password"]
 
         print("\n" + "=" * 80)
-        print("INFRASTRUCTURE CONNECTION INFORMATION")
+        print("ASCLEPIUS HEALTHCARE CHATBOT - INFRASTRUCTURE CONNECTION INFORMATION")
         print("=" * 80)
         print(tabulate(connection_data, headers=headers, tablefmt="grid"))
         print("=" * 80 + "\n")
@@ -596,7 +621,7 @@ class InfrastructureManager:
 def main():
     """Main CLI entry point."""
     parser = argparse.ArgumentParser(
-        description="Manage Docker Compose infrastructure services (Milvus & MongoDB)",
+        description="Asclepius Healthcare Chatbot - Manage Docker Compose infrastructure services (Milvus, MongoDB & Redis)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:

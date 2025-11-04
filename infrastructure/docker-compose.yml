@@ -1,3 +1,12 @@
+# Asclepius Healthcare Chatbot - Infrastructure Docker Compose Configuration
+# This file defines the infrastructure services for the Asclepius Healthcare Chatbot:
+# - Milvus: Vector database for pharmaceutical drug embeddings
+# - MongoDB: Document database for conversation storage
+# - Redis: Cache service for performance optimization
+# - Supporting services: etcd, MinIO, Attu UI
+
+name: asclepius-infrastructure
+
 version: '3.5'
 
 services:
@@ -38,6 +47,14 @@ services:
 
       - milvus
 
+    labels:
+
+      - "project=asclepius-healthcare-chatbot"
+
+      - "service=etcd"
+
+      - "description=Asclepius Healthcare Chatbot - etcd service for Milvus"
+
   minio:
 
     container_name: milvus-minio
@@ -76,6 +93,14 @@ services:
 
       - milvus
 
+    labels:
+
+      - "project=asclepius-healthcare-chatbot"
+
+      - "service=minio"
+
+      - "description=Asclepius Healthcare Chatbot - MinIO object storage for Milvus"
+
   attu:
 
     container_name: attu
@@ -97,6 +122,14 @@ services:
     networks:
 
       - milvus
+
+    labels:
+
+      - "project=asclepius-healthcare-chatbot"
+
+      - "service=attu"
+
+      - "description=Asclepius Healthcare Chatbot - Attu UI for Milvus management"
 
   standalone:
 
@@ -144,6 +177,14 @@ services:
 
       - milvus
 
+    labels:
+
+      - "project=asclepius-healthcare-chatbot"
+
+      - "service=milvus-standalone"
+
+      - "description=Asclepius Healthcare Chatbot - Milvus vector database"
+
   mongodb:
 
     container_name: mongodb
@@ -180,9 +221,61 @@ services:
 
       - milvus
 
+    labels:
+
+      - "project=asclepius-healthcare-chatbot"
+
+      - "service=mongodb"
+
+      - "description=Asclepius Healthcare Chatbot - MongoDB document database"
+
+  redis:
+
+    container_name: redis
+
+    image: redis:7.2-alpine
+
+    command: redis-server --requirepass redis123
+
+    volumes:
+
+      - ${DOCKER_VOLUME_DIRECTORY:-.}/volumes/redis:/data
+
+    ports:
+
+      - "6379:6379"
+
+    healthcheck:
+
+      test: ["CMD", "redis-cli", "-a", "redis123", "ping"]
+
+      interval: 30s
+
+      timeout: 10s
+
+      retries: 3
+
+      start_period: 10s
+
+    networks:
+
+      - milvus
+
+    labels:
+
+      - "project=asclepius-healthcare-chatbot"
+
+      - "service=redis"
+
+      - "description=Asclepius Healthcare Chatbot - Redis cache service"
+
 networks:
 
   milvus:
 
-    name: milvus
+    name: asclepius-network
+    
+    labels:
+      - "project=asclepius-healthcare-chatbot"
+      - "description=Asclepius Healthcare Chatbot Infrastructure Network"
 
