@@ -25,3 +25,8 @@ logs/
 # Chatbot conversation history
 chatbot_ui/conversations
 .chainlit
+
+# Docker Volumes
+**/volumes/
+infrastructure/volumes/
+volumes/
