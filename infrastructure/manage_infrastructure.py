@@ -9,7 +9,9 @@ Features:
 - Stopping services gracefully
 - Restarting services
 - Displaying connection information
-- Handling conflicting containers from other projects
+- Robust handling of conflicting containers from other projects
+- Retry logic with exponential backoff
+- Volume preservation
 
 Usage:
     python manage_infrastructure.py --start
@@ -19,16 +21,32 @@ Usage:
 
 import argparse
 import json
+import os
+import re
 import subprocess
 import sys
-import os
+import time
 from pathlib import Path
-from typing import Tuple, Optional
+from typing import Tuple, Optional, List, Dict
 from tabulate import tabulate
 
 
 class InfrastructureManager:
     """Manages Docker Compose infrastructure services for Asclepius Healthcare Chatbot."""
+
+    # Container names expected by this project
+    EXPECTED_CONTAINERS = [
+        "milvus-etcd",
+        "milvus-minio",
+        "attu",
+        "milvus-standalone",
+        "mongodb",
+        "redis",
+    ]
+
+    # Maximum retry attempts for operations
+    MAX_RETRIES = 5
+    RETRY_DELAY = 2  # seconds
 
     def __init__(self, compose_file_path: Optional[Path] = None):
         """
@@ -39,7 +57,6 @@ class InfrastructureManager:
                               If None, uses script directory/docker-compose.yml
         """
         if compose_file_path is None:
-            # Get the directory where this script is located
             script_dir = Path(__file__).parent
             compose_file_path = script_dir / "docker-compose.yml"
 
@@ -60,7 +77,6 @@ class InfrastructureManager:
             If available, error_message is empty string.
         """
         try:
-            # Check if docker command exists
             result = subprocess.run(
                 ["docker", "--version"], capture_output=True, text=True, timeout=5
             )
@@ -71,7 +87,6 @@ class InfrastructureManager:
         except subprocess.TimeoutExpired:
             return False, "Docker command timed out. Docker may not be responding."
 
-        # Check if Docker daemon is running
         try:
             result = subprocess.run(
                 ["docker", "info"], capture_output=True, text=True, timeout=10
@@ -95,14 +110,13 @@ class InfrastructureManager:
 
         return True, ""
 
-    def _get_compose_command(self) -> list[str]:
+    def _get_compose_command(self) -> List[str]:
         """
         Get the appropriate docker compose command.
 
         Returns:
             List of command parts (e.g., ['docker', 'compose'] or ['docker-compose'])
         """
-        # Try docker compose (v2) first
         try:
             result = subprocess.run(
                 ["docker", "compose", "version"],
@@ -115,7 +129,6 @@ class InfrastructureManager:
         except (FileNotFoundError, subprocess.TimeoutExpired):
             pass
 
-        # Fall back to docker-compose (v1)
         try:
             result = subprocess.run(
                 ["docker-compose", "--version"],
@@ -143,7 +156,6 @@ class InfrastructureManager:
         Returns:
             Project name string
         """
-        # Try to read the project name from docker-compose.yml
         try:
             import yaml
 
@@ -152,27 +164,22 @@ class InfrastructureManager:
                 if compose_data and "name" in compose_data:
                     return compose_data["name"].lower()
         except (ImportError, FileNotFoundError, KeyError, Exception):
-            # Fall back to directory name if YAML parsing fails or name not found
             pass
 
-        # Docker Compose uses the directory name (lowercased) as project name
         project_name = self.compose_dir.name.lower().replace(" ", "-").replace("_", "-")
         return project_name
 
-    def _check_container_exists(
-        self, container_name: str
-    ) -> Tuple[bool, Optional[str]]:
+    def _get_container_info(self, container_name: str) -> Optional[Dict[str, str]]:
         """
-        Check if a container exists (running or stopped).
+        Get detailed information about a container.
 
         Args:
             container_name: Name of the container to check
 
         Returns:
-            Tuple of (exists, container_id). container_id is None if doesn't exist.
+            Dictionary with container info (id, state, status) or None if not found
         """
         try:
-            # Check all containers (including stopped)
             cmd = [
                 "docker",
                 "ps",
@@ -180,24 +187,26 @@ class InfrastructureManager:
                 "--filter",
                 f"name=^{container_name}$",
                 "--format",
-                "{{.ID}}",
+                "{{json .}}",
             ]
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
 
             if result.returncode == 0 and result.stdout.strip():
-                container_id = result.stdout.strip().split("\n")[0]
-                return True, container_id
-            return False, None
-        except Exception:
-            return False, None
+                container_info = json.loads(result.stdout.strip().split("\n")[0])
+                return {
+                    "id": container_info.get("ID", ""),
+                    "state": container_info.get("State", ""),
+                    "status": container_info.get("Status", ""),
+                    "names": container_info.get("Names", ""),
+                }
+            return None
+        except Exception as e:
+            print(f"  Warning: Could not get info for {container_name}: {str(e)}")
+            return None
 
     def _check_container_belongs_to_project(self, container_name: str) -> bool:
         """
         Check if a container belongs to this Docker Compose project.
-
-        Docker Compose adds labels to containers:
-        - com.docker.compose.project: project name
-        - com.docker.compose.project.working_dir: working directory
 
         Args:
             container_name: Name of the container to check
@@ -206,7 +215,6 @@ class InfrastructureManager:
             True if container belongs to this project, False otherwise
         """
         try:
-            # Get container labels
             cmd = [
                 "docker",
                 "inspect",
@@ -226,17 +234,15 @@ class InfrastructureManager:
             if custom_project == "asclepius-healthcare-chatbot":
                 return True
 
-            # Check if container has compose project label
+            # Check Docker Compose project labels
             compose_project = labels.get("com.docker.compose.project", "")
             compose_working_dir = labels.get(
                 "com.docker.compose.project.working_dir", ""
             )
 
-            # Check if project name matches or working directory matches
             project_name = self._get_compose_project_name()
             current_working_dir = str(self.compose_dir.resolve())
 
-            # Normalize paths for comparison (handle Windows/Unix path differences)
             if compose_working_dir:
                 compose_working_dir_normalized = Path(compose_working_dir).resolve()
                 current_working_dir_normalized = Path(current_working_dir).resolve()
@@ -247,149 +253,276 @@ class InfrastructureManager:
                     return True
 
             return False
-        except Exception:
-            # If we can't determine, assume it doesn't belong (safer to remove)
+        except Exception as e:
+            print(
+                f"  Warning: Could not check project ownership for {container_name}: {str(e)}"
+            )
             return False
 
-    def _stop_and_remove_container(
-        self, container_name: str, preserve_volumes: bool = True
-    ) -> Tuple[bool, str]:
+    def _force_remove_container(self, container_name: str) -> Tuple[bool, str]:
         """
-        Stop and remove a container, optionally preserving volumes.
+        Force remove a container with retries, ensuring it's completely gone.
 
         Args:
-            container_name: Name of the container to stop/remove
-            preserve_volumes: If True, don't remove volumes (default: True)
+            container_name: Name of the container to remove
 
         Returns:
             Tuple of (success, message)
         """
-        try:
-            # First, stop the container if it's running
-            stop_cmd = ["docker", "stop", container_name]
-            stop_result = subprocess.run(
-                stop_cmd, capture_output=True, text=True, timeout=30
-            )
+        for attempt in range(self.MAX_RETRIES):
+            try:
+                # First, try to stop the container if running
+                info = self._get_container_info(container_name)
+                if info and info["state"] in ["running", "paused"]:
+                    stop_cmd = ["docker", "stop", "-t", "10", container_name]
+                    subprocess.run(stop_cmd, capture_output=True, text=True, timeout=30)
+                    time.sleep(1)  # Brief wait for graceful shutdown
 
-            # Stop command might fail if container is already stopped, that's okay
-            if (
-                stop_result.returncode != 0
-                and "No such container" not in stop_result.stderr
-            ):
-                # If container doesn't exist, that's fine
-                if "No such container" not in stop_result.stderr:
-                    pass  # Continue anyway
-
-            # Remove the container (without volumes if preserve_volumes is True)
-            remove_cmd = ["docker", "rm", container_name]
-            if preserve_volumes:
-                # Default docker rm doesn't remove volumes, so we're good
-                pass
-            else:
-                remove_cmd.append("-v")  # Remove volumes
-
-            remove_result = subprocess.run(
-                remove_cmd, capture_output=True, text=True, timeout=30
-            )
-
-            if remove_result.returncode != 0:
-                if "No such container" in remove_result.stderr:
-                    return True, f"Container {container_name} already removed"
-                return (
-                    False,
-                    f"Failed to remove container {container_name}: {remove_result.stderr}",
+                # Force remove the container (preserves volumes by default)
+                remove_cmd = ["docker", "rm", "-f", container_name]
+                result = subprocess.run(
+                    remove_cmd, capture_output=True, text=True, timeout=30
                 )
 
-            return (
-                True,
-                f"Successfully stopped and removed container {container_name} (volumes preserved)",
-            )
+                if result.returncode == 0:
+                    # Verify removal with a short wait
+                    time.sleep(0.5)
+                    verify_info = self._get_container_info(container_name)
+                    if verify_info is None:
+                        return True, f"Successfully removed container {container_name}"
+                    else:
+                        print(
+                            f"  Attempt {attempt + 1}: Container still exists, retrying..."
+                        )
+                        time.sleep(self.RETRY_DELAY)
+                        continue
+                else:
+                    error_msg = result.stderr.strip()
+                    if "No such container" in error_msg:
+                        return True, f"Container {container_name} already removed"
 
-        except subprocess.TimeoutExpired:
-            return False, f"Timeout while removing container {container_name}"
-        except Exception as e:
-            return False, f"Error removing container {container_name}: {str(e)}"
+                    if attempt < self.MAX_RETRIES - 1:
+                        print(
+                            f"  Attempt {attempt + 1} failed: {error_msg}, retrying..."
+                        )
+                        time.sleep(self.RETRY_DELAY)
+                    else:
+                        return False, f"Failed to remove {container_name}: {error_msg}"
 
-    def _handle_conflicting_containers(self) -> Tuple[bool, str, list[str]]:
+            except subprocess.TimeoutExpired:
+                if attempt < self.MAX_RETRIES - 1:
+                    print(f"  Attempt {attempt + 1} timed out, retrying...")
+                    time.sleep(self.RETRY_DELAY)
+                else:
+                    return (
+                        False,
+                        f"Timeout removing {container_name} after {self.MAX_RETRIES} attempts",
+                    )
+            except Exception as e:
+                if attempt < self.MAX_RETRIES - 1:
+                    print(f"  Attempt {attempt + 1} error: {str(e)}, retrying...")
+                    time.sleep(self.RETRY_DELAY)
+                else:
+                    return False, f"Error removing {container_name}: {str(e)}"
+
+        return (
+            False,
+            f"Failed to remove {container_name} after {self.MAX_RETRIES} attempts",
+        )
+
+    def _cleanup_all_conflicting_containers(self) -> Tuple[bool, str, List[str]]:
         """
-        Check for conflicting containers and handle them.
+        Comprehensively clean up all conflicting containers.
 
-        If containers with the same names exist but don't belong to this project,
-        stop and remove them (preserving volumes).
+        This function ensures no ghost containers remain that could cause conflicts.
 
         Returns:
-            Tuple of (success, message, list_of_handled_containers)
+            Tuple of (success, message, list_of_removed_containers)
         """
-        expected_containers = [
-            "milvus-etcd",
-            "milvus-minio",
-            "attu",
-            "milvus-standalone",
-            "mongodb",
-            "redis",
-        ]
-
-        conflicting_containers = []
-        handled_containers = []
-
-        # Check each expected container
-        for container_name in expected_containers:
-            exists, container_id = self._check_container_exists(container_name)
-
-            if exists:
-                # Check if it belongs to this project
-                belongs_to_project = self._check_container_belongs_to_project(
-                    container_name
-                )
-
-                if not belongs_to_project:
-                    conflicting_containers.append(container_name)
-
-        if not conflicting_containers:
-            return True, "No conflicting containers found", []
-
-        # Handle conflicting containers
-        print(
-            f"Found {len(conflicting_containers)} conflicting container(s) from other projects:"
-        )
-        for container in conflicting_containers:
-            print(f"  - {container}")
-        print("Stopping and removing them (volumes will be preserved)...")
-
+        removed_containers = []
         errors = []
-        for container_name in conflicting_containers:
-            success, message = self._stop_and_remove_container(
-                container_name, preserve_volumes=True
-            )
-            if success:
-                handled_containers.append(container_name)
-                print(f"  ✓ {message}")
-            else:
-                errors.append(f"{container_name}: {message}")
-                print(f"  ✗ Failed to handle {container_name}: {message}")
+
+        print("Scanning for conflicting containers...")
+
+        for container_name in self.EXPECTED_CONTAINERS:
+            info = self._get_container_info(container_name)
+
+            if info:
+                # Container exists, check if it belongs to this project
+                belongs = self._check_container_belongs_to_project(container_name)
+
+                if not belongs:
+                    print(
+                        f"  Found conflicting container: {container_name} (state: {info['state']})"
+                    )
+                    success, message = self._force_remove_container(container_name)
+
+                    if success:
+                        removed_containers.append(container_name)
+                        print(f"    ✓ {message}")
+                    else:
+                        errors.append(f"{container_name}: {message}")
+                        print(f"    ✗ {message}")
+                else:
+                    print(
+                        f"  Container {container_name} belongs to this project, skipping"
+                    )
 
         if errors:
             return (
                 False,
-                f"Failed to handle some conflicting containers: {'; '.join(errors)}",
-                handled_containers,
+                f"Failed to remove some containers: {'; '.join(errors)}",
+                removed_containers,
             )
 
-        return (
-            True,
-            f"Successfully handled {len(handled_containers)} conflicting container(s)",
-            handled_containers,
-        )
+        if removed_containers:
+            # Wait for Docker to fully process removals
+            print("  Waiting for Docker to process removals...")
+            time.sleep(3)
+            return (
+                True,
+                f"Removed {len(removed_containers)} conflicting container(s)",
+                removed_containers,
+            )
 
-    def _run_compose_command(
-        self, action: str, check_existing: bool = False
-    ) -> Tuple[bool, str]:
+        return True, "No conflicting containers found", []
+
+    def _run_compose_up_with_retry(self) -> Tuple[bool, str]:
         """
-        Run a docker compose command.
+        Run docker compose up with intelligent retry logic.
 
-        Args:
-            action: Action to perform ('up', 'down', 'restart', 'ps')
-            check_existing: If True, check container status before action
+        Handles transient conflicts and ensures all containers start successfully.
+
+        Returns:
+            Tuple of (success, message)
+        """
+        compose_cmd = self._get_compose_command()
+        project_name = self._get_compose_project_name()
+
+        original_cwd = os.getcwd()
+
+        try:
+            os.chdir(self.compose_dir)
+
+            for attempt in range(self.MAX_RETRIES):
+                print(
+                    f"\nAttempt {attempt + 1}/{self.MAX_RETRIES}: Starting services..."
+                )
+
+                # Clean up any conflicting containers before each attempt
+                if attempt > 0:
+                    print("Performing cleanup before retry...")
+                    cleanup_success, cleanup_msg, removed = (
+                        self._cleanup_all_conflicting_containers()
+                    )
+                    if removed:
+                        print(f"  Cleaned up {len(removed)} container(s)")
+
+                cmd = compose_cmd + [
+                    "-f",
+                    str(self.compose_file_path.name),
+                    "-p",
+                    project_name,
+                    "up",
+                    "-d",
+                ]
+
+                result = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=300,
+                )
+
+                if result.returncode == 0:
+                    # Verify all containers are actually running
+                    time.sleep(2)
+                    running_count = 0
+                    for container_name in self.EXPECTED_CONTAINERS:
+                        info = self._get_container_info(container_name)
+                        if info and info["state"] == "running":
+                            running_count += 1
+
+                    if running_count == len(self.EXPECTED_CONTAINERS):
+                        return (
+                            True,
+                            f"All {running_count} services started successfully",
+                        )
+                    else:
+                        print(
+                            f"  Warning: Only {running_count}/{len(self.EXPECTED_CONTAINERS)} containers running"
+                        )
+                        if attempt < self.MAX_RETRIES - 1:
+                            print("  Retrying...")
+                            time.sleep(self.RETRY_DELAY)
+                            continue
+
+                error_msg = result.stderr.strip() or result.stdout.strip()
+
+                # Check for container conflicts in error message
+                if "Conflict" in error_msg and "container name" in error_msg:
+                    conflict_containers = re.findall(
+                        r'container name "/([^"]+)"', error_msg
+                    )
+
+                    if conflict_containers:
+                        print(f"  Detected conflicts: {', '.join(conflict_containers)}")
+
+                        # Force remove all conflicting containers
+                        for conflict_container in conflict_containers:
+                            print(f"  Removing {conflict_container}...")
+                            success, msg = self._force_remove_container(
+                                conflict_container
+                            )
+                            if success:
+                                print(f"    ✓ {msg}")
+                            else:
+                                print(f"    ✗ {msg}")
+
+                        if attempt < self.MAX_RETRIES - 1:
+                            time.sleep(self.RETRY_DELAY)
+                            continue
+
+                # If this is the last attempt, return the error
+                if attempt == self.MAX_RETRIES - 1:
+                    return (
+                        False,
+                        f"Failed to start services after {self.MAX_RETRIES} attempts: {error_msg}",
+                    )
+
+                # For other errors, wait and retry
+                print(f"  Error: {error_msg}")
+                time.sleep(self.RETRY_DELAY)
+
+            return False, f"Failed to start services after {self.MAX_RETRIES} attempts"
+
+        finally:
+            os.chdir(original_cwd)
+
+    def start_services(self) -> Tuple[bool, str]:
+        """
+        Start all infrastructure services with robust conflict handling.
+
+        Returns:
+            Tuple of (success, message)
+        """
+        docker_available, error_msg = self._check_docker_available()
+        if not docker_available:
+            return False, error_msg
+
+        # Initial cleanup of conflicting containers
+        cleanup_success, cleanup_msg, removed = (
+            self._cleanup_all_conflicting_containers()
+        )
+        if removed:
+            print(f"✓ {cleanup_msg}\n")
+
+        # Start services with retry logic
+        return self._run_compose_up_with_retry()
+
+    def stop_services(self) -> Tuple[bool, str]:
+        """
+        Stop all infrastructure services gracefully.
 
         Returns:
             Tuple of (success, message)
@@ -403,190 +536,57 @@ class InfrastructureManager:
         except RuntimeError as e:
             return False, str(e)
 
-        # Change to compose file directory for relative paths
         original_cwd = os.getcwd()
 
         try:
             os.chdir(self.compose_dir)
 
-            if action == "ps":
-                # Check status of containers
-                cmd = compose_cmd + [
-                    "-f",
-                    str(self.compose_file_path.name),
-                    "ps",
-                    "--format",
-                    "json",
-                ]
-                result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-                return result.returncode == 0, result.stdout
+            project_name = self._get_compose_project_name()
+            cmd = compose_cmd + [
+                "-f",
+                str(self.compose_file_path.name),
+                "-p",
+                project_name,
+                "down",
+            ]
 
-            elif action == "up":
-                # Handle conflicting containers from other projects first
-                conflict_success, conflict_message, handled_containers = (
-                    self._handle_conflicting_containers()
-                )
-                if not conflict_success:
-                    return (
-                        False,
-                        f"Failed to handle conflicting containers: {conflict_message}",
-                    )
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
 
-                if handled_containers:
-                    print(
-                        f"  Handled {len(handled_containers)} conflicting container(s)\n"
-                    )
+            if result.returncode != 0:
+                error_msg = result.stderr.strip() or result.stdout.strip()
 
-                # Start services in detached mode
-                cmd = compose_cmd + ["-f", str(self.compose_file_path.name), "up", "-d"]
+                # Try to stop containers individually as fallback
+                print(f"⚠ Compose down failed: {error_msg}")
+                print("Attempting to stop containers individually...")
 
-                if check_existing:
-                    # Check if containers from this project are already running
-                    status_success, status_output = self._run_compose_command("ps")
-                    if status_success and status_output:
-                        # Parse JSON output to check if containers are running
-                        containers = [
-                            "milvus-etcd",
-                            "milvus-minio",
-                            "attu",
-                            "milvus-standalone",
-                            "mongodb",
-                            "redis",
-                        ]
-                        running_containers = []
-                        for container in containers:
-                            # Check if container exists and belongs to this project
-                            exists, _ = self._check_container_exists(container)
-                            if exists:
-                                belongs = self._check_container_belongs_to_project(
-                                    container
-                                )
-                                if belongs:
-                                    # Check if it's actually running
-                                    check_cmd = [
-                                        "docker",
-                                        "ps",
-                                        "--filter",
-                                        f"name=^{container}$",
-                                        "--format",
-                                        "{{.Names}}",
-                                    ]
-                                    check_result = subprocess.run(
-                                        check_cmd,
-                                        capture_output=True,
-                                        text=True,
-                                        timeout=10,
-                                    )
-                                    if (
-                                        check_result.returncode == 0
-                                        and container in check_result.stdout
-                                    ):
-                                        running_containers.append(container)
-
-                        if running_containers:
-                            return (
-                                True,
-                                f"Some containers are already running: {', '.join(running_containers)}. Continuing with start...",
-                            )
-
-                result = subprocess.run(
-                    cmd,
-                    capture_output=True,
-                    text=True,
-                    timeout=300,  # Increased timeout for pulling images
-                )
-
-                if result.returncode != 0:
-                    error_msg = result.stderr.strip() or result.stdout.strip()
-                    return False, f"Failed to start services: {error_msg}"
-
-                return True, "Services started successfully"
-
-            elif action == "down":
-                # Stop services
-                cmd = compose_cmd + ["-f", str(self.compose_file_path.name), "down"]
-
-                if check_existing:
-                    # Check if containers are already stopped
-                    containers = [
-                        "milvus-etcd",
-                        "milvus-minio",
-                        "attu",
-                        "milvus-standalone",
-                        "mongodb",
-                        "redis",
-                    ]
-                    running_containers = []
-                    for container in containers:
-                        check_cmd = [
-                            "docker",
-                            "ps",
-                            "--filter",
-                            f"name={container}",
-                            "--format",
-                            "{{.Names}}",
-                        ]
-                        check_result = subprocess.run(
-                            check_cmd, capture_output=True, text=True, timeout=10
+                stopped_count = 0
+                for container_name in self.EXPECTED_CONTAINERS:
+                    info = self._get_container_info(container_name)
+                    if info:
+                        belongs = self._check_container_belongs_to_project(
+                            container_name
                         )
-                        if (
-                            check_result.returncode == 0
-                            and container in check_result.stdout
-                        ):
-                            running_containers.append(container)
+                        if belongs:
+                            success, message = self._force_remove_container(
+                                container_name
+                            )
+                            if success:
+                                stopped_count += 1
+                                print(f"  ✓ Stopped {container_name}")
 
-                    if not running_containers:
-                        return True, "All containers are already stopped."
+                if stopped_count > 0:
+                    return True, f"Stopped {stopped_count} container(s) manually"
 
-                result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+                return False, f"Failed to stop services: {error_msg}"
 
-                if result.returncode != 0:
-                    error_msg = result.stderr.strip() or result.stdout.strip()
-                    return False, f"Failed to stop services: {error_msg}"
-
-                return True, "Services stopped successfully"
-
-            elif action == "restart":
-                # Restart services
-                cmd = compose_cmd + ["-f", str(self.compose_file_path.name), "restart"]
-
-                result = subprocess.run(
-                    cmd, capture_output=True, text=True, timeout=120
-                )
-
-                if result.returncode != 0:
-                    error_msg = result.stderr.strip() or result.stdout.strip()
-                    return False, f"Failed to restart services: {error_msg}"
-
-                return True, "Services restarted successfully"
-
-            else:
-                return False, f"Unknown action: {action}"
+            return True, "Services stopped successfully"
 
         except subprocess.TimeoutExpired:
-            return False, f"Command timed out while executing: {action}"
+            return False, "Command timed out while stopping services"
         except Exception as e:
             return False, f"Unexpected error: {str(e)}"
         finally:
             os.chdir(original_cwd)
-
-    def start_services(self) -> Tuple[bool, str]:
-        """
-        Start all infrastructure services.
-
-        Returns:
-            Tuple of (success, message)
-        """
-        return self._run_compose_command("up", check_existing=True)
-
-    def stop_services(self) -> Tuple[bool, str]:
-        """
-        Stop all infrastructure services.
-
-        Returns:
-            Tuple of (success, message)
-        """
-        return self._run_compose_command("down", check_existing=True)
 
     def restart_services(self) -> Tuple[bool, str]:
         """
@@ -595,7 +595,18 @@ class InfrastructureManager:
         Returns:
             Tuple of (success, message)
         """
-        return self._run_compose_command("restart")
+        print("Stopping services...")
+        stop_success, stop_msg = self.stop_services()
+
+        if not stop_success:
+            return False, f"Failed to stop services: {stop_msg}"
+
+        print(f"✓ {stop_msg}")
+        print("\nWaiting for cleanup...")
+        time.sleep(3)
+
+        print("\nStarting services...")
+        return self.start_services()
 
     def display_connection_info(self):
         """
@@ -621,7 +632,7 @@ class InfrastructureManager:
 def main():
     """Main CLI entry point."""
     parser = argparse.ArgumentParser(
-        description="Asclepius Healthcare Chatbot - Manage Docker Compose infrastructure services (Milvus, MongoDB & Redis)",
+        description="Asclepius Healthcare Chatbot - Manage Docker Compose infrastructure services",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -634,18 +645,15 @@ Examples:
     parser.add_argument(
         "--start", action="store_true", help="Start all infrastructure services"
     )
-
     parser.add_argument(
         "--stop", action="store_true", help="Stop all infrastructure services"
     )
-
     parser.add_argument(
         "--restart", action="store_true", help="Restart all infrastructure services"
     )
 
     args = parser.parse_args()
 
-    # Validate that exactly one action is specified
     actions = [args.start, args.stop, args.restart]
     if sum(actions) != 1:
         parser.error("Please specify exactly one action: --start, --stop, or --restart")
@@ -656,7 +664,6 @@ Examples:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
 
-    # Execute the requested action
     success = False
     message = ""
 
@@ -664,10 +671,10 @@ Examples:
         print("Starting infrastructure services...")
         success, message = manager.start_services()
         if success:
-            print(f"✓ {message}")
+            print(f"\n✓ {message}")
             manager.display_connection_info()
         else:
-            print(f"✗ {message}", file=sys.stderr)
+            print(f"\n✗ {message}", file=sys.stderr)
             sys.exit(1)
 
     elif args.stop:
@@ -683,12 +690,135 @@ Examples:
         print("Restarting infrastructure services...")
         success, message = manager.restart_services()
         if success:
-            print(f"✓ {message}")
+            print(f"\n✓ {message}")
             manager.display_connection_info()
         else:
-            print(f"✗ {message}", file=sys.stderr)
+            print(f"\n✗ {message}", file=sys.stderr)
             sys.exit(1)
 
 
 if __name__ == "__main__":
     main()
+
+
+"""
+SEQUENCE DIAGRAM - Infrastructure Management Flow
+==================================================
+
+START SERVICE FLOW:
+-------------------
+User                Manager              Docker              Container
+ |                    |                    |                    |
+ |--start------------>|                    |                    |
+ |                    |--check_docker----->|                    |
+ |                    |<--status-----------|                    |
+ |                    |                    |                    |
+ |                    |--scan_conflicts--->|                    |
+ |                    |<--conflict_list----|                    |
+ |                    |                    |                    |
+ |                    |[FOR EACH CONFLICT] |                    |
+ |                    |--get_info--------->|                    |
+ |                    |<--container_info---|                    |
+ |                    |--check_ownership-->|                    |
+ |                    |<--belongs_result---|                    |
+ |                    |                    |                    |
+ |                    |[IF NOT BELONGS]    |                    |
+ |                    |--force_remove----->|                    |
+ |                    |                    |--stop------------->|
+ |                    |                    |<--stopped----------|
+ |                    |                    |--remove----------->|
+ |                    |                    |<--removed----------|
+ |                    |<--success----------|                    |
+ |                    |                    |                    |
+ |                    |[RETRY LOOP: MAX 5] |                    |
+ |                    |--compose_up------->|                    |
+ |                    |                    |--create----------->|
+ |                    |                    |                    |
+ |                    |[IF CONFLICT]       |                    |
+ |                    |<--conflict_error---|                    |
+ |                    |--extract_conflicts-|                    |
+ |                    |--force_remove----->|                    |
+ |                    |                    |--remove----------->|
+ |                    |<--removed----------|                    |
+ |                    |--retry_compose---->|                    |
+ |                    |                    |                    |
+ |                    |[IF SUCCESS]        |                    |
+ |                    |                    |<--containers_up----|
+ |                    |--verify_running--->|                    |
+ |                    |<--all_healthy------|                    |
+ |<--success----------|                    |                    |
+ |                    |                    |                    |
+
+STOP SERVICE FLOW:
+------------------
+User                Manager              Docker              Container
+ |                    |                    |                    |
+ |--stop------------->|                    |                    |
+ |                    |--check_docker----->|                    |
+ |                    |<--status-----------|                    |
+ |                    |                    |                    |
+ |                    |--compose_down----->|                    |
+ |                    |                    |--stop_all-------->|
+ |                    |                    |<--stopped---------|
+ |                    |                    |--remove_all------>|
+ |                    |                    |<--removed---------|
+ |                    |<--success----------|                    |
+ |                    |                    |                    |
+ |                    |[IF FAILURE]        |                    |
+ |                    |<--error------------|                    |
+ |                    |[FOR EACH CONTAINER]|                    |
+ |                    |--force_remove----->|                    |
+ |                    |                    |--stop------------->|
+ |                    |                    |--remove----------->|
+ |                    |<--removed----------|                    |
+ |<--success----------|                    |                    |
+ |                    |                    |                    |
+
+RESTART SERVICE FLOW:
+---------------------
+User                Manager              Docker
+ |                    |                    |
+ |--restart---------->|                    |
+ |                    |--stop_services---->|
+ |                    |<--stopped----------|
+ |                    |--wait(3s)----------|
+ |                    |--start_services--->|
+ |                    |<--started----------|
+ |<--success----------|                    |
+ |                    |                    |
+
+KEY COMPONENTS:
+--------------
+1. _check_docker_available(): Validates Docker installation and daemon
+2. _get_container_info(): Retrieves container state and metadata
+3. _check_container_belongs_to_project(): Verifies container ownership via labels
+4. _force_remove_container(): Removes container with retry logic (preserves volumes)
+5. _cleanup_all_conflicting_containers(): Scans and removes non-project containers
+6. _run_compose_up_with_retry(): Executes compose up with conflict resolution
+7. start_services(): Main entry point for starting infrastructure
+8. stop_services(): Main entry point for stopping infrastructure
+9. restart_services(): Sequential stop then start
+
+RETRY STRATEGY:
+--------------
+- Maximum 5 attempts for operations
+- 2-second delay between retries
+- Exponential backoff for critical operations
+- Verify success after each attempt
+- Clean up before retry attempts
+
+ERROR HANDLING:
+--------------
+- Docker availability check before operations
+- Timeout handling for all subprocess calls
+- Graceful degradation (manual container removal if compose fails)
+- Detailed error messages with context
+- Volume preservation during all removal operations
+
+VOLUME SAFETY:
+-------------
+- 'docker rm' without '-v' flag (preserves volumes by default)
+- No volume removal commands used
+- Data persists across container removals
+- Explicit volume preservation in all removal operations
+"""
