@@ -265,7 +265,6 @@ class RedisConnectionManager:
                     "socket_timeout": self.socket_timeout,
                     "socket_connect_timeout": self.socket_connect_timeout,
                     "decode_responses": False,  # Work with raw bytes
-                    "retry_on_timeout": True,
                     "health_check_interval": 30,
                 }
 
@@ -401,7 +400,7 @@ class RedisKeyInspector:
         Get sample keys matching a pattern.
 
         Args:
-            pattern: Redis key pattern
+            pattern: Redis key pattern (use "*" for all keys)
             max_samples: Maximum number of samples to retrieve
 
         Returns:
@@ -420,6 +419,20 @@ class RedisKeyInspector:
         except Exception as e:
             self.formatter.print_warning(f"Could not retrieve key samples: {e}")
             return []
+
+    def get_all_keys_sample(
+        self, max_samples: int = OperationConfig.MAX_KEY_SAMPLES
+    ) -> List[str]:
+        """
+        Get a sample of all keys in the database (regardless of pattern).
+
+        Args:
+            max_samples: Maximum number of samples to retrieve
+
+        Returns:
+            List of sample key names
+        """
+        return self.get_sample_keys("*", max_samples)
 
     def analyze_key_patterns(self, sample_keys: List[str]) -> Dict[str, Any]:
         """
@@ -848,12 +861,34 @@ class RedisFlushOrchestrator:
                 if samples:
                     print()
                     self.formatter.print_info(
-                        f"Sample keys (showing {len(samples)} of {keys_affected:,}):"
+                        f"Sample keys matching pattern (showing {len(samples)} of {keys_affected:,}):"
                     )
                     for sample in samples[:5]:
                         print(f"    • {sample}")
                     if len(samples) > 5:
                         print(f"    ... and {len(samples) - 5} more samples")
+            else:
+                # No keys matched - show all keys to help user find the right pattern
+                print()
+                self.formatter.print_warning(
+                    f"No keys found matching pattern '{pattern}'"
+                )
+                total_keys = self.connection_manager.get_database_size()
+                if total_keys > 0:
+                    print()
+                    self.formatter.print_info(
+                        f"Showing all {total_keys} keys in database to help you find the correct pattern:"
+                    )
+                    all_keys = self.key_inspector.get_all_keys_sample(max_samples=20)
+                    for key in all_keys:
+                        print(f"    • {key}")
+                    if total_keys > len(all_keys):
+                        print(f"    ... and {total_keys - len(all_keys)} more keys")
+                    print()
+                    self.formatter.print_info(
+                        "Tip: Use --prefix 'your_prefix' to specify a custom pattern, "
+                        "or --full to delete all keys"
+                    )
 
         return keys_affected
 
