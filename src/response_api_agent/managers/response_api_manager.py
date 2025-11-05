@@ -29,6 +29,11 @@ from src.response_api_agent.managers.exceptions import (
     StreamConnectionError,
 )
 from src.logs import get_component_logger, time_execution
+from src.providers.cache_provider import (
+    CacheProvider,
+    create_cache_provider,
+    CacheConnectionError,
+)
 
 
 class OpenAIResponseManager:
@@ -58,6 +63,7 @@ class OpenAIResponseManager:
     def __init__(
         self,
         vector_store_manager: Optional[VectorStoreManager] = None,
+        cache_provider: Optional[CacheProvider] = None,
         chat_history_limit: int = DEFAULT_CHAT_HISTORY_LIMIT,
         batch_size: int = DEFAULT_BATCH_SIZE,
         rate_limit_delay: float = DEFAULT_RATE_LIMIT_DELAY,
@@ -68,6 +74,8 @@ class OpenAIResponseManager:
         Args:
             vector_store_manager: Pre-configured VectorStoreManager instance.
                 If None, a new instance will be created.
+            cache_provider: Pre-configured CacheProvider instance for Redis caching.
+                If None, a default Redis provider will be created and connected.
             chat_history_limit: Maximum number of messages to retain in chat history.
             batch_size: Batch size for vector store operations.
             rate_limit_delay: Delay in seconds between rate-limited operations.
@@ -78,20 +86,49 @@ class OpenAIResponseManager:
         # Start adapter metrics reporting
         start_metrics_reporting()
 
+        # Initialize or use provided cache provider
+        self.cache_provider = cache_provider
+        if self.cache_provider is None:
+            try:
+                self.logger.info(
+                    "Initializing Redis cache provider",
+                    component="OpenAIResponseManager",
+                    subcomponent="Init",
+                )
+                self.cache_provider = create_cache_provider(provider_type="redis")
+            except Exception as e:
+                self.logger.warning(
+                    f"Failed to create cache provider: {e}. Continuing without caching.",
+                    component="OpenAIResponseManager",
+                    subcomponent="Init",
+                )
+                self.cache_provider = None
+
+        # Connect to cache provider if it exists (whether created here or passed in)
+        if self.cache_provider:
+            # Connect to Redis asynchronously
+            asyncio.create_task(self._connect_cache())
+
         # Initialize or use provided vector store manager
         if vector_store_manager:
             self.vector_store_manager = vector_store_manager
         else:
             self.vector_store_manager = VectorStoreManager(
-                batch_size=batch_size, rate_limit_delay=rate_limit_delay
+                batch_size=batch_size,
+                rate_limit_delay=rate_limit_delay,
+                cache_provider=self.cache_provider,
             )
 
         # Initialize dependent managers
         self.tool_manager = ToolManager(self.vector_store_manager)
         self.chat_manager = ChatManager(
-            tool_manager=self.tool_manager, chat_history_limit=chat_history_limit
+            tool_manager=self.tool_manager,
+            chat_history_limit=chat_history_limit,
+            cache_provider=self.cache_provider,
         )
-        self.stream_manager = StreamManager(chat_manager=self.chat_manager)
+        self.stream_manager = StreamManager(
+            chat_manager=self.chat_manager, cache_provider=self.cache_provider
+        )
         self.citation_manager = CitationManager(client=self.chat_manager.client)
 
         # Initialize drug data manager for Milvus integration
@@ -120,7 +157,51 @@ class OpenAIResponseManager:
             subcomponent="Init",
             chat_history_limit=chat_history_limit,
             batch_size=batch_size,
+            cache_enabled=self.cache_provider is not None,
         )
+
+    async def _connect_cache(self) -> None:
+        """
+        Connect to the cache provider asynchronously.
+
+        Handles connection errors gracefully, disabling caching if connection fails.
+        """
+        if self.cache_provider is None:
+            return
+
+        try:
+            await self.cache_provider.connect()
+
+            # Verify health
+            is_healthy = await self.cache_provider.health_check()
+            if is_healthy:
+                self.logger.info(
+                    "Cache provider connected and healthy",
+                    component="OpenAIResponseManager",
+                    subcomponent="ConnectCache",
+                )
+            else:
+                self.logger.warning(
+                    "Cache provider connected but health check failed",
+                    component="OpenAIResponseManager",
+                    subcomponent="ConnectCache",
+                )
+                self.cache_provider = None
+
+        except CacheConnectionError as e:
+            self.logger.warning(
+                f"Failed to connect to cache provider: {e}. Continuing without caching.",
+                component="OpenAIResponseManager",
+                subcomponent="ConnectCache",
+            )
+            self.cache_provider = None
+        except Exception as e:
+            self.logger.warning(
+                f"Unexpected error connecting to cache: {e}. Continuing without caching.",
+                component="OpenAIResponseManager",
+                subcomponent="ConnectCache",
+            )
+            self.cache_provider = None
 
     def _validate_model_identifier(self, model_name: str) -> bool:
         """
@@ -163,6 +244,7 @@ class OpenAIResponseManager:
     ) -> Optional[str]:
         """
         Validate vector store readiness and return ID if ready.
+        Uses Redis cache to avoid repeated validation calls.
 
         Args:
             vector_store_id: Vector store ID to validate.
@@ -172,6 +254,29 @@ class OpenAIResponseManager:
         """
         if not vector_store_id:
             return None
+
+        # Check cache first
+        if self.cache_provider:
+            try:
+                cached_validation = (
+                    await self.cache_provider.get_vector_store_validation(
+                        vector_store_id
+                    )
+                )
+                if cached_validation and cached_validation.get("status") == "completed":
+                    self.logger.info(
+                        "Vector store validation retrieved from cache",
+                        component="OpenAIResponseManager",
+                        subcomponent="_validate_and_prepare_vector_store",
+                        vector_store_id=vector_store_id,
+                    )
+                    return vector_store_id
+            except Exception as e:
+                self.logger.warning(
+                    f"Failed to get vector store validation from cache: {e}",
+                    component="OpenAIResponseManager",
+                    subcomponent="_validate_and_prepare_vector_store",
+                )
 
         try:
             store_info = await self.vector_store_manager.get_vector_store(
@@ -196,6 +301,41 @@ class OpenAIResponseManager:
                     status=store_info["status"],
                 )
                 return None
+
+            # Cache the validation result
+            if self.cache_provider:
+                try:
+                    from datetime import datetime
+
+                    # Handle file_counts - it might be a dict or an object
+                    file_counts = store_info.get("file_counts", {})
+                    if hasattr(file_counts, "completed"):
+                        file_count = file_counts.completed
+                    elif isinstance(file_counts, dict):
+                        file_count = file_counts.get("completed", 0)
+                    else:
+                        file_count = 0
+
+                    validation_data = {
+                        "status": "completed",
+                        "validated_at": datetime.utcnow().isoformat(),
+                        "file_count": file_count,
+                    }
+                    await self.cache_provider.cache_vector_store_validation(
+                        vector_store_id, validation_data
+                    )
+                    self.logger.debug(
+                        "Cached vector store validation",
+                        component="OpenAIResponseManager",
+                        subcomponent="_validate_and_prepare_vector_store",
+                        vector_store_id=vector_store_id,
+                    )
+                except Exception as e:
+                    self.logger.warning(
+                        f"Failed to cache vector store validation: {e}",
+                        component="OpenAIResponseManager",
+                        subcomponent="_validate_and_prepare_vector_store",
+                    )
 
             self.logger.info(
                 "Vector store validated and ready",
@@ -379,6 +519,69 @@ class OpenAIResponseManager:
                 model=resolved_model,
             )
 
+            # CRITICAL: Validate active session if conversation_id is provided
+            # This ensures we only use data from active, non-expired sessions
+            session_vector_store_id = None
+            session_last_response_id = None
+
+            if conversation_id and self.cache_provider:
+                try:
+                    # Get active session context - this validates the session is still active
+                    session_context = (
+                        await self.cache_provider.get_active_session_context(
+                            conversation_id
+                        )
+                    )
+
+                    if session_context:
+                        # Session is active - use its context
+                        session_vector_store_id = session_context.vector_store_id
+                        session_last_response_id = session_context.last_response_id
+
+                        self.logger.info(
+                            "Active session context retrieved from Redis cache",
+                            component="OpenAIResponseManager",
+                            subcomponent="process_query",
+                            conversation_id=conversation_id,
+                            session_vector_store_id=session_vector_store_id,
+                            session_last_response_id=session_last_response_id,
+                            using_vector_store_from_session=bool(
+                                session_vector_store_id
+                            ),
+                            will_continue_conversation=bool(session_last_response_id),
+                        )
+
+                        # Override vector_store_id with session's vector store if not explicitly provided
+                        # This ensures consistency within a session
+                        if not vector_store_id and session_vector_store_id:
+                            vector_store_id = session_vector_store_id
+                            self.logger.info(
+                                "Using vector store from active session cache",
+                                component="OpenAIResponseManager",
+                                subcomponent="process_query",
+                                retrieved_vector_store_id=session_vector_store_id,
+                                conversation_id=conversation_id,
+                            )
+                    else:
+                        # Session is inactive/expired - treat as new conversation
+                        self.logger.warning(
+                            "Session inactive or expired - treating as new conversation",
+                            component="OpenAIResponseManager",
+                            subcomponent="process_query",
+                            provided_conversation_id=conversation_id,
+                        )
+                        # Clear conversation_id to trigger new conversation flow
+                        conversation_id = None
+
+                except Exception as e:
+                    self.logger.warning(
+                        f"Failed to retrieve session context: {e}. Treating as new conversation.",
+                        component="OpenAIResponseManager",
+                        subcomponent="process_query",
+                    )
+                    # On error, treat as new conversation for safety
+                    conversation_id = None
+
             # Add drug database function if enabled and available
             if use_drug_database and self.drug_data_manager:
                 drug_function = self.drug_data_manager.get_function_schema()
@@ -405,7 +608,11 @@ class OpenAIResponseManager:
 
             if enable_streaming:
                 return await self._handle_streaming_query(
-                    user_message, conversation_id, resolved_model, tools
+                    user_message,
+                    conversation_id,
+                    resolved_model,
+                    tools,
+                    vector_store_id,
                 )
             else:
                 return await self._handle_standard_query(
@@ -442,6 +649,7 @@ class OpenAIResponseManager:
         conversation_id: Optional[str],
         model_name: str,
         tools: List[Dict[str, Any]],
+        vector_store_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Handle a streaming query request.
@@ -470,8 +678,15 @@ class OpenAIResponseManager:
 
         # Create or use existing conversation
         if not conversation_id:
+            # CRITICAL FIX: Generate session ID centrally before creating chat
+            session_id = self.chat_manager.generate_session_id()
+
             conversation_id = await self.chat_manager.create_chat(
-                message=user_message, model=model_name, tools=tools
+                message=user_message,
+                model=model_name,
+                tools=tools,
+                vector_store_id=vector_store_id,
+                session_id=session_id,  # Pass session ID explicitly
             )
 
         self.logger.info(
@@ -586,14 +801,28 @@ class OpenAIResponseManager:
                 enable_tool_execution=enable_tool_execution,
             )
 
-            # Create initial chat
+            # CRITICAL FIX: Generate session ID centrally before creating chat
+            session_id = self.chat_manager.generate_session_id()
+
+            # Create initial chat with explicit session ID
             conversation_id = await self.chat_manager.create_chat(
-                message=user_message, model=model_name, tools=tools
+                message=user_message,
+                model=model_name,
+                tools=tools,
+                vector_store_id=vector_store_id,
+                session_id=session_id,  # Pass session ID explicitly
             )
 
-            # Retrieve the response object
+            # Get the response ID from the chat mapping (conversation_id is now session_id)
+            response_id = await self.chat_manager._get_chat_mapping(conversation_id)
+            if not response_id:
+                raise Exception(
+                    f"Failed to retrieve response ID for session {conversation_id}"
+                )
+
+            # Retrieve the response object using the response_id
             response = await asyncio.to_thread(
-                self.chat_manager.client.responses.retrieve, response_id=conversation_id
+                self.chat_manager.client.responses.retrieve, response_id=response_id
             )
 
             # Extract content and tool calls
@@ -707,6 +936,69 @@ class OpenAIResponseManager:
                 model=resolved_model,
             )
 
+            # CRITICAL: Validate active session if conversation_id is provided
+            # This ensures we only use data from active, non-expired sessions
+            session_vector_store_id = None
+            session_last_response_id = None
+
+            if conversation_id and self.cache_provider:
+                try:
+                    # Get active session context - this validates the session is still active
+                    session_context = (
+                        await self.cache_provider.get_active_session_context(
+                            conversation_id
+                        )
+                    )
+
+                    if session_context:
+                        # Session is active - use its context
+                        session_vector_store_id = session_context.vector_store_id
+                        session_last_response_id = session_context.last_response_id
+
+                        self.logger.info(
+                            "Active session context retrieved from Redis cache",
+                            component="OpenAIResponseManager",
+                            subcomponent="process_streaming_query",
+                            conversation_id=conversation_id,
+                            session_vector_store_id=session_vector_store_id,
+                            session_last_response_id=session_last_response_id,
+                            using_vector_store_from_session=bool(
+                                session_vector_store_id
+                            ),
+                            will_continue_conversation=bool(session_last_response_id),
+                        )
+
+                        # Override vector_store_id with session's vector store if not explicitly provided
+                        # This ensures consistency within a session
+                        if not vector_store_id and session_vector_store_id:
+                            vector_store_id = session_vector_store_id
+                            self.logger.info(
+                                "Using vector store from active session cache",
+                                component="OpenAIResponseManager",
+                                subcomponent="process_streaming_query",
+                                retrieved_vector_store_id=session_vector_store_id,
+                                conversation_id=conversation_id,
+                            )
+                    else:
+                        # Session is inactive/expired - treat as new conversation
+                        self.logger.warning(
+                            "Session inactive or expired - treating as new conversation",
+                            component="OpenAIResponseManager",
+                            subcomponent="process_streaming_query",
+                            provided_conversation_id=conversation_id,
+                        )
+                        # Clear conversation_id to trigger new conversation flow
+                        conversation_id = None
+
+                except Exception as e:
+                    self.logger.warning(
+                        f"Failed to retrieve session context: {e}. Treating as new conversation.",
+                        component="OpenAIResponseManager",
+                        subcomponent="process_streaming_query",
+                    )
+                    # On error, treat as new conversation for safety
+                    conversation_id = None
+
             # Add drug database function if enabled and available
             if use_drug_database and self.drug_data_manager:
                 drug_function = self.drug_data_manager.get_function_schema()
@@ -733,22 +1025,65 @@ class OpenAIResponseManager:
 
             chunk_count = 0
 
-            if conversation_id:
-                # Stream continuation of existing conversation
+            # CRITICAL FIX: Check if this is a true continuation (has previous messages)
+            # A session can exist without messages yet (e.g., created by UI on_chat_start)
+            if conversation_id and session_last_response_id:
+                # Stream continuation of existing conversation with previous messages
+                # Use last_response_id from session context for proper conversation chaining
+                previous_response_id_for_continuation = session_last_response_id
+
                 self.logger.info(
                     "Streaming conversation continuation",
                     component="OpenAIResponseManager",
                     subcomponent="process_streaming_query",
                     conversation_id=conversation_id,
+                    previous_response_id=previous_response_id_for_continuation,
+                    session_vector_store_id=session_vector_store_id,
                 )
 
+                # =========================================================================
+                # CRITICAL: Track user message in continuation
+                # =========================================================================
+                if conversation_id and conversation_id.startswith("session_"):
+                    try:
+                        await self.chat_manager._add_message_to_session(
+                            session_id=conversation_id,
+                            role="user",
+                            content=user_message,
+                            metadata={
+                                "model": resolved_model,
+                                "has_tools": bool(tools),
+                                "previous_response_id": previous_response_id_for_continuation,
+                            },
+                        )
+                        self.logger.debug(
+                            "Tracked user message in continuation",
+                            component="OpenAIResponseManager",
+                            subcomponent="process_streaming_query",
+                            session_id=conversation_id,
+                        )
+                    except Exception as e:
+                        self.logger.warning(
+                            f"Failed to add user message to continuation: {e}",
+                            component="OpenAIResponseManager",
+                            subcomponent="process_streaming_query",
+                        )
+
+                continuation_response_id = None
                 async for chunk_data in self.stream_manager.stream_chat_continuation(
-                    chat_id=conversation_id,
+                    chat_id=previous_response_id_for_continuation,
                     message=user_message,
                     model=resolved_model,
                     tools=tools,
                 ):
                     chunk_count += 1
+
+                    # Extract response_id from chunks
+                    if continuation_response_id is None and chunk_data.get(
+                        "response_id"
+                    ):
+                        continuation_response_id = chunk_data["response_id"]
+
                     yield {
                         "chunk": chunk_data.get("text", ""),
                         "conversation_id": conversation_id,
@@ -756,6 +1091,91 @@ class OpenAIResponseManager:
                         "is_citation": chunk_data.get("is_citation", False),
                         "citations": chunk_data.get("citations", []),
                     }
+
+                # Cache the continuation response
+                if continuation_response_id:
+                    try:
+                        # Update chat mapping with new response_id
+                        await self.chat_manager._set_chat_mapping(
+                            conversation_id, continuation_response_id
+                        )
+
+                        # Track response chain
+                        if self.cache_provider:
+                            try:
+                                await self.cache_provider.append_response(
+                                    conversation_id, continuation_response_id
+                                )
+                                await self.cache_provider.set_last_response_id(
+                                    conversation_id, continuation_response_id
+                                )
+                            except Exception as e:
+                                self.logger.warning(
+                                    f"Failed to track response chain: {e}",
+                                    component="OpenAIResponseManager",
+                                    subcomponent="process_streaming_query",
+                                )
+
+                        # =========================================================================
+                        # CRITICAL: Track assistant response in continuation
+                        # =========================================================================
+                        if conversation_id and conversation_id.startswith("session_"):
+                            try:
+                                # Retrieve the complete response to get full text
+                                import asyncio
+
+                                final_response = await asyncio.to_thread(
+                                    self.chat_manager.client.responses.retrieve,
+                                    response_id=continuation_response_id,
+                                )
+
+                                if final_response:
+                                    # Extract text content
+                                    assistant_content = (
+                                        self.chat_manager._extract_text_content(
+                                            final_response
+                                        )
+                                    )
+
+                                    # Add to session history
+                                    await self.chat_manager._add_message_to_session(
+                                        session_id=conversation_id,
+                                        role="assistant",
+                                        content=assistant_content,
+                                        metadata={
+                                            "response_id": continuation_response_id,
+                                            "model": resolved_model,
+                                            "is_continuation": True,
+                                        },
+                                    )
+
+                                    self.logger.debug(
+                                        "Tracked assistant response in continuation",
+                                        component="OpenAIResponseManager",
+                                        subcomponent="process_streaming_query",
+                                        session_id=conversation_id,
+                                        response_id=continuation_response_id,
+                                    )
+                            except Exception as e:
+                                self.logger.warning(
+                                    f"Failed to add assistant response to continuation: {e}",
+                                    component="OpenAIResponseManager",
+                                    subcomponent="process_streaming_query",
+                                )
+
+                        self.logger.debug(
+                            "Cached conversation continuation",
+                            component="OpenAIResponseManager",
+                            subcomponent="process_streaming_query",
+                            conversation_id=conversation_id,
+                            new_response_id=continuation_response_id,
+                        )
+                    except Exception as e:
+                        self.logger.warning(
+                            f"Failed to cache conversation continuation: {e}",
+                            component="OpenAIResponseManager",
+                            subcomponent="process_streaming_query",
+                        )
 
                 self.logger.info(
                     "Conversation continuation streaming completed",
@@ -765,45 +1185,47 @@ class OpenAIResponseManager:
                     chunk_count=chunk_count,
                 )
             else:
-                # # CRITICAL FIX: Stream directly without creating chat first
-                # self.logger.info(
-                #     "Starting new streaming conversation",
-                #     component="OpenAIResponseManager",
-                #     subcomponent="process_streaming_query",
-                # )
-
-                # # Stream the response directly - no create_chat call
-                # response_id = None
-                # async for chunk_data in self.stream_manager.stream_response(
-                #     message=user_message, model=resolved_model, tools=tools
-                # ):
-                #     chunk_count += 1
-
-                #     # Extract response_id from first chunk if available
-                #     if response_id is None and chunk_data.get("response_id"):
-                #         response_id = chunk_data["response_id"]
-
-                #     yield {
-                #         "chunk": chunk_data.get("text", ""),
-                #         "conversation_id": response_id,  # Use extracted response_id instead of None
-                #         "tools": tools,
-                #         "is_citation": chunk_data.get("is_citation", False),
-                #     }
-
-                # self.logger.info(
-                #     "New conversation streaming completed",
-                #     component="OpenAIResponseManager",
-                #     subcomponent="process_streaming_query",
-                #     chunk_count=chunk_count,
-                # )
-                # CRITICAL FIX: Stream directly without creating chat first
+                # CRITICAL: Handle new conversation (first message in session)
+                # This includes two cases:
+                # 1. conversation_id provided but session has no messages yet (first message)
+                # 2. No conversation_id provided at all (completely new session)
+                # In both cases, we stream the first response without previous_response_id
                 self.logger.info(
                     "Starting new streaming conversation",
                     component="OpenAIResponseManager",
                     subcomponent="process_streaming_query",
+                    has_session_id=bool(conversation_id),
                     enable_tool_execution=enable_tool_execution,
                     has_function_definitions=bool(function_definitions),
                 )
+
+                # =========================================================================
+                # CRITICAL: Track user message BEFORE streaming begins
+                # =========================================================================
+                if conversation_id and conversation_id.startswith("session_"):
+                    try:
+                        await self.chat_manager._add_message_to_session(
+                            session_id=conversation_id,
+                            role="user",
+                            content=user_message,
+                            metadata={
+                                "model": resolved_model,
+                                "has_tools": bool(tools),
+                                "tool_count": len(tools) if tools else 0,
+                            },
+                        )
+                        self.logger.debug(
+                            "Tracked user message in new conversation",
+                            component="OpenAIResponseManager",
+                            subcomponent="process_streaming_query",
+                            session_id=conversation_id,
+                        )
+                    except Exception as e:
+                        self.logger.warning(
+                            f"Failed to add user message to session: {e}",
+                            component="OpenAIResponseManager",
+                            subcomponent="process_streaming_query",
+                        )
 
                 # Stream the response directly - no create_chat call
                 response_id = None
@@ -835,8 +1257,8 @@ class OpenAIResponseManager:
                 async for chunk_data in stream_source:
                     chunk_count += 1
 
-                    # Extract response_id from first chunk if available
-                    if response_id is None and chunk_data.get("response_id"):
+                    # Extract response_id from chunks (keep updating to get the final one)
+                    if chunk_data.get("response_id"):
                         response_id = chunk_data["response_id"]
 
                     yield {
@@ -847,11 +1269,133 @@ class OpenAIResponseManager:
                         "citations": chunk_data.get("citations", []),
                     }
 
+                # Cache the conversation after streaming completes
+                if response_id:
+                    try:
+                        # CRITICAL FIX: Use existing conversation_id if provided (from on_chat_start),
+                        # otherwise generate a new session_id
+                        # This prevents duplicate session creation when UI already created a session
+                        if conversation_id and conversation_id.startswith("session_"):
+                            # Reuse the session that was already created (e.g., by Chainlit on_chat_start)
+                            session_id = conversation_id
+                            self.logger.info(
+                                "Reusing existing session for new conversation",
+                                component="OpenAIResponseManager",
+                                subcomponent="process_streaming_query",
+                                session_id=session_id,
+                                response_id=response_id,
+                            )
+                        else:
+                            # Generate new session_id only if no valid session was provided
+                            session_id = self.chat_manager.generate_session_id()
+                            self.logger.info(
+                                "Generated new session for conversation",
+                                component="OpenAIResponseManager",
+                                subcomponent="process_streaming_query",
+                                session_id=session_id,
+                                response_id=response_id,
+                            )
+
+                        # Cache chat mapping: session_id -> response_id
+                        await self.chat_manager._set_chat_mapping(
+                            session_id, response_id
+                        )
+
+                        # Create session metadata with proper session_id
+                        await self.chat_manager._set_session_metadata(
+                            session_id=session_id,
+                            vector_store_id=vector_store_id,
+                            root_response_id=response_id,
+                            last_response_id=response_id,  # Also set as last_response_id
+                        )
+
+                        # Track response chain
+                        if self.cache_provider:
+                            try:
+                                await self.cache_provider.append_response(
+                                    session_id, response_id
+                                )
+                                await self.cache_provider.set_last_response_id(
+                                    session_id, response_id
+                                )
+                            except Exception as e:
+                                self.logger.warning(
+                                    f"Failed to track response chain: {e}",
+                                    component="OpenAIResponseManager",
+                                    subcomponent="process_streaming_query",
+                                )
+
+                        # =========================================================================
+                        # CRITICAL: Track assistant response AFTER streaming completes
+                        # =========================================================================
+                        if session_id and session_id.startswith("session_"):
+                            try:
+                                # Retrieve the complete response to get full text
+                                import asyncio
+
+                                final_response = await asyncio.to_thread(
+                                    self.chat_manager.client.responses.retrieve,
+                                    response_id=response_id,
+                                )
+
+                                if final_response:
+                                    # Extract text content
+                                    assistant_content = (
+                                        self.chat_manager._extract_text_content(
+                                            final_response
+                                        )
+                                    )
+
+                                    # Add to session history
+                                    await self.chat_manager._add_message_to_session(
+                                        session_id=session_id,
+                                        role="assistant",
+                                        content=assistant_content,
+                                        metadata={
+                                            "response_id": response_id,
+                                            "model": resolved_model,
+                                            "has_citations": bool(
+                                                chunk_data.get("citations")
+                                            )
+                                            if "chunk_data" in locals()
+                                            else False,
+                                        },
+                                    )
+
+                                    self.logger.debug(
+                                        "Tracked assistant response in new conversation",
+                                        component="OpenAIResponseManager",
+                                        subcomponent="process_streaming_query",
+                                        session_id=session_id,
+                                        response_id=response_id,
+                                    )
+                            except Exception as e:
+                                self.logger.warning(
+                                    f"Failed to add assistant response to session: {e}",
+                                    component="OpenAIResponseManager",
+                                    subcomponent="process_streaming_query",
+                                )
+
+                        self.logger.info(
+                            "Cached new conversation session",
+                            component="OpenAIResponseManager",
+                            subcomponent="process_streaming_query",
+                            session_id=session_id,
+                            response_id=response_id,
+                        )
+                    except Exception as e:
+                        self.logger.warning(
+                            f"Failed to cache conversation session: {e}",
+                            component="OpenAIResponseManager",
+                            subcomponent="process_streaming_query",
+                        )
+
                 self.logger.info(
                     "New conversation streaming completed",
                     component="OpenAIResponseManager",
                     subcomponent="process_streaming_query",
                     chunk_count=chunk_count,
+                    conversation_id=response_id,
                 )
         except (ToolConfigurationError, VectorStoreError, StreamConnectionError) as e:
             self.logger.error(

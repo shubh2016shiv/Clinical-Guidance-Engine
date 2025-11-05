@@ -41,6 +41,7 @@ from src.providers.cache_provider.base import (
     CacheProvider,
     CacheConfig,
     CacheOperationType,
+    ActiveSessionContext,
 )
 from src.providers.cache_provider.exceptions import (
     CacheConnectionError,
@@ -474,6 +475,128 @@ class RedisProvider(CacheProvider):
             )
             raise CacheOperationError(error_msg)
 
+    async def get_active_session_context(
+        self, session_id: str
+    ) -> Optional[ActiveSessionContext]:
+        """
+        Retrieve comprehensive context for an active session using Redis pipeline.
+
+        This method is the gatekeeper for session validation. It performs an atomic
+        check to verify the session is active, and only then retrieves all related data.
+
+        Implementation Strategy:
+        1. First, check if the core session key exists (validates session is active)
+        2. If session doesn't exist or is expired, return None immediately
+        3. If session exists, use a Redis pipeline to atomically fetch:
+           - Session metadata (hash)
+           - Last response ID (string)
+           - Response chain (for additional validation if needed)
+        4. Parse the metadata to extract vector_store_id and root_response_id
+
+        This atomic approach ensures data consistency and prevents race conditions.
+
+        Args:
+            session_id: Unique session identifier to validate and retrieve
+
+        Returns:
+            ActiveSessionContext with all session data if session is active,
+            None if session is inactive/expired or doesn't exist
+
+        Raises:
+            CacheOperationError: If the operation fails due to Redis errors
+        """
+        try:
+            # Build all keys
+            session_key = self._build_key(CacheOperationType.SESSION, session_id)
+            last_response_key = self._build_key(
+                CacheOperationType.CHAT_MAPPING, f"last_response:{session_id}"
+            )
+
+            # CRITICAL: First check if session key exists
+            # This is the gatekeeper - if the key doesn't exist or has expired,
+            # the session is considered inactive
+            session_exists = await self.redis_client.exists(session_key)
+
+            if not session_exists:
+                logger.debug(
+                    "Session not found or expired",
+                    component="Cache",
+                    subcomponent="RedisProvider",
+                    session_id=session_id,
+                )
+                return None
+
+            # Session is active - fetch all related data atomically using pipeline
+            # This ensures data consistency even under concurrent access
+            pipeline = self.redis_client.pipeline()
+            pipeline.hgetall(session_key)  # Get session metadata
+            pipeline.get(last_response_key)  # Get last response ID
+
+            results = await pipeline.execute()
+
+            # Parse results
+            metadata = results[0] if results[0] else {}
+            last_response_id = results[1]
+
+            # If metadata is empty, session exists but has no data (edge case)
+            if not metadata:
+                logger.warning(
+                    "Session key exists but metadata is empty",
+                    component="Cache",
+                    subcomponent="RedisProvider",
+                    session_id=session_id,
+                )
+                return None
+
+            # Deserialize metadata if it's stored as JSON string
+            if isinstance(metadata, dict):
+                # Metadata is already a dict (decode_responses=True)
+                parsed_metadata = metadata
+            else:
+                try:
+                    parsed_metadata = json.loads(metadata)
+                except (json.JSONDecodeError, TypeError):
+                    parsed_metadata = {}
+
+            # Extract vector_store_id and root_response_id from metadata
+            vector_store_id = parsed_metadata.get("vector_store_id")
+            root_response_id = parsed_metadata.get("root_response_id")
+
+            # Create and return the session context
+            context = ActiveSessionContext(
+                session_id=session_id,
+                metadata=parsed_metadata,
+                last_response_id=last_response_id,
+                vector_store_id=vector_store_id,
+                root_response_id=root_response_id,
+            )
+
+            logger.info(
+                "Retrieved active session context from Redis",
+                component="Cache",
+                subcomponent="RedisProvider",
+                session_id=session_id,
+                last_response_id=last_response_id,
+                vector_store_id=vector_store_id,
+                root_response_id=root_response_id,
+                has_last_response=bool(last_response_id),
+                has_vector_store=bool(vector_store_id),
+                has_root_response=bool(root_response_id),
+            )
+
+            return context
+
+        except Exception as e:
+            error_msg = f"Failed to retrieve active session context: {e}"
+            logger.error(
+                error_msg,
+                component="Cache",
+                subcomponent="RedisProvider",
+                session_id=session_id,
+                exc_info=True,
+            )
+            raise CacheOperationError(error_msg)
+
     # ==================== Response Chain Management ====================
 
     async def append_response(self, session_id: str, response_id: str) -> bool:
@@ -816,6 +939,175 @@ class RedisProvider(CacheProvider):
 
         except Exception as e:
             error_msg = f"Failed to invalidate history: {e}"
+            logger.error(
+                error_msg,
+                component="Cache",
+                subcomponent="RedisProvider",
+                session_id=session_id,
+                exc_info=True,
+            )
+            raise CacheOperationError(error_msg)
+
+    async def add_message(
+        self,
+        session_id: str,
+        message: Dict[str, Any],
+        max_messages: Optional[int] = None,
+    ) -> bool:
+        """
+        Add a message to the session's message history list AND update message_count.
+
+        CRITICAL FIX: Now atomically updates message_count in session metadata
+        to ensure accurate tracking of conversation length.
+
+        Messages are stored in a Redis LIST at key: session:<session_id>:messages
+        The list is automatically trimmed to max_messages to prevent unbounded growth.
+
+        Args:
+            session_id: Unique session identifier
+            message: Dictionary containing message data (role, content, timestamp, etc.)
+            max_messages: Maximum messages to keep (defaults to config.max_chain_length)
+
+        Returns:
+            True if message added successfully, False otherwise
+
+        Raises:
+            CacheOperationError: If operation fails
+            CacheSerializationError: If message serialization fails
+        """
+        try:
+            import json
+
+            max_messages = max_messages or self.config.max_chain_length
+
+            # Build message list key
+            messages_key = f"session:{session_id}:messages"
+            session_key = f"session:{session_id}"
+
+            # Serialize message to JSON
+            message_json = json.dumps(message)
+
+            # Use pipeline for atomic operations
+            pipeline = self.redis_client.pipeline()
+
+            # 1. Append message to list (LPUSH adds to the left/head)
+            pipeline.lpush(messages_key, message_json)
+
+            # 2. Trim list to max length (keep most recent messages)
+            pipeline.ltrim(messages_key, 0, max_messages - 1)
+
+            # 3. Get current list length for message_count
+            pipeline.llen(messages_key)
+
+            # 4. Set TTL on messages list
+            pipeline.expire(messages_key, self.config.default_session_ttl)
+
+            # Execute pipeline
+            results = await pipeline.execute()
+
+            # 5. Update message_count in session metadata HASH atomically
+            message_count = results[2]  # Result from llen
+
+            pipeline2 = self.redis_client.pipeline()
+            pipeline2.hset(session_key, "message_count", str(message_count))
+            pipeline2.expire(session_key, self.config.default_session_ttl)
+            await pipeline2.execute()
+
+            logger.debug(
+                "Added message to session history and updated message_count",
+                component="Cache",
+                subcomponent="RedisProvider",
+                session_id=session_id,
+                message_count=message_count,
+                max_messages=max_messages,
+            )
+
+            return True
+
+        except (TypeError, ValueError) as e:
+            if isinstance(e, json.JSONDecodeError) or str(e).startswith(
+                "Object of type"
+            ):
+                error_msg = f"Failed to serialize message: {e}"
+                logger.error(
+                    error_msg,
+                    component="Cache",
+                    subcomponent="RedisProvider",
+                    session_id=session_id,
+                    exc_info=True,
+                )
+                raise CacheSerializationError(error_msg)
+            raise
+
+        except Exception as e:
+            error_msg = f"Failed to add message: {e}"
+            logger.error(
+                error_msg,
+                component="Cache",
+                subcomponent="RedisProvider",
+                session_id=session_id,
+                exc_info=True,
+            )
+            raise CacheOperationError(error_msg)
+
+    async def get_messages(
+        self, session_id: str, limit: Optional[int] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Retrieve messages from session history.
+
+        Args:
+            session_id: Unique session identifier
+            limit: Maximum number of messages to retrieve (retrieves all if None)
+
+        Returns:
+            List of message dictionaries in reverse chronological order (newest first)
+            Returns empty list if no messages exist
+
+        Raises:
+            CacheOperationError: If retrieval fails
+            CacheSerializationError: If deserialization fails
+        """
+        try:
+            import json
+
+            messages_key = f"session:{session_id}:messages"
+
+            if limit is None:
+                # Get all messages
+                raw_messages = await self.redis_client.lrange(messages_key, 0, -1)
+            else:
+                # Get most recent 'limit' messages
+                raw_messages = await self.redis_client.lrange(
+                    messages_key, 0, limit - 1
+                )
+
+            messages = []
+            for raw_msg in raw_messages:
+                try:
+                    msg_dict = json.loads(raw_msg)
+                    messages.append(msg_dict)
+                except json.JSONDecodeError as e:
+                    logger.warning(
+                        f"Failed to deserialize message: {e}",
+                        component="Cache",
+                        subcomponent="RedisProvider",
+                        session_id=session_id,
+                    )
+                    continue
+
+            logger.debug(
+                "Retrieved messages from session history",
+                component="Cache",
+                subcomponent="RedisProvider",
+                session_id=session_id,
+                message_count=len(messages),
+            )
+
+            return messages
+
+        except Exception as e:
+            error_msg = f"Failed to get messages: {e}"
             logger.error(
                 error_msg,
                 component="Cache",
@@ -1930,7 +2222,7 @@ if __name__ == "__main__":
             host="localhost",
             port=6379,
             db=0,
-            password=None,  # Set to None if Redis doesn't require password
+            password="redis123",  # Set to None if Redis doesn't require password
             key_prefix="test_drug_reco",
             default_session_ttl=3600,
             default_history_ttl=1800,

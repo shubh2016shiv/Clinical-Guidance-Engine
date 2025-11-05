@@ -12,6 +12,7 @@ from typing import Dict, Any, List, Optional
 from src.response_api_agent.managers.response_api_manager import OpenAIResponseManager
 from src.logs import get_component_logger
 from src.response_api_agent.managers.exceptions import ResponsesAPIError
+from src.providers.cache_provider import CacheProvider, create_cache_provider
 
 
 class AsclepiusHealthcareAgent:
@@ -29,16 +30,36 @@ class AsclepiusHealthcareAgent:
     on healthcare-specific orchestration and knowledge base management.
     """
 
-    def __init__(self, chat_history_limit: int = 10):
+    def __init__(
+        self,
+        chat_history_limit: int = 10,
+        cache_provider: Optional[CacheProvider] = None,
+    ):
         """
         Initialize the Asclepius Healthcare Agent.
 
         Args:
             chat_history_limit: Maximum number of messages to retain in conversation history.
+            cache_provider: Optional pre-configured CacheProvider instance.
         """
         self.logger = get_component_logger("AsclepiusHealthcareAgent")
+
+        # Initialize or use provided cache provider
+        self.cache_provider = cache_provider
+        if self.cache_provider is None:
+            try:
+                self.logger.info(
+                    "Initializing Redis cache provider for Asclepius Agent"
+                )
+                self.cache_provider = create_cache_provider(provider_type="redis")
+            except Exception as e:
+                self.logger.warning(
+                    f"Failed to create cache provider for Asclepius Agent: {e}. Caching will be disabled."
+                )
+                self.cache_provider = None
+
         self.response_manager = OpenAIResponseManager(
-            chat_history_limit=chat_history_limit
+            chat_history_limit=chat_history_limit, cache_provider=self.cache_provider
         )
         self._vector_store_id: Optional[str] = None
 

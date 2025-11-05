@@ -223,7 +223,8 @@ def create_cache_provider(
                 ),
                 # Key management
                 "key_prefix": kwargs.pop(
-                    "key_prefix", getattr(settings, "redis_key_prefix", "drug_reco")
+                    "key_prefix",
+                    getattr(settings, "redis_key_prefix", "Asclepius_Conversations"),
                 ),
                 "max_chain_length": kwargs.pop("max_chain_length", 20),
                 # Additional provider-specific settings
@@ -364,7 +365,7 @@ def get_default_cache_provider() -> CacheProvider:
         password=getattr(settings, "redis_password", None),
         max_connections=getattr(settings, "redis_max_connections", 50),
         socket_timeout=getattr(settings, "redis_socket_timeout", 5),
-        key_prefix=getattr(settings, "redis_key_prefix", "drug_reco"),
+        key_prefix=getattr(settings, "redis_key_prefix", "Asclepius_Conversations"),
         default_session_ttl=getattr(settings, "redis_default_session_ttl", 7200),
         default_history_ttl=getattr(settings, "redis_default_history_ttl", 1800),
     )

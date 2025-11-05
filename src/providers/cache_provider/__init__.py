@@ -68,6 +68,7 @@ from .base import (
     CacheProvider,
     CacheConfig,
     CacheOperationType,
+    ActiveSessionContext,
 )
 
 # Factory functions
@@ -106,6 +107,7 @@ __all__ = [
     "CacheProvider",
     "CacheConfig",
     "CacheOperationType",
+    "ActiveSessionContext",
     # Factory functions
     "create_cache_provider",
     "get_cache_provider",

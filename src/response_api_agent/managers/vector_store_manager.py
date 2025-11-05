@@ -8,6 +8,7 @@ from src.config import get_settings
 from src.response_api_agent.managers.exceptions import VectorStoreError
 from src.response_api_agent.managers.upload_manager import UploadManager
 from src.logs import get_component_logger, time_execution
+from src.providers.cache_provider import CacheProvider
 
 
 class VectorStoreManager:
@@ -18,17 +19,24 @@ class VectorStoreManager:
     semantic search over uploaded documents.
     """
 
-    def __init__(self, batch_size: int = 5, rate_limit_delay: float = 1.0):
+    def __init__(
+        self,
+        batch_size: int = 5,
+        rate_limit_delay: float = 1.0,
+        cache_provider: Optional[CacheProvider] = None,
+    ):
         """Initialize the Vector Store Manager.
 
         Args:
             batch_size: Number of files to upload per batch.
             rate_limit_delay: Seconds to sleep between batches (for API rate limits).
+            cache_provider: Optional CacheProvider for Redis caching of vector store validation.
         """
         self.settings = get_settings()
         self.client = OpenAI(api_key=self.settings.openai_api_key)
         self.async_client = AsyncOpenAI(api_key=self.settings.openai_api_key)
         self._vector_store_cache: Dict[str, Dict[str, Any]] = {}
+        self.cache_provider = cache_provider
         self.batch_size = batch_size
         self.rate_limit_delay = rate_limit_delay
         self.logger = get_component_logger("VectorStore")

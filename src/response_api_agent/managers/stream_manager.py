@@ -36,7 +36,9 @@ Done!
 """
 
 import json
+import uuid
 from typing import Dict, Any, List, Optional, AsyncGenerator, Callable, TYPE_CHECKING
+from datetime import datetime
 from openai import OpenAI, AsyncOpenAI
 from src.config import get_settings
 from src.response_api_agent.managers.exceptions import StreamConnectionError
@@ -44,6 +46,7 @@ from src.response_api_agent.managers.citation_manager import CitationManager
 from src.response_api_agent.managers.llm_provider_adapter import ResponseAPIAdapter
 from src.logs import get_component_logger, time_execution
 from src.prompts.asclepius_system_prompt import get_system_prompt
+from src.providers.cache_provider import CacheProvider
 
 if TYPE_CHECKING:
     from src.response_api_agent.managers.chat_manager import ChatManager
@@ -56,12 +59,17 @@ class StreamManager:
     Handles Server-Sent Events (SSE) for real-time streaming of model responses.
     """
 
-    def __init__(self, chat_manager: Optional["ChatManager"] = None):
+    def __init__(
+        self,
+        chat_manager: Optional["ChatManager"] = None,
+        cache_provider: Optional[CacheProvider] = None,
+    ):
         """
         Initialize the Stream Manager.
 
         Args:
             chat_manager: Optional ChatManager instance for tool call extraction and execution.
+            cache_provider: Optional CacheProvider for Redis caching of streaming state.
         """
         self.settings = get_settings()
         self.client = OpenAI(api_key=self.settings.openai_api_key)
@@ -69,6 +77,7 @@ class StreamManager:
         self.response_adapter = ResponseAPIAdapter(self.client, self.async_client)
         self.citation_manager = CitationManager(client=self.async_client)
         self.chat_manager = chat_manager  # Store the chat manager reference
+        self.cache_provider = cache_provider
         self.logger = get_component_logger("Stream")
 
     @time_execution("Stream", "StreamResponse")
@@ -93,6 +102,10 @@ class StreamManager:
         Yields:
             Dictionary containing 'text' and 'response_id' from the streaming response.
         """
+        # Generate request ID for tracking
+        request_id = f"req_{uuid.uuid4().hex[:16]}"
+        session_id = previous_response_id or "new_session"
+
         try:
             model = model or self.settings.openai_model_name
 
@@ -104,6 +117,7 @@ class StreamManager:
                 has_previous_response=bool(previous_response_id),
                 has_tools=bool(tools),
                 message_length=len(message),
+                request_id=request_id,
             )
 
             # Create streaming response
@@ -119,6 +133,27 @@ class StreamManager:
             chunk_count = 0
             response_id = None
             collected_annotations = []  # CRITICAL: Collect annotations during stream
+
+            # Set initial streaming state
+            if self.cache_provider:
+                try:
+                    await self.cache_provider.set_streaming_state(
+                        session_id=session_id,
+                        request_id=request_id,
+                        state={
+                            "status": "streaming",
+                            "chunk_count": 0,
+                            "last_chunk_at": datetime.utcnow().isoformat(),
+                            "response_id": None,
+                            "is_citation": False,
+                        },
+                    )
+                except Exception as e:
+                    self.logger.warning(
+                        f"Failed to set streaming state: {e}",
+                        component="Stream",
+                        subcomponent="StreamResponse",
+                    )
 
             self.logger.info(
                 "Beginning to process stream chunks",
@@ -144,6 +179,26 @@ class StreamManager:
                             response_id=response_id,
                         )
 
+                        # Update streaming state with response_id
+                        if self.cache_provider:
+                            try:
+                                await self.cache_provider.set_streaming_state(
+                                    session_id=session_id,
+                                    request_id=request_id,
+                                    state={
+                                        "status": "streaming",
+                                        "response_id": response_id,
+                                        "chunk_count": chunk_count,
+                                        "last_chunk_at": datetime.utcnow().isoformat(),
+                                    },
+                                )
+                            except Exception as e:
+                                self.logger.warning(
+                                    f"Failed to update streaming state: {e}",
+                                    component="Stream",
+                                    subcomponent="StreamResponse",
+                                )
+
                     # Handle ResponseTextDeltaEvent - this is where the actual text content is
                     elif chunk_type == "ResponseTextDeltaEvent" and hasattr(
                         chunk, "delta"
@@ -156,6 +211,22 @@ class StreamManager:
                                 callback(text)
                             print(text, end="", flush=True)
                             yield {"text": text, "response_id": response_id}
+
+                            # Update streaming state periodically (every 10 chunks)
+                            if self.cache_provider and chunk_count % 10 == 0:
+                                try:
+                                    await self.cache_provider.set_streaming_state(
+                                        session_id=session_id,
+                                        request_id=request_id,
+                                        state={
+                                            "status": "streaming",
+                                            "response_id": response_id,
+                                            "chunk_count": chunk_count,
+                                            "last_chunk_at": datetime.utcnow().isoformat(),
+                                        },
+                                    )
+                                except Exception:
+                                    pass  # Don't log every update failure
 
                     # CRITICAL: Capture annotation events during streaming
                     # These events contain file citation information
@@ -282,6 +353,30 @@ class StreamManager:
                     "response_id": response_id,
                     "is_citation": False,
                 }
+
+            # Clear streaming state after completion
+            if self.cache_provider:
+                try:
+                    await self.cache_provider.set_streaming_state(
+                        session_id=session_id,
+                        request_id=request_id,
+                        state={
+                            "status": "completed",
+                            "response_id": response_id,
+                            "chunk_count": chunk_count,
+                            "last_chunk_at": datetime.utcnow().isoformat(),
+                        },
+                    )
+                    # Clear after a brief moment (will auto-expire with TTL anyway)
+                    await self.cache_provider.clear_streaming_state(
+                        session_id, request_id
+                    )
+                except Exception as e:
+                    self.logger.warning(
+                        f"Failed to clear streaming state: {e}",
+                        component="Stream",
+                        subcomponent="StreamResponse",
+                    )
 
             self.logger.info(
                 "Response stream completed",
@@ -910,12 +1005,21 @@ class StreamManager:
                         error=str(e),
                     )
 
+            # Always yield response_id at the end if we have it
+            if response_id:
+                yield {
+                    "text": "",  # Empty text, but include response_id
+                    "response_id": response_id,
+                    "is_citation": False,
+                }
+
             self.logger.info(
                 "Chat continuation stream completed",
                 component="Stream",
                 subcomponent="StreamChatContinuation",
                 chat_id=chat_id,
                 chunk_count=chunk_count,
+                response_id=response_id,
             )
 
         except Exception as e:
@@ -1135,6 +1239,284 @@ class StreamManager:
 
 # ------------------------------------------------------------
 """
+# Streaming with Function Call Tool Execution in OpenAI Responses API
+
+## Overview
+
+The Stream Manager handles real-time streaming responses from the OpenAI Responses API with automatic function call tool execution. This enables true streaming behavior even when the model needs to call functions (like `search_drug_database`) during the conversation flow.
+
+## Function Call Tool Execution During Streaming
+
+### Overview
+
+When streaming is enabled with tool execution (`stream_response_with_tool_execution`), the system automatically:
+1. Streams the initial response
+2. Detects function calls in the response
+3. Executes function calls automatically
+4. Streams continuation responses with tool results
+5. Repeats until no more tool calls or max iterations reached
+
+### Flow with Function Call Tool Execution
+
+```
+User Query (e.g., "What is metformin?")
+    ↓
+Phase 1: Stream Initial Response
+    ↓
+[ResponseCreatedEvent] → Capture response_id
+    ↓
+[ResponseTextDeltaEvent] → Stream text chunks (may be empty if only tool calls)
+    ↓
+[ResponseCompletedEvent] → Initial stream ends
+    ↓
+Retrieve final response → Check for tool calls
+    ↓
+[Function Call Detected] → search_drug_database(drug_class="antidiabetic", drug_name="metformin")
+    ↓
+Execute Function → Call search_drug_database() → Get results
+    ↓
+Phase 2: Stream Continuation Response (with tool outputs)
+    ↓
+[ResponseCreatedEvent] → Capture continuation response_id
+    ↓
+[ResponseTextDeltaEvent] → Stream text chunks with tool results
+    ↓
+[ResponseOutputTextAnnotationAddedEvent] → Track citations (if any)
+    ↓
+[ResponseCompletedEvent] → Continuation stream ends
+    ↓
+Check for more tool calls → If none, done; if yes, repeat loop
+    ↓
+Extract citations → Format and emit
+    ↓
+Done!
+```
+
+### Key Phases
+
+#### Phase 1: Initial Response Streaming
+- Streams the initial user query
+- May contain tool calls (function calls) or text
+- Captures `response_id` from `ResponseCreatedEvent`
+- Always yields `response_id` even if no text chunks (for tool call detection)
+
+#### Phase 2: Tool Execution Loop
+- Detects tool calls from initial response
+- Executes each function call (e.g., `search_drug_database`)
+- Formats tool outputs as `function_call_output` items
+- Creates **streaming** response with tool outputs (not non-streaming)
+- Streams continuation response chunk-by-chunk
+- Checks for additional tool calls
+- Repeats until no tool calls or max iterations (default: 5)
+
+### Function Call Tool Execution Details
+
+#### Tool Call Detection
+```python
+# After initial stream completes
+final_response = await self.async_client.responses.retrieve(response_id)
+tool_calls = self.chat_manager._extract_tool_calls_from_response(final_response)
+
+# Tool calls structure:
+# [
+#   {
+#     "call_id": "call_abc123",
+#     "type": "function_call",
+#     "function_name": "search_drug_database",
+#     "arguments": {"drug_class": "antidiabetic", "drug_name": "metformin", "limit": 5}
+#   }
+# ]
+```
+
+#### Tool Execution
+```python
+# Execute each function call
+for tool_call in tool_calls:
+    function_name = tool_call["function_name"]
+    arguments = tool_call["arguments"]
+    result = await self.chat_manager._execute_function_call(function_name, arguments)
+    
+    # Format as function_call_output
+    tool_outputs.append({
+        "call_id": tool_call["call_id"],
+        "output": result
+    })
+```
+
+#### Streaming Continuation Response
+```python
+# Format tool outputs as structured items
+input_items = []
+for tool_output in tool_outputs:
+    input_items.append({
+        "type": "function_call_output",
+        "call_id": tool_output["call_id"],
+        "output": tool_output["output"]
+    })
+
+# Create STREAMING response with tool outputs
+stream = await self.response_adapter.create_streaming_response(
+    model=model,
+    previous_response_id=current_response_id,
+    input=input_items,  # Tool outputs as structured items
+    instructions=get_system_prompt(),
+    tools=tools or [],
+    stream=True,  # CRITICAL: Enable streaming
+)
+
+# Process streaming chunks in real-time
+async for chunk in stream:
+    # Handle ResponseTextDeltaEvent for text chunks
+    # Handle ResponseCreatedEvent for response_id
+    # Handle ResponseOutputTextAnnotationAddedEvent for citations
+    yield chunk
+```
+
+### Tool Types Supported
+
+#### 1. Function Calls (Custom Functions)
+- **Example**: `search_drug_database`
+- **Execution**: Custom function executor registered with `ChatManager`
+- **Output**: Structured data (e.g., drug information from Milvus database)
+- **Streaming**: Continuation response streams after tool execution
+
+#### 2. File Search (Built-in Tool)
+- **Example**: Vector store search for clinical guidelines
+- **Execution**: Handled automatically by OpenAI Responses API
+- **Output**: File citations and content
+- **Streaming**: File search results are embedded in stream events
+
+### Event Handling During Tool Execution
+
+#### Initial Stream Events
+- `ResponseCreatedEvent`: Capture initial `response_id`
+- `ResponseTextDeltaEvent`: Stream text (may be empty if only tool calls)
+- `ResponseCompletedEvent`: Signal end of initial stream
+
+#### Continuation Stream Events (After Tool Execution)
+- `ResponseCreatedEvent`: Capture continuation `response_id`
+- `ResponseTextDeltaEvent`: Stream text chunks with tool results
+- `ResponseOutputTextAnnotationAddedEvent`: Track inline citations
+- `ResponseFileSearchCallCompleted`: File search completion (if used)
+- `ResponseCompletedEvent`: Signal end of continuation stream
+
+### Critical Implementation Details
+
+#### 1. Response ID Management
+- Always capture `response_id` from `ResponseCreatedEvent`
+- Update `current_response_id` when continuation stream starts
+- Use `current_response_id` for retrieving final response and checking for more tool calls
+
+#### 2. Tool Output Formatting
+- Tool outputs must be formatted as `function_call_output` items
+- Each item requires:
+  - `type`: `"function_call_output"`
+  - `call_id`: Matching the original tool call ID
+  - `output`: Result string from function execution
+
+#### 3. Streaming vs Non-Streaming
+- **Initial stream**: Always uses `create_streaming_response`
+- **Continuation stream**: Must use `create_streaming_response` (not `create_response`)
+- This ensures true chunk-by-chunk streaming, not manual text slicing
+
+#### 4. Tool Call Detection
+- After each stream completes, retrieve final response
+- Extract tool calls using `_extract_tool_calls_from_response()`
+- Check for `type == "function_call"` to identify function calls
+- Loop continues while `tool_calls` exist and `iteration < max_iterations`
+
+### Error Handling
+
+#### Null Response Handling
+```python
+# Always check for None before extracting tool calls
+if final_response:
+    tool_calls = self.chat_manager._extract_tool_calls_from_response(final_response)
+else:
+    tool_calls = []  # No more tool calls
+    self.logger.warning("Cannot extract tool calls - final_response is None")
+```
+
+#### Function Execution Errors
+- Errors during function execution are caught and logged
+- Error messages are formatted as tool outputs
+- Tool execution loop continues with error outputs
+- Prevents single function failure from breaking entire stream
+
+#### Stream Processing Errors
+- Individual chunk processing errors are caught and logged
+- Stream continues processing other chunks
+- Errors don't break the entire streaming flow
+
+### Best Practices
+
+#### 1. Tool Execution Configuration
+- Set `enable_tool_execution=True` when initializing streaming
+- Provide `function_definitions` for function tools
+- Set appropriate `max_iterations` (default: 5) to prevent infinite loops
+
+#### 2. Streaming Performance
+- Use true streaming (not manual chunking) for continuation responses
+- Process chunks as they arrive for real-time user experience
+- Track response_id for proper conversation chaining
+
+#### 3. Tool Call Detection
+- Always retrieve final response after stream completes
+- Check for tool calls even if no text was streamed
+- Handle both function calls and file_search tool calls
+
+#### 4. Response ID Tracking
+- Capture response_id from `ResponseCreatedEvent` in both phases
+- Update `current_response_id` when continuation stream starts
+- Use `current_response_id` for retrieving final response
+
+### Example Flow: Drug Database Query
+
+```
+User: "What is the formulation and available dosages for metformin?"
+    ↓
+Phase 1: Initial Stream
+    - Stream starts (tools: file_search, search_drug_database)
+    - Model makes tool call: search_drug_database(drug_class="antidiabetic", drug_name="metformin")
+    - Stream completes with 0 text chunks (only tool call)
+    ↓
+Phase 2: Tool Execution
+    - Detect tool call: search_drug_database
+    - Execute function: Query Milvus database → Get 5 results
+    - Format tool output: function_call_output with call_id and results
+    ↓
+Phase 3: Continuation Stream
+    - Create streaming response with tool outputs
+    - Stream text chunks: "Metformin is available in various formulations..."
+    - Stream completes with full response
+    ↓
+Check for more tool calls: None → Done
+Extract citations: None → Done
+Final output: Complete response with metformin information
+```
+
+### Debugging Tips
+
+#### Common Issues
+1. **No tool execution**: Check if `enable_tool_execution=True` and `function_definitions` provided
+2. **No streaming chunks**: Verify `stream=True` in `create_streaming_response`
+3. **Tool execution fails**: Check function executor registration and error logs
+4. **Infinite loop**: Check `max_iterations` limit and tool call detection logic
+
+#### Debug Logging
+```python
+self.logger.info(
+    "Tool execution iteration",
+    component="Stream",
+    subcomponent="StreamResponseWithToolExecution",
+    iteration=iteration,
+    tool_call_count=len(tool_calls),
+    function_names=[tc.get("function_name") for tc in tool_calls]
+)
+```
+
+---
+
 # Streaming Citations in OpenAI Responses API
 
 ## Overview

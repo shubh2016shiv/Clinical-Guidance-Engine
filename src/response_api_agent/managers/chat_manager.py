@@ -1,6 +1,7 @@
 import asyncio
 import json
 from typing import Dict, Any, List, Optional, Callable
+from datetime import datetime
 from openai import OpenAI, AsyncOpenAI
 from src.config import get_settings
 from src.response_api_agent.managers.tool_manager import (
@@ -15,6 +16,7 @@ from src.response_api_agent.managers.exceptions import (
 )
 from src.logs import get_component_logger, time_execution
 from src.prompts.asclepius_system_prompt import get_system_prompt
+from src.providers.cache_provider import CacheProvider
 
 
 class ChatManager:
@@ -27,13 +29,17 @@ class ChatManager:
     """
 
     def __init__(
-        self, tool_manager: Optional[ToolManager] = None, chat_history_limit: int = 10
+        self,
+        tool_manager: Optional[ToolManager] = None,
+        chat_history_limit: int = 10,
+        cache_provider: Optional[CacheProvider] = None,
     ):
         """Initialize the Chat Manager.
 
         Args:
             tool_manager: Optional ToolManager for including tools in responses.
             chat_history_limit: Maximum number of previous responses in the chain (default: 10).
+            cache_provider: Optional CacheProvider for Redis caching of chat state and history.
         """
         self.settings = get_settings()
         self.client = OpenAI(api_key=self.settings.openai_api_key)
@@ -41,12 +47,443 @@ class ChatManager:
         self.response_adapter = ResponseAPIAdapter(self.client, self.async_client)
         self.tool_manager = tool_manager
         self.chat_history_limit = chat_history_limit
-        self._chat_cache: Dict[str, str] = {}  # Cache: chat_id -> last_response_id
+        self.cache_provider = cache_provider
+        self._chat_cache: Dict[
+            str, str
+        ] = {}  # In-memory fallback: chat_id -> last_response_id
         self.citation_manager = CitationManager(client=self.client)
         self.logger = get_component_logger("Chat")
 
         # Registry for function tool executors
         self._function_executors: Dict[str, Callable] = {}
+
+    @staticmethod
+    def generate_session_id() -> str:
+        """
+        Generate a new session ID.
+
+        This is the SINGLE SOURCE OF TRUTH for session ID generation.
+        All session IDs must be generated through this method to ensure consistency.
+
+        Format: session_{unix_timestamp}
+
+        Returns:
+            A new session ID string in the format 'session_{timestamp}'
+        """
+        import time
+
+        return f"session_{int(time.time())}"
+
+    async def _get_chat_mapping(self, chat_id: str) -> Optional[str]:
+        """
+        Get last response ID for a chat ID from optimized session metadata or legacy cache.
+
+        This method now reads from session metadata first (optimized approach),
+        then falls back to legacy chat_mapping keys for backward compatibility.
+
+        Args:
+            chat_id: Chat identifier (should be a session_id)
+
+        Returns:
+            Last response ID, or None if not found
+        """
+        # CRITICAL: Try reading from session metadata first (optimized approach)
+        if self.cache_provider and chat_id and chat_id.startswith("session_"):
+            try:
+                if hasattr(self.cache_provider, "get_session_metadata"):
+                    session_metadata = await self.cache_provider.get_session_metadata(
+                        chat_id
+                    )
+                    if session_metadata and "last_response_id" in session_metadata:
+                        response_id = session_metadata["last_response_id"]
+                        if response_id:
+                            # Update in-memory cache for fast access
+                            self._chat_cache[chat_id] = response_id
+                            return response_id
+            except Exception as e:
+                self.logger.debug(
+                    f"Failed to get last_response_id from session metadata: {e}",
+                    component="Chat",
+                    subcomponent="GetChatMapping",
+                )
+
+        # Fallback 1: Try legacy Redis chat_mapping key (for backward compatibility)
+        if self.cache_provider:
+            try:
+                response_id = await self.cache_provider.get_chat_mapping(chat_id)
+                if response_id:
+                    # Update in-memory cache
+                    self._chat_cache[chat_id] = response_id
+                    return response_id
+            except Exception as e:
+                self.logger.debug(
+                    f"Failed to get chat mapping from legacy cache: {e}",
+                    component="Chat",
+                    subcomponent="GetChatMapping",
+                )
+
+        # Fallback 2: In-memory cache
+        return self._chat_cache.get(chat_id)
+
+    async def _set_chat_mapping(self, chat_id: str, response_id: Optional[str]) -> None:
+        """
+        Set last response ID for a chat ID using optimized session metadata.
+
+        DEPRECATED: This method now updates session metadata instead of creating legacy keys.
+        Legacy chat_mapping keys are no longer created to reduce redundancy.
+
+        Args:
+            chat_id: Chat identifier (should be a session_id)
+            response_id: Last response ID (can be None for streaming placeholders)
+        """
+        # Update in-memory cache (always)
+        if response_id:
+            self._chat_cache[chat_id] = response_id
+
+        # CRITICAL: Update session metadata instead of creating legacy keys
+        # Only update if chat_id is a valid session_id format
+        if (
+            self.cache_provider
+            and chat_id
+            and chat_id.startswith("session_")
+            and response_id
+        ):
+            try:
+                # Update session metadata with last_response_id (optimized approach)
+                await self._set_session_metadata(
+                    session_id=chat_id, last_response_id=response_id
+                )
+                self.logger.debug(
+                    "Updated last_response_id in session metadata (optimized)",
+                    component="Chat",
+                    subcomponent="SetChatMapping",
+                    session_id=chat_id,
+                    response_id=response_id,
+                )
+            except Exception as e:
+                self.logger.warning(
+                    f"Failed to update session metadata with last_response_id: {e}",
+                    component="Chat",
+                    subcomponent="SetChatMapping",
+                )
+        elif response_id:
+            # Fallback: If chat_id is not a session_id, log warning but don't create legacy keys
+            self.logger.warning(
+                "chat_id is not a valid session_id format, skipping chat mapping update",
+                component="Chat",
+                subcomponent="SetChatMapping",
+                chat_id=chat_id,
+            )
+
+    async def _set_session_metadata(
+        self,
+        session_id: str,
+        vector_store_id: Optional[str] = None,
+        root_response_id: Optional[str] = None,
+        last_response_id: Optional[str] = None,
+        message_count: Optional[int] = None,
+    ) -> None:
+        """
+        Store session metadata in Redis cache using the optimized data model.
+
+        This method supports partial updates - it reads existing metadata first
+        and merges with new values to preserve existing fields.
+
+        Args:
+            session_id: Session identifier
+            vector_store_id: Optional vector store ID (updates if provided)
+            root_response_id: Optional root response ID (updates if provided)
+            last_response_id: Optional last response ID (updates if provided)
+            message_count: Optional message count (updates if provided)
+        """
+        if not self.cache_provider:
+            return
+
+        try:
+            import time
+
+            # Read existing metadata to preserve fields during partial updates
+            existing_metadata = {}
+            if hasattr(self.cache_provider, "get_session_metadata"):
+                existing = await self.cache_provider.get_session_metadata(session_id)
+                if existing:
+                    # Deserialize existing metadata
+                    existing_metadata = existing
+
+            # Build metadata dict, merging with existing values
+            metadata = {
+                "created_at": existing_metadata.get(
+                    "created_at", datetime.utcnow().isoformat()
+                ),
+                "last_active_at": time.time(),  # Always update last_active_at
+                "agent_ready": existing_metadata.get("agent_ready", True),
+            }
+
+            # Update fields only if provided (preserve existing otherwise)
+            if vector_store_id is not None:
+                metadata["vector_store_id"] = vector_store_id
+            elif "vector_store_id" in existing_metadata:
+                metadata["vector_store_id"] = existing_metadata["vector_store_id"]
+
+            if root_response_id is not None:
+                metadata["root_response_id"] = root_response_id
+            elif "root_response_id" in existing_metadata:
+                metadata["root_response_id"] = existing_metadata["root_response_id"]
+
+            if last_response_id is not None:
+                metadata["last_response_id"] = last_response_id
+            elif "last_response_id" in existing_metadata:
+                metadata["last_response_id"] = existing_metadata["last_response_id"]
+
+            if message_count is not None:
+                metadata["message_count"] = message_count
+            elif "message_count" in existing_metadata:
+                metadata["message_count"] = existing_metadata["message_count"]
+            else:
+                metadata["message_count"] = 0
+
+            # Use new optimized method if available
+            if hasattr(self.cache_provider, "create_or_update_session"):
+                await self.cache_provider.create_or_update_session(session_id, metadata)
+            else:
+                # Fallback to legacy method
+                metadata["session_id"] = session_id
+                await self.cache_provider.set_session_metadata(session_id, metadata)
+
+            self.logger.debug(
+                "Stored session metadata in cache (optimized)",
+                component="Chat",
+                subcomponent="SetSessionMetadata",
+                session_id=session_id,
+                message_count=message_count,
+            )
+        except Exception as e:
+            self.logger.warning(
+                f"Failed to set session metadata in cache: {e}",
+                component="Chat",
+                subcomponent="SetSessionMetadata",
+            )
+
+    async def _add_message_to_session(
+        self,
+        session_id: str,
+        role: str,
+        content: str,
+        timestamp: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        """
+        Add a message to session history via cache provider.
+
+        This helper method creates a properly formatted message and adds it
+        to the session's message list, automatically updating message_count.
+
+        Args:
+            session_id: Session identifier
+            role: Message role ('user' or 'assistant')
+            content: Message content
+            timestamp: Optional timestamp (uses current time if not provided)
+            metadata: Optional additional metadata for the message
+
+        Returns:
+            True if message added successfully, False otherwise
+        """
+        if not self.cache_provider:
+            self.logger.warning(
+                "Cache provider not available, message not tracked",
+                component="Chat",
+                subcomponent="AddMessageToSession",
+                session_id=session_id,
+            )
+            return False
+
+        try:
+            from datetime import datetime
+
+            # Use provided timestamp or current time
+            if not timestamp:
+                timestamp = datetime.utcnow().isoformat()
+
+            # Build message object
+            message = {
+                "role": role,
+                "content": content,
+                "timestamp": timestamp,
+                "metadata": metadata or {},
+            }
+
+            # Add message to session messages list
+            await self.cache_provider.add_message(session_id, message)
+
+            # Update last_active_at timestamp in session
+            await self.cache_provider.touch_session(session_id)
+
+            self.logger.debug(
+                "Added message to session history",
+                component="Chat",
+                subcomponent="AddMessageToSession",
+                session_id=session_id,
+                role=role,
+                content_length=len(content),
+            )
+
+            return True
+
+        except Exception as e:
+            self.logger.warning(
+                f"Failed to add message to session: {e}",
+                component="Chat",
+                subcomponent="AddMessageToSession",
+                session_id=session_id,
+                exc_info=True,
+            )
+            return False
+
+    async def _touch_session(self, session_id: str) -> None:
+        """
+        Extend session TTL by updating last_active_at.
+
+        Args:
+            session_id: Session identifier
+        """
+        if not self.cache_provider:
+            return
+
+        try:
+            await self.cache_provider.touch_session(session_id)
+
+            self.logger.debug(
+                "Extended session TTL",
+                component="Chat",
+                subcomponent="TouchSession",
+                session_id=session_id,
+            )
+        except Exception as e:
+            self.logger.warning(
+                f"Failed to touch session in cache: {e}",
+                component="Chat",
+                subcomponent="TouchSession",
+            )
+
+    async def get_or_create_session(
+        self,
+        session_id: Optional[str] = None,
+        vector_store_id: Optional[str] = None,
+        resume_latest: bool = True,
+    ) -> str:
+        """
+        Get an existing active session or create a new one.
+
+        This method implements smart session resumption:
+        1. If session_id is provided, validates it's still active and returns it
+        2. If resume_latest is True and no session_id, retrieves the most recent session
+        3. Otherwise, creates a new session
+
+        Args:
+            session_id: Optional specific session ID to resume
+            vector_store_id: Optional vector store ID for new sessions
+            resume_latest: If True, attempts to resume the latest session
+
+        Returns:
+            Session ID (either resumed or newly created)
+        """
+        if not self.cache_provider:
+            # If no cache provider, generate a new session ID
+            return self.generate_session_id()
+
+        try:
+            # Case 1: Specific session ID provided - validate it's active
+            if session_id:
+                # CRITICAL: Validate session ID format - must start with "session_" to prevent response IDs
+                if not session_id.startswith("session_"):
+                    self.logger.warning(
+                        "Provided session ID has invalid format (not starting with 'session_'), creating new session",
+                        component="Chat",
+                        subcomponent="GetOrCreateSession",
+                        invalid_session_id=session_id,
+                    )
+                    # Don't use the invalid session ID, proceed to create new one
+                    session_id = None
+                else:
+                    context = await self.cache_provider.get_active_session_context(
+                        session_id
+                    )
+                    if context:
+                        self.logger.info(
+                            "Resumed existing session by ID",
+                            component="Chat",
+                            subcomponent="GetOrCreateSession",
+                            session_id=session_id,
+                            has_vector_store=bool(context.vector_store_id),
+                        )
+                        # Touch the session to extend TTL
+                        await self._touch_session(session_id)
+                        return session_id
+                    else:
+                        self.logger.info(
+                            "Provided session ID is inactive or expired, creating new session",
+                            component="Chat",
+                            subcomponent="GetOrCreateSession",
+                            old_session_id=session_id,
+                        )
+
+            # Case 2: Try to resume latest session if enabled
+            if resume_latest and hasattr(self.cache_provider, "get_latest_session_id"):
+                latest_session_id = await self.cache_provider.get_latest_session_id()
+                if latest_session_id:
+                    # CRITICAL: Validate latest session ID format - must start with "session_" to filter out legacy resp_* IDs
+                    if not latest_session_id.startswith("session_"):
+                        self.logger.warning(
+                            "Latest session ID has invalid format (not starting with 'session_'), ignoring and creating new session",
+                            component="Chat",
+                            subcomponent="GetOrCreateSession",
+                            invalid_session_id=latest_session_id,
+                        )
+                        # Don't use this invalid ID, proceed to create new one
+                    else:
+                        # Validate the latest session is still active
+                        context = await self.cache_provider.get_active_session_context(
+                            latest_session_id
+                        )
+                        if context:
+                            self.logger.info(
+                                "Resumed latest active session",
+                                component="Chat",
+                                subcomponent="GetOrCreateSession",
+                                session_id=latest_session_id,
+                                has_vector_store=bool(context.vector_store_id),
+                            )
+                            # Touch the session to extend TTL
+                            await self._touch_session(latest_session_id)
+                            return latest_session_id
+
+            # Case 3: Create new session
+            new_session_id = self.generate_session_id()
+
+            # Initialize session metadata
+            await self._set_session_metadata(
+                session_id=new_session_id, vector_store_id=vector_store_id
+            )
+
+            self.logger.info(
+                "Created new session",
+                component="Chat",
+                subcomponent="GetOrCreateSession",
+                session_id=new_session_id,
+                has_vector_store=bool(vector_store_id),
+            )
+
+            return new_session_id
+
+        except Exception as e:
+            self.logger.error(
+                f"Error in get_or_create_session, creating new session: {e}",
+                component="Chat",
+                subcomponent="GetOrCreateSession",
+                exc_info=True,
+            )
+            # Fallback: create new session
+            return self.generate_session_id()
 
     def register_function_executor(
         self, function_name: str, executor: Callable
@@ -445,6 +882,8 @@ class ChatManager:
         model: Optional[str] = None,
         tools: Optional[List[Dict[str, Any]]] = None,
         streaming: bool = False,
+        vector_store_id: Optional[str] = None,
+        session_id: Optional[str] = None,
     ) -> str:
         """
         Start a new conversation by creating the first response.
@@ -454,9 +893,11 @@ class ChatManager:
             model: Model to use (default: from settings).
             tools: Optional tools (e.g., from ToolManager) to include.
             streaming: If True, optimizes for streaming (returns placeholder ID).
+            vector_store_id: Optional vector store ID to link to this session.
+            session_id: Optional session ID to use. If not provided, a new one will be generated.
 
         Returns:
-            Chat ID (the initial response ID, used as chain root).
+            Session ID (not response ID) for tracking this conversation.
         """
         try:
             model = model or self.settings.openai_model_name
@@ -472,17 +913,28 @@ class ChatManager:
             if streaming:
                 # For streaming, we don't need to wait for the full response
                 # Just return a placeholder ID that will be updated after streaming
-                import time
 
-                chat_id = f"streaming_{int(time.time())}"
-                self._chat_cache[chat_id] = None  # Will be updated after streaming
+                # CRITICAL FIX: Use session_id if provided, otherwise generate one centrally
+                if not session_id:
+                    session_id = self.generate_session_id()
+
+                await self._set_chat_mapping(
+                    session_id, None
+                )  # Will be updated after streaming
+
+                # Create session metadata with vector_store_id if provided
+                await self._set_session_metadata(
+                    session_id=session_id, vector_store_id=vector_store_id
+                )
+
                 self.logger.info(
                     "Created streaming chat placeholder",
                     component="Chat",
                     subcomponent="CreateChat",
-                    chat_id=chat_id,
+                    session_id=session_id,
+                    has_vector_store=bool(vector_store_id),
                 )
-                return chat_id
+                return session_id
 
             # Non-streaming: create full response
             response = await self.response_adapter.create_response(
@@ -492,17 +944,44 @@ class ChatManager:
                 tools=tools or [],
             )
 
-            chat_id = response.id  # Use response ID as chat identifier
-            self._chat_cache[chat_id] = response.id  # Cache last response ID
+            # CRITICAL FIX: Use session_id (not response.id) as the primary identifier
+            # If session_id is not provided, generate one centrally
+            if not session_id:
+                session_id = self.generate_session_id()
+
+            # Store response ID mapping under the session ID
+            await self._set_chat_mapping(session_id, response.id)
+
+            # Create session metadata with session_id (NOT response.id)
+            await self._set_session_metadata(
+                session_id=session_id,
+                vector_store_id=vector_store_id,
+                root_response_id=response.id,
+                last_response_id=response.id,  # Also set as last_response_id since it's the first response
+            )
+
+            # Track response chain using session_id
+            if self.cache_provider:
+                try:
+                    await self.cache_provider.append_response(session_id, response.id)
+                    await self.cache_provider.set_last_response_id(
+                        session_id, response.id
+                    )
+                except Exception as e:
+                    self.logger.warning(
+                        f"Failed to track response chain: {e}",
+                        component="Chat",
+                        subcomponent="CreateChat",
+                    )
 
             self.logger.info(
                 "Created chat successfully",
                 component="Chat",
                 subcomponent="CreateChat",
-                chat_id=chat_id,
+                session_id=session_id,
                 response_id=response.id,
             )
-            return chat_id
+            return session_id  # Return session ID, not response ID
 
         except Exception as e:
             self.logger.error(
@@ -525,22 +1004,41 @@ class ChatManager:
         Continue a conversation by chaining a new response, with history limit enforcement.
 
         Args:
-            chat_id: Existing chat ID (root or last response ID).
+            chat_id: Existing session ID (not response ID).
             message: New user message.
             model: Optional model override.
             tools: Optional tools to include.
 
         Returns:
-            New response ID (update chat_id for next call).
+            New response ID for immediate use (session ID remains in chat_id parameter).
         """
         try:
-            if chat_id not in self._chat_cache:
+            # Touch session to extend TTL
+            await self._touch_session(chat_id)
+
+            # Invalidate history cache since we're adding a new message
+            if self.cache_provider:
+                try:
+                    await self.cache_provider.invalidate_history(chat_id)
+                except Exception as e:
+                    self.logger.warning(
+                        f"Failed to invalidate history cache: {e}",
+                        component="Chat",
+                        subcomponent="ContinueChat",
+                    )
+
+            # Get last response ID from cache
+            last_response_id = await self._get_chat_mapping(chat_id)
+            if last_response_id is None:
                 # Fallback: If not cached, assume chat_id is the last response ID
                 last_response_id = chat_id
-            else:
-                last_response_id = self._chat_cache[chat_id]
 
             model = model or self.settings.openai_model_name
+
+            # CRITICAL: Track user message in session history
+            await self._add_message_to_session(
+                session_id=chat_id, role="user", content=message
+            )
 
             self.logger.info(
                 "Continuing chat",
@@ -575,9 +1073,38 @@ class ChatManager:
                     instructions=get_system_prompt(),
                     tools=tools or [],
                 )
-                # Update chat_id to new root and cache
-                chat_id = new_response.id
-                self._chat_cache[chat_id] = new_response.id
+                # CRITICAL FIX: Update cache with new root response ID, but keep session ID
+                # chat_id remains unchanged (it's the session ID)
+                await self._set_chat_mapping(chat_id, new_response.id)
+
+                # CRITICAL: Track assistant response in session history (after reset)
+                assistant_content = self._extract_text_content(new_response)
+                await self._add_message_to_session(
+                    session_id=chat_id, role="assistant", content=assistant_content
+                )
+
+                # Update session metadata with new root
+                await self._set_session_metadata(
+                    session_id=chat_id,
+                    root_response_id=new_response.id,
+                    last_response_id=new_response.id,  # Also update last_response_id
+                )
+
+                # Track response chain (new root, so start fresh)
+                if self.cache_provider:
+                    try:
+                        await self.cache_provider.append_response(
+                            chat_id, new_response.id
+                        )
+                        await self.cache_provider.set_last_response_id(
+                            chat_id, new_response.id
+                        )
+                    except Exception as e:
+                        self.logger.warning(
+                            f"Failed to track response chain: {e}",
+                            component="Chat",
+                            subcomponent="ContinueChat",
+                        )
 
                 self.logger.info(
                     "Reset chat to new root after summarization",
@@ -598,7 +1125,27 @@ class ChatManager:
                 )
 
                 # Update cache: chat_id -> new response ID
-                self._chat_cache[chat_id] = response.id
+                await self._set_chat_mapping(chat_id, response.id)
+
+                # CRITICAL: Track assistant response in session history
+                assistant_content = self._extract_text_content(response)
+                await self._add_message_to_session(
+                    session_id=chat_id, role="assistant", content=assistant_content
+                )
+
+                # Track response chain
+                if self.cache_provider:
+                    try:
+                        await self.cache_provider.append_response(chat_id, response.id)
+                        await self.cache_provider.set_last_response_id(
+                            chat_id, response.id
+                        )
+                    except Exception as e:
+                        self.logger.warning(
+                            f"Failed to track response chain: {e}",
+                            component="Chat",
+                            subcomponent="ContinueChat",
+                        )
 
                 self.logger.info(
                     "Continued chat with new response",
@@ -1353,8 +1900,33 @@ class ChatManager:
                 full_chain=full_chain,
             )
 
+            # Check cache first
+            if self.cache_provider and full_chain:
+                try:
+                    cached_history = await self.cache_provider.get_cached_history(
+                        chat_id
+                    )
+                    if cached_history:
+                        self.logger.info(
+                            "Retrieved history from cache",
+                            component="Chat",
+                            subcomponent="GetChatHistory",
+                            chat_id=chat_id,
+                            history_length=len(cached_history),
+                        )
+                        return cached_history
+                except Exception as e:
+                    self.logger.warning(
+                        f"Failed to get history from cache: {e}",
+                        component="Chat",
+                        subcomponent="GetChatHistory",
+                    )
+
             history = []
-            current_id = self._chat_cache.get(chat_id, chat_id)  # Start from last known
+            # Get last known response ID from cache
+            current_id = await self._get_chat_mapping(chat_id)
+            if current_id is None:
+                current_id = chat_id  # Fallback to chat_id
 
             while current_id:
                 response = await asyncio.to_thread(
@@ -1411,6 +1983,24 @@ class ChatManager:
                     break
 
             history.reverse()  # Chronological order
+
+            # Cache the history
+            if self.cache_provider and full_chain and history:
+                try:
+                    await self.cache_provider.cache_history(chat_id, history)
+                    self.logger.debug(
+                        "Cached history",
+                        component="Chat",
+                        subcomponent="GetChatHistory",
+                        chat_id=chat_id,
+                    )
+                except Exception as e:
+                    self.logger.warning(
+                        f"Failed to cache history: {e}",
+                        component="Chat",
+                        subcomponent="GetChatHistory",
+                    )
+
             self.logger.info(
                 "Retrieved chat history",
                 component="Chat",
@@ -1442,7 +2032,10 @@ class ChatManager:
             True if successful.
         """
         try:
-            last_response_id = self._chat_cache.get(chat_id, chat_id)
+            # Get last response ID from cache
+            last_response_id = await self._get_chat_mapping(chat_id)
+            if last_response_id is None:
+                last_response_id = chat_id  # Fallback to chat_id
 
             self.logger.info(
                 "Deleting chat",
@@ -1456,9 +2049,20 @@ class ChatManager:
                 self.client.responses.delete, response_id=last_response_id
             )
 
-            # Remove from cache
+            # Remove from in-memory cache
             if chat_id in self._chat_cache:
                 del self._chat_cache[chat_id]
+
+            # Delete from Redis cache
+            if self.cache_provider:
+                try:
+                    await self.cache_provider.delete_session(chat_id)
+                except Exception as e:
+                    self.logger.warning(
+                        f"Failed to delete session from cache: {e}",
+                        component="Chat",
+                        subcomponent="DeleteChat",
+                    )
 
             self.logger.info(
                 "Deleted chat successfully",
@@ -1487,6 +2091,7 @@ class ChatManager:
             List of chat IDs.
         """
         try:
+            # List from in-memory cache (Redis doesn't provide easy list_all without SCAN)
             chats = list(self._chat_cache.keys())
             self.logger.info(
                 "Listed chats",
@@ -1505,8 +2110,8 @@ class ChatManager:
             return []
 
     def clear_cache(self) -> None:
-        """Clear chat cache."""
+        """Clear in-memory chat cache (does not clear Redis)."""
         self._chat_cache.clear()
         self.logger.info(
-            "Chat cache cleared", component="Chat", subcomponent="ClearCache"
+            "In-memory chat cache cleared", component="Chat", subcomponent="ClearCache"
         )

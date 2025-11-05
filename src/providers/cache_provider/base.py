@@ -110,7 +110,7 @@ class CacheConfig:
     default_request_correlation_ttl: int = 3600  # 1 hour
 
     # Key management
-    key_prefix: str = "drug_reco"
+    key_prefix: str = "Asclepius_Conversations"
     max_chain_length: int = 20  # Maximum response chain length
 
     # Additional provider-specific settings
@@ -134,6 +134,35 @@ class CacheConfig:
             "default_history_ttl": self.default_history_ttl,
             "ssl": self.ssl,
         }
+
+
+@dataclass
+class ActiveSessionContext:
+    """
+    Contains comprehensive context data for an active session.
+
+    This dataclass encapsulates all relevant information about a session that
+    is still active (not expired). It provides a unified view of session state,
+    making it easy to validate session activity and retrieve all necessary
+    context in a single operation.
+
+    Attributes:
+        session_id: The unique identifier for the session
+        metadata: Complete session metadata (user info, timestamps, etc.)
+        last_response_id: The most recent response ID in the conversation chain
+        vector_store_id: The vector store ID associated with this session (if any)
+        root_response_id: The first response ID that started this conversation
+
+    Usage:
+        This is returned by get_active_session_context() to ensure that all
+        operations on a session are based on validated, non-expired data.
+    """
+
+    session_id: str
+    metadata: Dict[str, Any]
+    last_response_id: Optional[str] = None
+    vector_store_id: Optional[str] = None
+    root_response_id: Optional[str] = None
 
 
 class CacheProvider(ABC):
@@ -291,6 +320,53 @@ class CacheProvider(ABC):
         """
         pass
 
+    @abstractmethod
+    async def get_active_session_context(
+        self, session_id: str
+    ) -> Optional[ActiveSessionContext]:
+        """
+        Retrieve comprehensive context for an active session.
+
+        This method performs a critical validation: it ONLY returns session data
+        if the session is still active (not expired). This ensures that all
+        operations using the returned context are based on valid, current data.
+
+        Implementation Requirements:
+        1. MUST check if the core session key exists (validates session is active)
+        2. If session exists, atomically fetch:
+           - Session metadata
+           - Last response ID
+           - Vector store ID (from metadata)
+           - Root response ID (from metadata)
+        3. If session doesn't exist or is expired, return None
+
+        Key Validation Logic:
+        - The session key existence check is the gatekeeper
+        - TTL expiration automatically invalidates sessions
+        - This prevents using data from inactive/expired sessions
+
+        Args:
+            session_id: Unique session identifier to validate and retrieve
+
+        Returns:
+            ActiveSessionContext with all session data if session is active,
+            None if session is inactive/expired or doesn't exist
+
+        Raises:
+            CacheOperationError: If the operation fails due to cache errors
+
+        Usage Example:
+            context = await cache.get_active_session_context(conversation_id)
+            if context:
+                # Session is active - safe to use context data
+                last_response_id = context.last_response_id
+                vector_store_id = context.vector_store_id
+            else:
+                # Session is inactive/expired - treat as new conversation
+                start_new_conversation()
+        """
+        pass
+
     # ==================== Response Chain Management ====================
 
     @abstractmethod
@@ -430,6 +506,55 @@ class CacheProvider(ABC):
 
         Raises:
             CacheOperationError: If operation fails
+        """
+        pass
+
+    @abstractmethod
+    async def add_message(
+        self,
+        session_id: str,
+        message: Dict[str, Any],
+        max_messages: Optional[int] = None,
+    ) -> bool:
+        """
+        Add a message to the session's message history list.
+
+        Messages are stored in a Redis LIST at key: session:<session_id>:messages
+        The list is automatically trimmed to max_messages to prevent unbounded growth.
+        CRITICAL: This method also updates message_count in session metadata.
+
+        Args:
+            session_id: Unique session identifier
+            message: Dictionary containing message data (role, content, timestamp, metadata, etc.)
+            max_messages: Maximum messages to keep (defaults to config.max_chain_length)
+
+        Returns:
+            True if message added successfully, False otherwise
+
+        Raises:
+            CacheOperationError: If operation fails
+            CacheSerializationError: If message serialization fails
+        """
+        pass
+
+    @abstractmethod
+    async def get_messages(
+        self, session_id: str, limit: Optional[int] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Retrieve messages from session history.
+
+        Args:
+            session_id: Unique session identifier
+            limit: Maximum number of messages to retrieve (retrieves all if None)
+
+        Returns:
+            List of message dictionaries in reverse chronological order (newest first)
+            Returns empty list if no messages exist
+
+        Raises:
+            CacheOperationError: If retrieval fails
+            CacheSerializationError: If deserialization fails
         """
         pass
 
