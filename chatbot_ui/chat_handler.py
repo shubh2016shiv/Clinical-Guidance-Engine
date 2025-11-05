@@ -83,8 +83,10 @@ class ChainlitChatHandler:
 
         try:
             # Call agent with streaming enabled
+            # CRITICAL FIX: Pass session_id as conversation_id to continue existing session
             result = await agent.consult(
                 query=message,
+                conversation_id=session_id,  # Pass session_id to continue existing conversation
                 use_clinical_guidelines=use_clinical_guidelines,
                 use_drug_database=use_drug_database,
                 streaming=True,
@@ -219,8 +221,10 @@ class ChainlitChatHandler:
 
         try:
             # Call agent without streaming
+            # CRITICAL FIX: Pass session_id as conversation_id to continue existing session
             result = await agent.consult(
                 query=message,
+                conversation_id=session_id,  # Pass session_id to continue existing conversation
                 use_clinical_guidelines=use_clinical_guidelines,
                 use_drug_database=use_drug_database,
                 streaming=False,

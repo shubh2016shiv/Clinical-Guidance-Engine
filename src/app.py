@@ -231,28 +231,89 @@ async def main():
             return 1
 
         print("\n" + "=" * 80)
-        print("Healthcare AI Agent - Consultation Test")
+        print("Healthcare AI Agent - Consultation Test (with Cache Validation)")
         print("=" * 80 + "\n")
 
         # Test question for consultation
-        test_question = (
-            "as per guidelines what are Pharmacological Therapy for Hypertension"
-        )
+        test_question = "What is the formulation and available dosages for metformin?"
 
-        print(f"Question:\n{test_question}\n")
+        print(f"Question 1 (New Conversation):\n{test_question}\n")
         print("-" * 80 + "\n")
 
-        # Process consultation
-        response = await app.process_consultation(
-            question=test_question, use_guidelines=True
+        # Process first consultation (NEW conversation)
+        result1 = await app.agent.consult(
+            query=test_question,
+            use_clinical_guidelines=True,
+            streaming=app.settings.enable_streaming,
         )
 
-        if response:
-            print(f"Response:\n{response}\n")
-            print("-" * 80 + "\n")
-            print("Consultation completed successfully.")
+        # Handle streaming response
+        if app.settings.enable_streaming and "stream_generator" in result1:
+            stream_generator = result1["stream_generator"]
+            response_parts = []
+            conversation_id = None
+            async for chunk_data in stream_generator:
+                chunk = chunk_data.get("chunk", "")
+                response_parts.append(chunk)
+                # Extract conversation_id from first chunk
+                if conversation_id is None:
+                    conversation_id = chunk_data.get("conversation_id")
+            response1 = "".join(response_parts)
         else:
-            print("ERROR: Failed to get consultation response. Check logs for details.")
+            response1 = result1.get("content", "")
+            conversation_id = result1.get("conversation_id", "")
+
+        print(f"Response 1:\n{response1}\n")
+        print("-" * 80)
+
+        # CRITICAL: Test cache retrieval with continuation
+        if conversation_id:
+            print("\n" + "=" * 80)
+            print("Testing Cache Retrieval - Continuation Query")
+            print("=" * 80)
+            print(
+                f"\nReusing conversation_id from previous response: {conversation_id}\n"
+            )
+            print("(This SHOULD retrieve session data from Redis cache)\n")
+            print("-" * 80 + "\n")
+
+            continuation_question = "What are its common side effects?"
+            print(
+                f"Question 2 (Continuation of same conversation):\n{continuation_question}\n"
+            )
+            print("-" * 80 + "\n")
+
+            # Process continuation - this will trigger session validation and cache retrieval
+            result2 = await app.agent.consult(
+                query=continuation_question,
+                conversation_id=conversation_id,  # CRITICAL: Pass the conversation_id
+                use_clinical_guidelines=True,
+                streaming=app.settings.enable_streaming,
+            )
+
+            # Handle streaming response
+            if app.settings.enable_streaming and "stream_generator" in result2:
+                stream_generator = result2["stream_generator"]
+                response_parts = []
+                async for chunk_data in stream_generator:
+                    chunk = chunk_data.get("chunk", "")
+                    response_parts.append(chunk)
+                response2 = "".join(response_parts)
+            else:
+                response2 = result2.get("content", "")
+
+            print(f"Response 2:\n{response2}\n")
+            print("-" * 80)
+            print("\n✓ Cache retrieval test completed!")
+            print("\nCheck the logs above for evidence of Redis cache retrieval:")
+            print("  ✓ 'Retrieved active session context from Redis'")
+            print("  ✓ 'Active session context retrieved from Redis cache'")
+            print("  ✓ 'Using vector store from active session cache'")
+            print(
+                "  ✓ 'Streaming conversation continuation' with 'using_last_response_id_from_cache=True'"
+            )
+        else:
+            print("ERROR: No conversation_id in response")
             return 1
 
         print("\n" + "=" * 80)

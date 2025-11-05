@@ -60,24 +60,20 @@ async def on_chat_start():
     Initialize the chat session when a user connects.
 
     Sets up:
-    - Unique session ID for conversation tracking
+    - Session ID with smart resumption of existing sessions
     - AsclepiusHealthcareAgent with knowledge base
     - Welcome message with starter prompts
+
+    New in optimized version:
+    - Attempts to resume the latest active session if available
+    - Creates new session only if no active session exists
+    - Reduces unnecessary vector store initialization
     """
-    session_id = str(uuid.uuid4())
-    cl.user_session.set("session_id", session_id)
-
-    logger.info(
-        "Chat session started",
-        component="ChainlitUI",
-        subcomponent="OnChatStart",
-        session_id=session_id,
-    )
-
     # Display initialization message
     init_msg = cl.Message(content="Initializing Asclepius Healthcare AI Assistant...")
     await init_msg.send()
 
+    session_id = None
     try:
         # Initialize the healthcare agent
         agent = AsclepiusHealthcareAgent(chat_history_limit=AGENT_CHAT_HISTORY_LIMIT)
@@ -87,14 +83,65 @@ async def on_chat_start():
             "Setting up clinical knowledge base",
             component="ChainlitUI",
             subcomponent="OnChatStart",
-            session_id=session_id,
         )
 
         vector_store_id = await agent.initialize_knowledge_base()
 
+        # Get or create session using smart resumption
+        # This will try to resume the latest active session or create a new one
+        # Access chat_manager through response_manager -> OpenAIResponseManager.chat_manager
+        try:
+            if (
+                agent.response_manager
+                and hasattr(agent.response_manager, "chat_manager")
+                and agent.response_manager.chat_manager
+            ):
+                session_id = (
+                    await agent.response_manager.chat_manager.get_or_create_session(
+                        session_id=None,  # Let it auto-detect
+                        vector_store_id=vector_store_id,
+                        resume_latest=True,  # Enable smart session resumption
+                    )
+                )
+                logger.info(
+                    "Session acquired through smart resumption",
+                    component="ChainlitUI",
+                    subcomponent="OnChatStart",
+                    session_id=session_id,
+                )
+            else:
+                # Fallback if response_manager or chat_manager not available
+                session_id = str(uuid.uuid4())
+                logger.warning(
+                    "Response manager or chat_manager not available, using UUID session",
+                    component="ChainlitUI",
+                    subcomponent="OnChatStart",
+                    session_id=session_id,
+                )
+        except Exception as e:
+            # If session resumption fails, fall back to UUID
+            session_id = str(uuid.uuid4())
+            logger.warning(
+                f"Session resumption failed, falling back to UUID: {e}",
+                component="ChainlitUI",
+                subcomponent="OnChatStart",
+                session_id=session_id,
+                error=str(e),
+            )
+
+        cl.user_session.set("session_id", session_id)
+
+        logger.info(
+            "Chat session initialized",
+            component="ChainlitUI",
+            subcomponent="OnChatStart",
+            session_id=session_id,
+        )
+
         # Store agent in session
         cl.user_session.set("agent", agent)
         cl.user_session.set("agent_ready", True)
+        cl.user_session.set("vector_store_id", vector_store_id)
 
         if vector_store_id:
             logger.info(
@@ -132,8 +179,13 @@ async def on_chat_start():
         )
 
     except Exception as e:
+        # Fallback: create UUID session if smart resumption fails
+        if not session_id:
+            session_id = str(uuid.uuid4())
+        cl.user_session.set("session_id", session_id)
+
         logger.error(
-            "Failed to initialize chat session",
+            "Failed to initialize chat session, using fallback UUID session",
             component="ChainlitUI",
             subcomponent="OnChatStart",
             session_id=session_id,

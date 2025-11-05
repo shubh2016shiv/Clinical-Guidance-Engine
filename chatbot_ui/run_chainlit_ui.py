@@ -284,15 +284,27 @@ class ChainlitRunner:
             Tuple of (is_installed, version_or_error)
         """
         try:
+            # First try importing chainlit directly (faster, no subprocess)
+            try:
+                import chainlit
+
+                version = getattr(
+                    chainlit, "__version__", "installed (version unknown)"
+                )
+                return True, f"chainlit {version}"
+            except ImportError:
+                pass  # Fall through to subprocess check
+
             # Use the same Python interpreter to ensure we're using venv Python
             python_exe = sys.executable
 
             # Try using python -m chainlit first (works better with venv)
+            # Increased timeout to 30 seconds for slow systems
             result = subprocess.run(
                 [python_exe, "-m", "chainlit", "--version"],
                 capture_output=True,
                 text=True,
-                timeout=10,
+                timeout=30,
             )
 
             if result.returncode == 0:
@@ -304,17 +316,26 @@ class ChainlitRunner:
                     ["chainlit", "--version"],
                     capture_output=True,
                     text=True,
-                    timeout=10,
+                    timeout=30,
                 )
                 if result.returncode == 0:
                     version = result.stdout.strip()
                     return True, version
                 else:
-                    return False, "Chainlit command failed"
+                    error_msg = (
+                        result.stderr.strip() if result.stderr else "Unknown error"
+                    )
+                    return False, f"Chainlit command failed: {error_msg}"
         except FileNotFoundError:
             return False, "Chainlit not found. Install with: pip install chainlit"
         except subprocess.TimeoutExpired:
-            return False, "Chainlit command timed out. Please check your installation."
+            return False, (
+                "Chainlit command timed out after 30 seconds. "
+                "This may indicate:\n"
+                "  1. Chainlit installation issue - try: pip install --upgrade chainlit\n"
+                "  2. Slow system or network issues\n"
+                "  3. Python environment corruption - try recreating .venv"
+            )
         except Exception as e:
             return False, f"Error checking Chainlit: {str(e)}"
 

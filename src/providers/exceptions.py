@@ -23,3 +23,9 @@ class EmbeddingProviderError(ProviderError):
     """Exception raised by embedding providers"""
 
     pass
+
+
+class CacheProviderError(ProviderError):
+    """Exception raised by cache providers"""
+
+    pass

@@ -140,7 +140,7 @@ class Settings(BaseSettings):
     # Response Mode Configuration
     # Used by: response_api_agent/managers/stream_manager.py, chat_manager.py
     enable_streaming: bool = Field(
-        default=False,
+        default=True,
         description="Global streaming mode control. Used by stream_manager.py and chat_manager.py.",
     )
     enable_cleanup: bool = Field(
@@ -160,6 +160,45 @@ class Settings(BaseSettings):
     clinical_guidelines_directory: str = Field(
         default="clinical_guidelines",
         description="Path to clinical guidelines directory relative to project root. Used by upload_manager.py and vector_store_manager.py.",
+    )
+
+    # Redis Cache Configuration
+    # Used by: cache_provider/redis_provider.py, cache_provider/factory.py
+    redis_host: str = Field(
+        default="localhost",
+        description="Redis server host address. Used by cache provider for connection.",
+    )
+    redis_port: int = Field(
+        default=6379,
+        description="Redis server port. Default: 6379. Used by cache provider for connection.",
+    )
+    redis_db: int = Field(
+        default=0,
+        description="Redis database index (0-15). Used by cache provider for connection.",
+    )
+    redis_password: Optional[str] = Field(
+        default="redis123",
+        description="Redis authentication password (optional). Can be set in .env file. Used by cache provider if authentication enabled.",
+    )
+    redis_max_connections: int = Field(
+        default=50,
+        description="Maximum connections in Redis connection pool. Used by cache provider for connection management.",
+    )
+    redis_socket_timeout: int = Field(
+        default=5,
+        description="Redis socket timeout in seconds. Used by cache provider for connection operations.",
+    )
+    redis_key_prefix: str = Field(
+        default="Asclepius_Conversations",
+        description="Prefix for all Redis cache keys (for namespacing). Used by cache provider for key management.",
+    )
+    redis_default_session_ttl: int = Field(
+        default=7200,
+        description="Default TTL for session data in seconds (2 hours). Used by cache provider for session management.",
+    )
+    redis_default_history_ttl: int = Field(
+        default=1800,
+        description="Default TTL for history cache in seconds (30 minutes). Used by cache provider for history caching.",
     )
 
     class Config:
