@@ -853,9 +853,12 @@ class StreamManager:
         model: Optional[str] = None,
         tools: Optional[List[Dict[str, Any]]] = None,
         callback: Optional[Callable[[str], None]] = None,
+        functions: Optional[List[Dict[str, Any]]] = None,
+        enable_tool_execution: bool = False,
+        max_iterations: int = 5,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """
-        Stream a continuation of an existing chat.
+        Stream a continuation of an existing chat with optional tool execution.
 
         Args:
             chat_id: Existing chat ID (previous response ID).
@@ -863,6 +866,9 @@ class StreamManager:
             model: Model to use (default: from settings).
             tools: Optional tools to include.
             callback: Optional callback function to process each chunk.
+            functions: Optional function definitions for tool execution.
+            enable_tool_execution: Whether to execute tool calls (default: False).
+            max_iterations: Maximum tool execution iterations (default: 5).
 
         Yields:
             Dictionary containing 'text' and 'response_id' from the streaming response.
@@ -1003,6 +1009,270 @@ class StreamManager:
                         component="Stream",
                         subcomponent="StreamChatContinuation",
                         error=str(e),
+                    )
+
+            # CRITICAL FIX: Tool execution for continuation responses
+            # Check for tool calls and execute them if enabled
+            if (
+                enable_tool_execution
+                and functions
+                and response_id
+                and self.chat_manager
+            ):
+                self.logger.info(
+                    "Checking for tool calls in continuation response",
+                    component="Stream",
+                    subcomponent="StreamChatContinuation",
+                    response_id=response_id,
+                    enable_tool_execution=enable_tool_execution,
+                )
+
+                try:
+                    # Retrieve final response to check for tool calls
+                    final_response = await self.async_client.responses.retrieve(
+                        response_id=response_id
+                    )
+
+                    # Extract tool calls from response
+                    tool_calls = self.chat_manager._extract_tool_calls_from_response(
+                        final_response
+                    )
+
+                    self.logger.info(
+                        "Checking for tool calls after initial continuation stream",
+                        component="Stream",
+                        subcomponent="StreamChatContinuation",
+                        response_id=response_id,
+                        tool_call_count=len(tool_calls),
+                    )
+
+                    current_response_id = response_id
+                    iteration = 0
+
+                    # Tool execution loop
+                    while tool_calls and iteration < max_iterations:
+                        iteration += 1
+                        self.logger.info(
+                            f"Tool execution iteration {iteration}/{max_iterations}",
+                            component="Stream",
+                            subcomponent="StreamChatContinuation",
+                            tool_call_count=len(tool_calls),
+                        )
+
+                        # Execute all tool calls
+                        tool_outputs = []
+                        for tool_call in tool_calls:
+                            try:
+                                call_id = tool_call["call_id"]
+                                function_name = tool_call["function_name"]
+                                arguments = tool_call["arguments"]
+
+                                self.logger.info(
+                                    f"→ Executing Function: {function_name}",
+                                    component="Stream",
+                                    subcomponent="StreamChatContinuation",
+                                    function_name=function_name,
+                                    call_id=call_id,
+                                    arguments_count=len(arguments),
+                                )
+
+                                # Execute function
+                                result_str = (
+                                    await self.chat_manager._execute_function_call(
+                                        function_name, arguments
+                                    )
+                                )
+
+                                # Collect tool output
+                                tool_outputs.append(
+                                    {"call_id": call_id, "output": result_str}
+                                )
+
+                            except Exception as e:
+                                error_msg = f"Error executing tool: {str(e)}"
+                                self.logger.error(
+                                    error_msg,
+                                    component="Stream",
+                                    subcomponent="StreamChatContinuation",
+                                    exc_info=True,
+                                )
+                                tool_outputs.append(
+                                    {
+                                        "call_id": tool_call.get(
+                                            "call_id", f"error_{iteration}"
+                                        ),
+                                        "output": json.dumps({"error": error_msg}),
+                                    }
+                                )
+
+                        if not tool_outputs:
+                            break
+
+                        # Continue chat with tool outputs using STREAMING
+                        self.logger.info(
+                            "Submitting tool outputs and continuing stream",
+                            component="Stream",
+                            subcomponent="StreamChatContinuation",
+                            tool_output_count=len(tool_outputs),
+                        )
+
+                        # Format tool outputs as function_call_output items
+                        input_items = []
+                        for tool_output in tool_outputs:
+                            input_items.append(
+                                {
+                                    "type": "function_call_output",
+                                    "call_id": tool_output["call_id"],
+                                    "output": tool_output["output"],
+                                }
+                            )
+
+                        # Create STREAMING response with tool outputs
+                        stream = await self.response_adapter.create_streaming_response(
+                            model=model,
+                            previous_response_id=current_response_id,
+                            input=input_items,  # Tool outputs as structured items
+                            instructions=get_system_prompt(),
+                            tools=tools or [],
+                            stream=True,  # Enable streaming
+                        )
+
+                        # Stream the continuation response in real-time
+                        self.logger.info(
+                            f"Streaming continuation response (iteration {iteration})",
+                            component="Stream",
+                            subcomponent="StreamChatContinuation",
+                            response_id=current_response_id,
+                        )
+
+                        # Process streaming response chunks
+                        continuation_response_id = None
+                        collected_annotations = []  # Track citations during stream
+                        async for chunk in stream:
+                            try:
+                                chunk_type = type(chunk).__name__
+
+                                # Extract response ID from ResponseCreatedEvent
+                                if chunk_type == "ResponseCreatedEvent" and hasattr(
+                                    chunk, "response"
+                                ):
+                                    continuation_response_id = chunk.response.id
+                                    if continuation_response_id:
+                                        current_response_id = continuation_response_id
+
+                                # Handle ResponseTextDeltaEvent for text content
+                                elif chunk_type == "ResponseTextDeltaEvent" and hasattr(
+                                    chunk, "delta"
+                                ):
+                                    text = chunk.delta
+                                    if text and text.strip():
+                                        chunk_count += 1
+                                        if callback:
+                                            callback(text)
+                                        yield {
+                                            "text": text,
+                                            "response_id": current_response_id,
+                                            "is_citation": False,
+                                        }
+
+                                # CRITICAL: Capture annotation events during streaming
+                                elif (
+                                    chunk_type
+                                    == "ResponseOutputTextAnnotationAddedEvent"
+                                ):
+                                    if hasattr(chunk, "annotation"):
+                                        collected_annotations.append(chunk.annotation)
+                                        self.logger.debug(
+                                            "Annotation captured during continuation stream",
+                                            component="Stream",
+                                            subcomponent="StreamChatContinuation",
+                                            annotation_count=len(collected_annotations),
+                                        )
+
+                            except Exception as e:
+                                self.logger.warning(
+                                    "Error processing continuation stream chunk",
+                                    component="Stream",
+                                    subcomponent="StreamChatContinuation",
+                                    error=str(e),
+                                )
+                                continue
+
+                        # After streaming completes, retrieve final response for tool call checking
+                        if current_response_id:
+                            continuation_response = (
+                                await self.async_client.responses.retrieve(
+                                    current_response_id
+                                )
+                            )
+
+                            # Extract citations from continuation response
+                            continuation_citations = await self.citation_manager.extract_citations_from_response(
+                                continuation_response
+                            )
+
+                            # Yield citations if any
+                            if continuation_citations:
+                                citation_text = (
+                                    "\n\n"
+                                    + self.citation_manager.format_citations_section(
+                                        continuation_citations
+                                    )
+                                )
+                                yield {
+                                    "text": citation_text,
+                                    "response_id": current_response_id,
+                                    "is_citation": True,
+                                    "citations": continuation_citations,
+                                }
+
+                            # Use this response to check for more tool calls
+                            final_response = continuation_response
+                        else:
+                            self.logger.warning(
+                                "No response_id from continuation stream",
+                                component="Stream",
+                                subcomponent="StreamChatContinuation",
+                            )
+                            final_response = None
+
+                        # Extract tool calls for next iteration
+                        if final_response:
+                            tool_calls = (
+                                self.chat_manager._extract_tool_calls_from_response(
+                                    final_response
+                                )
+                            )
+                        else:
+                            tool_calls = []  # No more tool calls if response is None
+                            self.logger.warning(
+                                "Cannot extract tool calls - final_response is None",
+                                component="Stream",
+                                subcomponent="StreamChatContinuation",
+                            )
+
+                    # Check if we hit max iterations with pending tool calls
+                    if iteration >= max_iterations and tool_calls:
+                        self.logger.warning(
+                            f"Reached max iterations ({max_iterations}) with pending tool calls",
+                            component="Stream",
+                            subcomponent="StreamChatContinuation",
+                        )
+
+                    self.logger.info(
+                        f"Tool execution phase completed in {iteration} iterations",
+                        component="Stream",
+                        subcomponent="StreamChatContinuation",
+                        iterations_completed=iteration,
+                    )
+
+                except Exception as e:
+                    self.logger.error(
+                        "Error during tool execution phase in continuation",
+                        component="Stream",
+                        subcomponent="StreamChatContinuation",
+                        error=str(e),
+                        error_type=type(e).__name__,
                     )
 
             # Always yield response_id at the end if we have it

@@ -1075,6 +1075,8 @@ class OpenAIResponseManager:
                     message=user_message,
                     model=resolved_model,
                     tools=tools,
+                    functions=function_definitions,
+                    enable_tool_execution=enable_tool_execution,
                 ):
                     chunk_count += 1
 
