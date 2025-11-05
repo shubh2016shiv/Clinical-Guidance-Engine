@@ -165,5 +165,182 @@ On Linux, ensure the Docker user has write permissions to the `./volumes/` direc
 
 - `docker-compose.yml`: Service definitions and configuration
 - `manage_infrastructure.py`: Python script for service management
+- `flush_redis.py`: Redis cache flush utility
 - `volumes/`: Persistent data storage (git-ignored)
+
+## Redis Cache Management
+
+### Flush Utility
+
+The `flush_redis.py` utility provides a production-grade tool for safely managing Redis cache data. It offers multiple flush strategies, comprehensive safety features, and detailed operation reporting.
+
+#### Features
+
+**Multiple Flush Strategies:**
+- **Full Database Flush**: Delete all keys in the selected Redis database (use with caution)
+- **Prefix Pattern Deletion**: Delete only keys matching a specific prefix pattern (default: `drug_reco*`)
+
+**Safety Features:**
+- **Dry Run Mode**: Preview operations without making changes (`--dry-run`)
+- **Confirmation Prompts**: Interactive confirmation before deletion (can be skipped with `--no-confirm`)
+- **Operation Preview**: Shows key count and sample keys before execution
+- **Batch Processing**: Handles large key sets efficiently without memory issues
+- **Connection Retry**: Automatic retry logic for transient connection failures
+
+**Professional Output:**
+- Color-coded terminal output (success/error/warning/info)
+- Progress tracking for long-running operations
+- Detailed statistics: keys deleted, duration, throughput, batches processed
+- Structured headers and formatted information display
+
+**Configuration Management:**
+- Loads configuration from multiple sources with priority order
+- Supports command-line arguments, environment variables, `.env` file, and defaults
+- Automatic `.env` file detection in project root
+
+#### Usage
+
+**Basic Operations:**
+
+```bash
+# Preview what will be deleted (safe, no changes made)
+python infrastructure/flush_redis.py --dry-run
+
+# Delete keys with default prefix "drug_reco*"
+python infrastructure/flush_redis.py
+
+# Delete keys with custom prefix
+python infrastructure/flush_redis.py --prefix "my_custom_prefix"
+
+# Flush entire Redis database (WARNING: Deletes ALL keys!)
+python infrastructure/flush_redis.py --full
+```
+
+**Advanced Options:**
+
+```bash
+# Skip confirmation prompt (use with caution)
+python infrastructure/flush_redis.py --no-confirm
+
+# Custom Redis connection
+python infrastructure/flush_redis.py --host redis.example.com --port 6380 --db 1
+
+# Specify custom password
+python infrastructure/flush_redis.py --password mypassword
+
+# Combine options: dry run with custom prefix
+python infrastructure/flush_redis.py --dry-run --prefix "session_data"
+```
+
+**Command-Line Arguments:**
+
+| Argument | Description | Default |
+|----------|-------------|---------|
+| `--full` | Flush entire database (deletes ALL keys) | False |
+| `--prefix PREFIX` | Key prefix for pattern matching | `drug_reco` |
+| `--dry-run` | Preview operation without deleting | False |
+| `--no-confirm` | Skip confirmation prompt | False |
+| `--host HOST` | Redis server host | `localhost` |
+| `--port PORT` | Redis server port | `6379` |
+| `--db DB` | Redis database index | `0` |
+| `--password PASSWORD` | Redis authentication password | From env/default |
+| `--no-color` | Disable colored output | False |
+| `--verbose` | Enable verbose output | False |
+
+#### Configuration Priority
+
+Configuration is loaded in the following priority order (highest to lowest):
+
+1. **Command-line arguments** (highest priority)
+2. **Environment variables** (`REDIS_HOST`, `REDIS_PORT`, `REDIS_DB`, `REDIS_PASSWORD`, `REDIS_KEY_PREFIX`)
+3. **`.env` file** in project root
+4. **Default values** (lowest priority)
+
+**Environment Variables:**
+
+```bash
+REDIS_HOST=localhost          # Redis server host
+REDIS_PORT=6379              # Redis server port
+REDIS_DB=0                   # Database index
+REDIS_PASSWORD=redis123      # Authentication password
+REDIS_KEY_PREFIX=drug_reco   # Default key prefix
+```
+
+#### Operation Flow
+
+1. **Load Configuration**: Reads settings from CLI args → Environment → `.env` → Defaults
+2. **Connect to Redis**: Establishes connection with retry logic (3 attempts)
+3. **Display Connection Info**: Shows Redis version, memory usage, total keys
+4. **Preview Operation**: Scans and counts keys that will be affected, shows samples
+5. **Confirmation**: Prompts user for confirmation (unless `--no-confirm` or `--dry-run`)
+6. **Execute Flush**: Performs deletion with progress updates
+7. **Display Results**: Shows comprehensive statistics and operation summary
+
+#### Operation Statistics
+
+After execution, the utility displays detailed statistics:
+
+- **Strategy**: Operation type (full_database or prefix_pattern)
+- **Pattern**: Key pattern used (if applicable)
+- **Keys Before**: Total keys before operation
+- **Keys Deleted**: Number of keys removed
+- **Keys After**: Remaining keys after operation
+- **Duration**: Operation time in seconds
+- **Throughput**: Keys deleted per second
+- **Batches Processed**: Number of batch operations
+
+#### Examples
+
+**Preview deletion before committing:**
+```bash
+python infrastructure/flush_redis.py --dry-run
+```
+Shows what would be deleted without making changes.
+
+**Delete all application cache keys:**
+```bash
+python infrastructure/flush_redis.py
+```
+Deletes all keys matching `drug_reco*` pattern with confirmation prompt.
+
+**Quick cleanup without confirmation:**
+```bash
+python infrastructure/flush_redis.py --no-confirm
+```
+Deletes default prefix keys immediately (use with caution).
+
+**Custom prefix cleanup:**
+```bash
+python infrastructure/flush_redis.py --prefix "temp_data"
+```
+Deletes all keys starting with `temp_data*`.
+
+**Full database reset:**
+```bash
+python infrastructure/flush_redis.py --full
+```
+**Warning**: This deletes ALL keys in the selected database. Use only when you need to completely reset the cache.
+
+**Remote Redis instance:**
+```bash
+python infrastructure/flush_redis.py --host 192.168.1.100 --port 6380 --db 1 --password mypass
+```
+Connects to a remote Redis instance with custom credentials.
+
+#### Error Handling
+
+The utility provides clear error messages for common issues:
+
+- **Connection failures**: Automatic retry with helpful suggestions
+- **Authentication errors**: Clear password validation messages
+- **Invalid arguments**: Validation with helpful error messages
+- **Missing dependencies**: Instructions for installing required packages
+
+#### Requirements
+
+- Python 3.9+
+- `redis` package: `pip install redis`
+- `python-dotenv` package (optional, for `.env` file support): `pip install python-dotenv`
+
+
 
