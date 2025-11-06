@@ -449,6 +449,101 @@ This implementation uses several Redis operations in sequence. `LPUSH` adds the 
 
 This automatic truncation bounds memory usage. Each message occupies roughly 300 bytes (JSON-serialized), so 20 messages per session = 6KB. With 100,000 active sessions, message storage totals only 600MB—easily manageable.
 
+### Chat Management During Active Session
+
+#### Sequence Diagram: Active Session Message Processing
+
+```mermaid
+sequenceDiagram
+    participant User as User Client
+    participant ChatMgr as ChatManager
+    participant Redis as Redis Cache
+    participant OpenAI as OpenAI API
+
+    User->>ChatMgr: Send User Message (Query)
+    
+    ChatMgr->>Redis: get_active_session_context(session_id)
+    Note over Redis: Execute atomic pipeline:<br/>1. Check EXISTS session:id<br/>2. HGETALL session:id<br/>3. GET last_response_id key
+    Redis-->>ChatMgr: ActiveSessionContext(metadata, last_response_id)
+    
+    Note over ChatMgr: Validate session exists and TTL is valid
+    
+    ChatMgr->>OpenAI: Send message with previous_response_id
+    OpenAI-->>ChatMgr: response_id (from ResponseCreatedEvent)
+    
+    Note over ChatMgr: Message storage sequence
+    ChatMgr->>Redis: LPUSH session:id:messages (User message JSON)
+    ChatMgr->>Redis: LTRIM 0 to 19 (Keep max 20 messages)
+    ChatMgr->>Redis: LLEN session:id:messages (Get updated count)
+    
+    ChatMgr->>Redis: LPUSH session:id:messages (Assistant response JSON)
+    ChatMgr->>Redis: HSET message_count (Update in session hash)
+    
+    Note over ChatMgr: Update session state
+    ChatMgr->>Redis: HSET session:id last_response_id (Store for chaining)
+    ChatMgr->>Redis: HSET session:id last_active_at (Update timestamp)
+    ChatMgr->>Redis: EXPIRE session:id TTL=7200s
+    ChatMgr->>Redis: EXPIRE session:id:messages TTL=7200s
+    
+    ChatMgr-->>User: Response Streamed to Client
+```
+
+#### Active Session Explanation
+
+When a user with an active session sends a message, the ChatManager initiates a coordinated sequence of operations to maintain conversation state in Redis. The first critical step is retrieving the session context using the `get_active_session_context(session_id)` method, which performs an atomic pipeline operation consisting of three commands: checking if the session key exists (acting as a gatekeeper to validate session is not expired), retrieving the complete session metadata hash containing fields like `vector_store_id`, `root_response_id`, `message_count`, `created_at`, and `last_active_at`, and fetching the last response ID for API chaining. Redis executes these commands atomically within a single pipeline, preventing race conditions and ensuring data consistency even under concurrent access.
+
+Once the session context is validated, the system sends the user's message to the OpenAI API with the `previous_response_id` parameter, establishing the conversation chain. OpenAI processes the request and returns a new `response_id` that becomes the reference point for subsequent messages in this conversation thread. Simultaneously, the ChatManager executes a sequence of Redis List operations to store both the user message and the assistant's response. The system uses `LPUSH` to add each message (serialized as JSON) to the message list at the head (left side), ensuring newest messages appear first. Immediately after insertion, `LTRIM` truncates the list to retain only the most recent 20 messages, automatically removing older entries without explicit delete commands. This bounded storage strategy prevents unbounded memory growth while maintaining sufficient conversation history. The `LLEN` command retrieves the updated message count, which is then stored in the session metadata hash using `HSET` for atomic tracking.
+
+The session state is then updated atomically through multiple `HSET` operations on the session metadata hash. The system stores the new `last_response_id` for the next message to reference, updates `last_active_at` with the current timestamp to reflect the latest activity, and crucially applies `EXPIRE` commands with a 7200-second (2-hour) TTL to both the session metadata hash and the messages list. This TTL refresh is essential—every user interaction resets the countdown timer. If a user remains inactive for 2 hours without sending another message, Redis will automatically evict all associated keys without requiring manual cleanup. The atomic nature of these operations, achieved through pipelining, ensures that even if the application crashes mid-operation, either all updates succeed or none do, maintaining data integrity in the Redis store.
+
+---
+
+### Chat Management During Expired Session
+
+#### Sequence Diagram: Session Expiration and Renewal
+
+```mermaid
+sequenceDiagram
+    participant Redis as Redis Cache
+    participant User as User Client
+    participant ChatMgr as ChatManager
+
+    Note over Redis: Time passes (>2 hours of inactivity)
+    Redis->>Redis: TTL counter decrements each second
+    Redis->>Redis: TTL reaches 0 seconds
+    
+    Note over Redis: Automatic key eviction triggered
+    Redis->>Redis: DELETE session:id (HASH)
+    Redis->>Redis: DELETE session:id:messages (LIST)
+    Redis->>Redis: DELETE chat_mapping:last_response:id
+    
+    Note over Redis: All session data removed from memory
+    
+    User->>ChatMgr: Send Next Query (Resume Session Attempt)
+    
+    ChatMgr->>Redis: get_active_session_context(session_id)
+    Note over Redis: Execute EXISTS session:id check
+    Redis-->>ChatMgr: NULL (Key not found - already evicted)
+    
+    Note over ChatMgr: Detect expired session condition
+    ChatMgr->>ChatMgr: No active context available
+    ChatMgr->>ChatMgr: Generate new session_id
+    
+    ChatMgr->>Redis: create_or_update_session(new_session_id, metadata)
+    Note over Redis: HSET new_session:id with metadata<br/>EXPIRE new_session:id TTL=7200s
+    Redis-->>ChatMgr: Session created successfully
+    
+    ChatMgr-->>User: New Session Initialized<br/>Conversation Restarted
+```
+
+#### Expired Session Explanation
+
+Session expiration in Redis is managed through an entirely passive, automatic TTL (Time-To-Live) mechanism that requires no explicit cleanup logic from the application. When a session is created or touched by user activity, all session-related Redis keys are assigned a TTL value of 7200 seconds (2 hours). Redis maintains an internal TTL counter for each key that decrements by one second on every clock tick, completely independent of application-level operations. If a user remains inactive and does not interact with the system within this 2-hour window, the TTL counter for all the user's session keys—including the session metadata hash (`session:{session_id}`), the messages list (`session:{session_id}:messages`), and the chat mapping key (`chat_mapping:last_response:{session_id}`)—reaches zero simultaneously (or sequentially, depending on when each was last touched). When Redis detects a key's TTL has expired, it automatically evicts the key from memory using its built-in eviction policy, permanently removing all associated conversation history, message store, and metadata without any application intervention required.
+
+When the user returns and attempts to resume their conversation by sending another query, the ChatManager calls the `get_active_session_context(session_id)` method with the original session ID. This method first executes an `EXISTS session:id` check to verify if the session metadata hash still exists in Redis. Since the TTL has expired and Redis has already evicted the key, the `EXISTS` command returns 0 (false), indicating the session is no longer active. The method immediately returns `None` without attempting further Redis operations, acting as a gatekeeper to prevent wasted work on non-existent data. The ChatManager detects this `None` return value as a session expiration signal and generates a brand new session ID, effectively starting a fresh conversation. A new session metadata hash is created in Redis using `create_or_update_session()` with the same TTL of 7200 seconds, and the system initializes this session with no previous conversation context—the new session has no `last_response_id` to chain from, so the first message sent will be treated as starting a new conversation thread with the OpenAI API.
+
+This passive TTL mechanism provides several critical advantages for production systems. First, it requires zero manual housekeeping—no cron jobs, background workers, or scheduled cleanup tasks are needed to remove stale session data. Second, it guarantees eventual consistency—even if the application becomes unavailable or crashes, Redis continues decrementing TTLs and evicting expired keys independently, so stale data never accumulates indefinitely. Third, the TTL is automatically refreshed with every user interaction through the `touch_session()` method, which applies the `EXPIRE` command to all session keys, resetting their TTL counters back to 7200 seconds. This means active, engaged users can maintain their sessions indefinitely as long as they interact within 2-hour windows, while dormant sessions are automatically cleaned up. The automatic nature of this system eliminates entire categories of bugs related to manual cache invalidation or stale data serving, making the Redis-backed session store both simple to understand and robust in production.
+
 ### Message Format and Serialization
 
 Each message is stored as JSON with this structure:
