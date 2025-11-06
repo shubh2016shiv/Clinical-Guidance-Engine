@@ -565,27 +565,72 @@ Serialization uses Python's `json.dumps()` for simplicity. While binary formats 
 
 ### Tracking Response Chains
 
-Response ID tracking happens at two levels:
+#### Response Chain Hierarchy
 
-**Session Level**: The session metadata maintains `root_response_id` (first response in conversation) and `last_response_id` (most recent response). These enable conversation continuation and provide reference points for debugging.
+Response ID tracking happens at two levels in the system, creating a redundant but complementary index structure:
 
-**Message Level**: Each assistant message stores its `response_id` in metadata. This creates a parallel index—you can reconstruct the conversation chain either by walking through message history or by following response ID references.
+**Session Level**: The session metadata hash maintains two critical response IDs: `root_response_id` (the first response ID that started this conversation thread) and `last_response_id` (the most recent response ID from the last message exchange). These enable conversation continuation—when a user sends a new message, the system passes `last_response_id` as `previous_response_id` to the OpenAI API. The `root_response_id` serves as a reference point for conversation debugging and potential recovery scenarios.
 
-This redundancy is intentional. If message history is lost or truncated, the session metadata still contains the critical `last_response_id` needed to continue the conversation.
+**Message Level**: Each assistant message in the Redis messages list stores its `response_id` in the message metadata. This creates a parallel index where you can reconstruct the entire conversation chain either by walking through the messages list sequentially or by following response ID references. This redundancy is intentional and critical—if the main session metadata becomes corrupted or the messages list is truncated due to the 20-message bounded history, the session metadata still contains the essential `last_response_id` needed to resume the conversation without data loss.
+
+---
 
 ### Synchronizing Session State
 
-After each message exchange, the system performs several state updates:
+#### Sequence Diagram: Complete Message Exchange and Session Update
 
-1. Store user message in session history
-2. Call OpenAI API with appropriate context
-3. Store assistant response in session history
-4. Update `last_response_id` in session metadata
-5. Update `message_count` in session metadata
-6. Update `last_active_at` timestamp
-7. Refresh TTL on all session keys
+```mermaid
+sequenceDiagram
+    participant User as User Client
+    participant AppMgr as OpenAIResponseManager
+    participant ChatMgr as ChatManager
+    participant Redis as Redis Cache
+    participant OpenAI as OpenAI API
 
-These operations are not atomic as a unit (they span multiple Redis commands), but each individual operation is atomic. The system tolerates slight inconsistencies—if updating `message_count` fails, it's recalculated on next access by counting list length.
+    User->>AppMgr: Send User Message
+
+    Note over AppMgr: Step 1: Store user message
+    AppMgr->>ChatMgr: _add_message_to_session(role=user)
+    ChatMgr->>Redis: LPUSH session:id:messages (User JSON)
+    ChatMgr->>Redis: LTRIM 0 to 19 (Bounded history)
+
+    Note over AppMgr: Step 2: Call OpenAI API
+    AppMgr->>OpenAI: responses.create(previous_response_id)
+    OpenAI-->>AppMgr: ResponseCreatedEvent (capture response_id)
+    OpenAI-->>AppMgr: ResponseTextDeltaEvent (stream text)
+    OpenAI-->>AppMgr: ResponseCompletedEvent
+
+    Note over AppMgr: Step 3: Store assistant response
+    AppMgr->>ChatMgr: _add_message_to_session(role=assistant)
+    ChatMgr->>Redis: LPUSH session:id:messages (Assistant JSON)
+    ChatMgr->>Redis: with metadata.response_id
+    ChatMgr->>Redis: LLEN session:id:messages (Get count)
+
+    Note over AppMgr: Step 4-7: Update session metadata
+    ChatMgr->>Redis: HSET last_response_id (new response_id)
+    ChatMgr->>Redis: HSET message_count (from LLEN)
+    ChatMgr->>Redis: HSET last_active_at (current timestamp)
+    ChatMgr->>Redis: EXPIRE session:id (7200s)
+    ChatMgr->>Redis: EXPIRE session:id:messages (7200s)
+
+    Note over Redis: All updates committed
+    
+    AppMgr-->>User: Response ready for streaming/delivery
+```
+
+#### Session State Synchronization Explanation
+
+The synchronization process orchestrates seven distinct operations across two systems (application and Redis) while maintaining data integrity. The sequence is carefully ordered to ensure that conversation state evolves predictably even if failures occur mid-process.
+
+**Step 1: Store User Message** begins by persisting the incoming user message to Redis using `_add_message_to_session(role="user")`. The ChatManager executes an `LPUSH` operation to add the message JSON object to the messages list, followed immediately by `LTRIM` to enforce the bounded 20-message history. This ensures new messages don't push the session into unbounded growth, and older messages naturally age out as the conversation progresses. The `LLEN` operation then counts the current messages to prepare the updated message count for the metadata.
+
+**Step 2: Call OpenAI API** sends the user's message to the OpenAI Responses API with the critical `previous_response_id` parameter set to the session's current `last_response_id`. This parameter tells OpenAI to continue the specific conversation thread rather than starting fresh. The API returns a `ResponseCreatedEvent` containing a new `response_id`, which the application captures immediately—this response ID becomes the link in the conversation chain. The system then processes subsequent events (`ResponseTextDeltaEvent` for text chunks, `ResponseCompletedEvent` for stream termination) to retrieve the complete response content.
+
+**Step 3: Store Assistant Response** mirrors Step 1 but for the assistant's reply. The system uses `_add_message_to_session(role="assistant")` to store the response message, with the critical difference that the message's metadata includes the `response_id` received from OpenAI. This creates the dual-level response ID tracking—the message-level metadata records which OpenAI response produced this content, while the session metadata will record it as `last_response_id` for chaining future messages. The `LLEN` operation counts messages again after insertion.
+
+**Steps 4-7: Update Session Metadata** atomically commit the conversation state changes. Step 4 updates `last_response_id` to the new response ID, enabling the next message to chain from this response. Step 5 updates `message_count` with the count from Step 3, maintaining accurate conversation length metrics. Step 6 updates `last_active_at` with the current timestamp, establishing a reference point for TTL-based session expiration. Steps 7A and 7B apply `EXPIRE` commands to both the session metadata hash and the messages list, resetting their 7200-second TTL counters—this is the critical TTL refresh that keeps the session alive as long as the user remains active.
+
+**Atomicity and Resilience**: These operations are not atomic as a single unit—they span multiple Redis commands across several round-trips. However, each individual operation is atomic at the Redis level. The system tolerates transient inconsistencies: if `HSET message_count` fails after `LLEN` succeeds, the message count becomes stale temporarily. However, on the next operation, the system recalculates message count by executing `LLEN` again, automatically correcting any staleness. This design avoids complex distributed transactions while maintaining eventual consistency—the system self-heals through recalculation patterns. Even if the application crashes after Step 3 but before Steps 4-7 complete, the next user interaction will detect the stale `last_response_id` via `get_active_session_context()` and correct it, ensuring no orphaned messages or responses.
 
 ---
 
@@ -741,13 +786,13 @@ A single Redis instance can comfortably handle 1-2 million concurrent sessions b
 
 ### Network Latency Optimization
 
-Redis operations involve network round-trips between application and database. The system minimizes latency through:
+Every Redis operation in this system requires a network round-trip between the application server and the Redis database server. In an interactive chat application where users expect sub-second response times, these network latencies compound rapidly and can degrade user experience significantly. The system implements three critical optimizations to minimize network overhead: command pipelining, atomic validation through the gatekeeper pattern, and geographic colocation of infrastructure.
 
-**Pipelining**: Batching multiple commands reduces round-trips. Without pipelining, adding a message requires 5 separate network calls (LPUSH, LTRIM, LLEN, HSET, EXPIRE). With pipelining, this becomes 1 round-trip for the batch + 1 round-trip for metadata update = 2 total.
+**Command Pipelining for Batch Operations** addresses the fundamental problem that each Redis command requires a separate network round-trip. When a user sends a message, the system must execute multiple Redis operations to store the message, trim the history, count messages, update metadata, and refresh TTL. Without pipelining, each operation waits for the previous one to complete before sending the next command, creating a sequential chain of network delays. For example, storing a user message requires five separate operations: `LPUSH` to add the message to the list, `LTRIM` to enforce the 20-message bound, `LLEN` to count messages, `HSET` to update the message count in session metadata, and `EXPIRE` to refresh the TTL. If each network round-trip takes 1 millisecond (typical for colocated Redis), this sequence consumes 5 milliseconds just in network latency, not counting Redis processing time. With pipelining, the system batches these commands into a single network request. Redis receives all commands together, executes them atomically, and returns all results in one response. This reduces the five sequential round-trips to just two: one pipeline for the message list operations (LPUSH, LTRIM, LLEN, EXPIRE) and one pipeline for the metadata updates (HSET message_count, EXPIRE session). The latency reduction is dramatic—from 5 milliseconds to 2 milliseconds, a 60% improvement. More importantly, pipelining ensures atomicity: either all commands in the pipeline succeed together or fail together, preventing partial state updates that could corrupt session data. This optimization is particularly critical during high-traffic periods when network congestion increases latency, making the sequential approach even slower while pipelining maintains consistent performance.
 
-**Atomic Validation**: The gatekeeper pattern (EXISTS check first) prevents wasteful data fetching. If a session is expired, we learn this in one fast EXISTS call rather than attempting HGETALL and finding empty data.
+**The Gatekeeper Pattern for Fast Validation** prevents the system from performing expensive operations on non-existent or expired sessions. When a user attempts to resume a conversation, the system must first validate that the session still exists in Redis before retrieving its metadata. The naive approach would be to immediately execute `HGETALL` on the session key to retrieve all metadata fields, then check if the result is empty. However, `HGETALL` is an expensive operation that retrieves all hash fields, serializes them, and transmits them over the network. If the session has expired (which happens frequently after 2 hours of inactivity), Redis has already evicted the key, and `HGETALL` returns an empty dictionary. The system has wasted network bandwidth and processing time retrieving nothing, and the user experiences unnecessary latency. The gatekeeper pattern solves this by performing a fast `EXISTS` check first. The `EXISTS` command is one of Redis's fastest operations—it simply checks if a key exists in memory and returns a boolean, requiring minimal data transfer (just a single bit response). If `EXISTS` returns false, the system immediately knows the session is expired and returns `None` without attempting any further operations. This early exit saves the expensive `HGETALL` call entirely. Only when `EXISTS` returns true does the system proceed with the full metadata retrieval using a pipelined `HGETALL` operation. In practice, this means expired session checks complete in under 1 millisecond instead of 2-3 milliseconds, and more importantly, it prevents wasted network bandwidth and Redis CPU cycles on non-existent data. During peak hours when many users return after long absences, this optimization prevents thousands of unnecessary `HGETALL` operations, significantly reducing Redis load and improving overall system responsiveness.
 
-**Colocated Deployment**: Redis should be deployed in the same datacenter/availability zone as application servers. Cross-region Redis calls add 50-200ms latency—unacceptable for interactive chat. Colocated deployment keeps latency under 1ms.
+**Geographic Colocation of Infrastructure** addresses the physical limitations of network propagation speed. Network latency is fundamentally constrained by the speed of light and the distance data must travel. When Redis is deployed in a different geographic region than the application servers, each network packet must traverse intercontinental fiber-optic cables, cross multiple network hops, and potentially pass through congested internet exchange points. Cross-region network latency typically ranges from 50 to 200 milliseconds depending on geographic distance—for example, a request from a server in New York to Redis in London might experience 80-100 milliseconds of latency, while New York to Tokyo could be 150-200 milliseconds. In an interactive chat application where users expect responses within 1-2 seconds, adding 100-200 milliseconds of latency to every Redis operation creates a noticeable delay. If a single message exchange requires 10 Redis operations (session validation, message storage, metadata updates, TTL refreshes), cross-region deployment adds 1-2 seconds of pure network latency to each user interaction, making the application feel sluggish and unresponsive. Colocated deployment means placing Redis in the same datacenter or availability zone as the application servers, connected through low-latency local network infrastructure. In modern cloud environments like AWS, Azure, or GCP, servers within the same availability zone communicate over dedicated high-speed networks with sub-millisecond latency (typically 0.5-1.0 milliseconds). This 50-200x latency reduction transforms the user experience—instead of waiting 1-2 seconds for Redis operations, users experience near-instantaneous responses. The impact is most visible during session validation operations that occur on every user message, where the gatekeeper `EXISTS` check completes in under 1 millisecond instead of 50-200 milliseconds. Colocation also reduces network jitter (variability in latency), which is critical for maintaining consistent response times. Without colocation, network congestion, routing changes, or temporary link failures can cause latency spikes that make the application feel unreliable, while colocated infrastructure provides predictable, low-latency performance essential for production-grade interactive applications.
 
 ### Scaling Horizontally
 
