@@ -193,15 +193,3 @@ This layered architecture provides separation of concerns, making the system eas
 
 ---
 
-## Additional Resources
-
-For more detailed information about specific aspects of the application, several other documentation files are available in the project. The `chatbot_ui/README.md` file contains comprehensive documentation about the chatbot interface implementation, including detailed explanations of how different features work and how to customize them. The `chatbot_ui/QUICKSTART.md` file provides a condensed setup guide for users who want to get started quickly with minimal reading. For information about how Chainlit integration was implemented, the `CHAINLIT_INTEGRATION_SUMMARY.md` file (if present) explains the technical details of connecting Chainlit with the backend systems.
-
-The official Chainlit documentation at https://docs.chainlit.io/ provides extensive information about the Chainlit framework itself, including advanced features, customization options, and best practices. This documentation is particularly useful if you want to modify the user interface or add new features to the chat interface.
-
-When encountering issues that aren't covered in this guide, the application's console logs are often the best source of diagnostic information. These logs show detailed error messages, stack traces, and operational information that can help identify the root cause of problems. Reviewing logs systematically, looking for error patterns or unusual messages, often reveals the issue and points toward a solution.
-
----
-
-**Last Updated**: This guide reflects the application state as of the current version. For the most up-to-date information, refer to the project's main documentation files and release notes.
-
