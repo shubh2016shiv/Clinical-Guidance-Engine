@@ -17,6 +17,7 @@ classifiers = [
 ]
 
 dependencies = [
+    "aiobreaker>=1.2.0",
     "chainlit>=2.0.0",
     "google-generativeai>=0.8.0",
     "openai",
@@ -36,7 +37,9 @@ dependencies = [
 [dependency-groups]
 dev = [
     "pre-commit",
+    "pyright>=1.1.409",
     "ruff",
+    "types-redis>=4.6.0.20241004",
 ]
 
 [tool.ruff]

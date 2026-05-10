@@ -115,6 +115,19 @@ class Settings(BaseSettings):
     )
 
     # ------------------------------------------------------------------
+    # Default LLM Provider
+    # ------------------------------------------------------------------
+
+    default_llm_provider: str = Field(
+        default="openai",
+        description="Default LLM provider slug (e.g. 'openai'). Used by the LLM provider factory.",
+    )
+    default_model_name: str = Field(
+        default="gpt-4o",
+        description="Default LLM model name used when no explicit model is specified.",
+    )
+
+    # ------------------------------------------------------------------
     # Default Embedding Provider
     # ------------------------------------------------------------------
 
@@ -261,6 +274,33 @@ class Settings(BaseSettings):
         default=1800,
         ge=0,
         description="Default TTL for chat-history cache in seconds (1800 = 30 minutes).",
+    )
+
+    # -- Redis resilience (circuit breaker + retry) -------------------
+    redis_circuit_breaker_fail_max: int = Field(
+        default=5,
+        ge=1,
+        description="Number of consecutive failures before the Redis circuit breaker opens.",
+    )
+    redis_circuit_breaker_timeout: int = Field(
+        default=30,
+        ge=1,
+        description="Seconds the Redis circuit breaker stays open before attempting half-open recovery.",
+    )
+    redis_retry_max_attempts: int = Field(
+        default=3,
+        ge=0,
+        description="Maximum retry attempts for transient Redis operation failures. 0 = no retries.",
+    )
+    redis_retry_base_delay: float = Field(
+        default=0.1,
+        ge=0.0,
+        description="Base delay in seconds for exponential backoff between Redis retries.",
+    )
+    redis_retry_max_delay: float = Field(
+        default=2.0,
+        ge=0.0,
+        description="Maximum delay in seconds for exponential backoff between Redis retries.",
     )
 
     # ------------------------------------------------------------------
