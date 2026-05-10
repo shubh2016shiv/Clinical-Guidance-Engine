@@ -13,12 +13,12 @@ The interface supports:
 """
 
 from abc import ABC, abstractmethod
-from typing import List, Dict, Any, Optional
 from dataclasses import dataclass, field
 from enum import Enum
+from typing import Any
 
-from src.providers.exceptions import EmbeddingProviderError
 from src.logs import get_logger
+from src.providers.exceptions import EmbeddingProviderError
 
 logger = get_logger(__name__)
 
@@ -64,12 +64,12 @@ class EmbeddingConfig:
     # Text preprocessing
     strip_whitespace: bool = True  # Remove leading/trailing whitespace
     remove_empty: bool = True  # Filter out empty texts in batch
-    max_text_length: Optional[int] = None  # Maximum text length (characters)
+    max_text_length: int | None = None  # Maximum text length (characters)
 
     # Additional provider-specific settings
-    extra_params: Dict[str, Any] = field(default_factory=dict)
+    extra_params: dict[str, Any] = field(default_factory=dict)
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Convert config to dictionary for logging/serialization"""
         return {
             "model_name": self.model_name,
@@ -90,18 +90,18 @@ class EmbeddingResponse:
     provider implementations.
     """
 
-    embeddings: List[List[float]]  # List of embedding vectors
+    embeddings: list[list[float]]  # List of embedding vectors
     model: str  # Model used for generation
     provider_type: str  # Provider identifier
     dimension: int  # Embedding dimension
 
     # Usage statistics (if available)
-    total_tokens: Optional[int] = None
+    total_tokens: int | None = None
 
     # Additional metadata
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Convert response to dictionary"""
         return {
             "embeddings_count": len(self.embeddings),
@@ -112,7 +112,7 @@ class EmbeddingResponse:
             "metadata": self.metadata,
         }
 
-    def get_single_embedding(self) -> List[float]:
+    def get_single_embedding(self) -> list[float]:
         """
         Get the first embedding from the response
 
@@ -137,20 +137,20 @@ class EmbeddingProvider(ABC):
     must follow, ensuring consistency and interchangeability.
     """
 
-    def __init__(self, config: EmbeddingConfig):
+    def __init__(self, config: EmbeddingConfig, api_key: str | None = None):
         """
-        Initialize the embedding provider with configuration
+        Initialize the embedding provider with configuration.
 
         Args:
-            config: EmbeddingConfig object containing provider settings
+            config: EmbeddingConfig object containing provider settings.
+            api_key: Optional API key for the provider (defaults to settings).
         """
         self.config = config
+        self.api_key = api_key
         self.model_name = config.model_name
         self.embedding_dimension = config.embedding_dimension
         self.provider_type = (
-            self.__class__.__name__.lower()
-            .replace("provider", "")
-            .replace("embedding", "")
+            self.__class__.__name__.lower().replace("provider", "").replace("embedding", "")
         )
 
         logger.info(
@@ -159,7 +159,7 @@ class EmbeddingProvider(ABC):
         )
 
     @abstractmethod
-    async def generate_embedding(self, text: str, **kwargs) -> List[float]:
+    async def generate_embedding(self, text: str, **kwargs) -> list[float]:
         """
         Generate an embedding for a single text (async)
 
@@ -178,7 +178,7 @@ class EmbeddingProvider(ABC):
         pass
 
     @abstractmethod
-    def generate_embedding_sync(self, text: str, **kwargs) -> List[float]:
+    def generate_embedding_sync(self, text: str, **kwargs) -> list[float]:
         """
         Generate an embedding for a single text (synchronous)
 
@@ -198,9 +198,7 @@ class EmbeddingProvider(ABC):
         pass
 
     @abstractmethod
-    async def generate_embeddings_batch(
-        self, texts: List[str], **kwargs
-    ) -> List[List[float]]:
+    async def generate_embeddings_batch(self, texts: list[str], **kwargs) -> list[list[float]]:
         """
         Generate embeddings for multiple texts (async)
 
@@ -220,9 +218,7 @@ class EmbeddingProvider(ABC):
         pass
 
     @abstractmethod
-    def generate_embeddings_batch_sync(
-        self, texts: List[str], **kwargs
-    ) -> List[List[float]]:
+    def generate_embeddings_batch_sync(self, texts: list[str], **kwargs) -> list[list[float]]:
         """
         Generate embeddings for multiple texts (synchronous)
 
@@ -271,7 +267,7 @@ class EmbeddingProvider(ABC):
 
         return text
 
-    def preprocess_texts_batch(self, texts: List[str]) -> List[str]:
+    def preprocess_texts_batch(self, texts: list[str]) -> list[str]:
         """
         Preprocess multiple texts for batch embedding
 
@@ -296,7 +292,7 @@ class EmbeddingProvider(ABC):
 
         return preprocessed
 
-    def validate_embedding(self, embedding: List[float]) -> bool:
+    def validate_embedding(self, embedding: list[float]) -> bool:
         """
         Validate that an embedding has the expected dimension
 
@@ -336,7 +332,7 @@ class EmbeddingProvider(ABC):
             else:
                 logger.warning(f"Attempted to set unknown config key: {key}")
 
-    def get_model_info(self) -> Dict[str, Any]:
+    def get_model_info(self) -> dict[str, Any]:
         """
         Get comprehensive information about the embedding provider
 
@@ -367,7 +363,7 @@ class EmbeddingProvider(ABC):
         # Simple estimation: ~1 token per 4 characters
         return len(text) // 4
 
-    def estimate_batch_tokens(self, texts: List[str]) -> int:
+    def estimate_batch_tokens(self, texts: list[str]) -> int:
         """
         Estimate total tokens for a batch of texts
 

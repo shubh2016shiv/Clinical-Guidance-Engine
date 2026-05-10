@@ -6,16 +6,14 @@ Copy these examples into your application code as needed.
 """
 
 import asyncio
-from typing import List
 
 from src.providers.embedding_provider import (
+    EmbeddingConfig,
+    EmbeddingProviderError,
+    EmbeddingTaskType,
     create_embedding_provider,
     get_default_embedding_provider,
-    EmbeddingConfig,
-    EmbeddingTaskType,
-    EmbeddingProviderError,
 )
-
 
 # ============================================================================
 # EXAMPLE 1: Basic Single Text Embedding (Async)
@@ -48,9 +46,7 @@ def example_basic_embedding_sync():
     """Generate embedding for a single text synchronously"""
 
     # Create provider
-    provider = create_embedding_provider(
-        provider_type="gemini", model_name="text-embedding-004"
-    )
+    provider = create_embedding_provider(provider_type="gemini", model_name="text-embedding-004")
 
     # Generate embedding (synchronous)
     text = "Natural language processing enables computers to understand text."
@@ -90,8 +86,8 @@ async def example_batch_embeddings():
     print(f"Each embedding has {len(embeddings[0])} dimensions")
 
     # Use embeddings (e.g., for similarity search)
-    for i, (text, embedding) in enumerate(zip(texts, embeddings)):
-        print(f"{i+1}. {text[:50]}... -> {embedding[:3]}...")
+    for i, (text, embedding) in enumerate(zip(texts, embeddings, strict=True)):
+        print(f"{i + 1}. {text[:50]}... -> {embedding[:3]}...")
 
 
 # ============================================================================
@@ -229,12 +225,12 @@ async def example_semantic_similarity():
         return np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
 
     # Find most similar documents
-    similarities = [
-        cosine_similarity(query_embedding, doc_emb) for doc_emb in doc_embeddings
-    ]
+    similarities = [cosine_similarity(query_embedding, doc_emb) for doc_emb in doc_embeddings]
 
     # Sort by similarity
-    ranked_docs = sorted(zip(documents, similarities), key=lambda x: x[1], reverse=True)
+    ranked_docs = sorted(
+        zip(documents, similarities, strict=True), key=lambda x: x[1], reverse=True
+    )
 
     print(f"Query: {query}")
     print("\nMost similar documents:")
@@ -317,9 +313,7 @@ async def example_large_batch_processing():
     provider = create_embedding_provider(provider_type="openai", batch_size=100)
 
     # Simulate large dataset
-    large_dataset = [
-        f"Document number {i} about various topics in AI and ML." for i in range(500)
-    ]
+    large_dataset = [f"Document number {i} about various topics in AI and ML." for i in range(500)]
 
     print(f"Processing {len(large_dataset)} documents...")
 
@@ -399,7 +393,6 @@ async def example_vector_database():
     """Build a simple in-memory vector database"""
 
     import numpy as np
-    from typing import Tuple
 
     class SimpleVectorDB:
         def __init__(self, provider):
@@ -407,20 +400,20 @@ async def example_vector_database():
             self.documents = []
             self.embeddings = []
 
-        async def add_documents(self, docs: List[str]):
+        async def add_documents(self, docs: list[str]):
             """Add documents to the database"""
             embeddings = await self.provider.generate_embeddings_batch(docs)
             self.documents.extend(docs)
             self.embeddings.extend(embeddings)
             print(f"Added {len(docs)} documents. Total: {len(self.documents)}")
 
-        async def search(self, query: str, top_k: int = 3) -> List[Tuple[str, float]]:
+        async def search(self, query: str, top_k: int = 3) -> list[tuple[str, float]]:
             """Search for most similar documents"""
             query_emb = await self.provider.generate_embedding(query)
 
             # Calculate similarities
             similarities = []
-            for doc, doc_emb in zip(self.documents, self.embeddings):
+            for doc, doc_emb in zip(self.documents, self.embeddings, strict=True):
                 sim = np.dot(query_emb, doc_emb) / (
                     np.linalg.norm(query_emb) * np.linalg.norm(doc_emb)
                 )
@@ -485,7 +478,8 @@ async def example_multi_provider_ensemble():
     for name, provider in providers.items():
         emb = await provider.generate_embedding(text)
         # Normalize to unit length for fair comparison
-        emb_normalized = emb / np.linalg.norm(emb)
+        norm = np.linalg.norm(emb)
+        emb_normalized = (np.array(emb) / norm).tolist() if norm > 0 else emb
         embeddings[name] = emb_normalized
 
     print(f"Text: {text}")
@@ -518,9 +512,9 @@ async def example_preprocessing():
     for i, text in enumerate(texts):
         try:
             embedding = await provider.generate_embedding(text)
-            print(f"{i+1}. Success: '{text}' -> {len(embedding)} dimensions")
+            print(f"{i + 1}. Success: '{text}' -> {len(embedding)} dimensions")
         except EmbeddingProviderError as e:
-            print(f"{i+1}. Failed: '{text}' -> {e}")
+            print(f"{i + 1}. Failed: '{text}' -> {e}")
 
 
 # ============================================================================

@@ -39,39 +39,38 @@ Quick Start:
 
 # Base classes and interfaces
 from .base import (
-    EmbeddingProvider,
     EmbeddingConfig,
+    EmbeddingProvider,
     EmbeddingResponse,
     EmbeddingTaskType,
 )
 
+# Exceptions
+from .exceptions import (
+    EmbeddingAuthenticationError,
+    EmbeddingBatchSizeError,
+    EmbeddingDimensionMismatchError,
+    EmbeddingGenerationError,
+    EmbeddingProviderError,
+    EmbeddingProviderInitializationError,
+    EmbeddingRateLimitError,
+    EmbeddingTextPreprocessingError,
+)
+
 # Factory functions
 from .factory import (
-    create_embedding_provider,
-    get_embedding_provider,  # Legacy
-    get_default_embedding_provider,
-    get_cached_embedding_provider,
     clear_embedding_provider_cache,
-    register_embedding_provider,
+    create_embedding_provider,
     get_available_embedding_providers,
+    get_cached_embedding_provider,
+    get_default_embedding_provider,
+    get_embedding_provider,  # Legacy
+    register_embedding_provider,
 )
+from .gemini_embedding_provider import GeminiEmbeddingProvider
 
 # Provider implementations
 from .openai_embedding_provider import OpenAIEmbeddingProvider
-from .gemini_embedding_provider import GeminiEmbeddingProvider
-
-# Exceptions
-from .exceptions import (
-    EmbeddingProviderError,
-    EmbeddingProviderInitializationError,
-    EmbeddingGenerationError,
-    EmbeddingDimensionMismatchError,
-    EmbeddingBatchSizeError,
-    EmbeddingTextPreprocessingError,
-    EmbeddingAuthenticationError,
-    EmbeddingRateLimitError,
-)
-
 
 # Version
 __version__ = "2.0.0"

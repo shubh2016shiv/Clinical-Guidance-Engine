@@ -10,14 +10,16 @@ Supported Models:
 """
 
 import asyncio
-from typing import List, Optional, Dict, Any
 import math
+from typing import Any
+
 import google.generativeai as genai
 
 from src.config import get_settings
-from src.providers.exceptions import EmbeddingProviderError
 from src.logs import get_logger
-from .base import EmbeddingProvider, EmbeddingConfig, EmbeddingTaskType
+from src.providers.exceptions import EmbeddingProviderError
+
+from .base import EmbeddingConfig, EmbeddingProvider, EmbeddingTaskType
 
 logger = get_logger(__name__)
 
@@ -48,28 +50,16 @@ class GeminiEmbeddingProvider(EmbeddingProvider):
     synchronous and asynchronous operations.
     """
 
-    def __init__(
-        self,
-        api_key: Optional[str] = None,
-        config: Optional[EmbeddingConfig] = None,
-        model_name: Optional[str] = None,
-        embedding_dimension: Optional[int] = None,
-        task_type: Optional[EmbeddingTaskType] = None,
-        **kwargs,
-    ):
+    def __init__(self, config: EmbeddingConfig, api_key: str | None = None):
         """
-        Initialize the Gemini embedding provider
+        Initialize the Gemini embedding provider.
 
         Args:
-            api_key: Gemini API key (defaults to settings)
-            config: Complete EmbeddingConfig object (takes precedence)
-            model_name: Model name (used if config not provided)
-            embedding_dimension: Embedding dimension (auto-detected if not provided)
-            task_type: Task type for embeddings (defaults to SEMANTIC_SIMILARITY)
-            **kwargs: Additional configuration parameters
+            config: Fully-resolved EmbeddingConfig object (built by the factory).
+            api_key: Gemini API key. Defaults to the application settings.
 
         Raises:
-            EmbeddingProviderError: If API key is missing or configuration is invalid
+            EmbeddingProviderError: If the API key is missing.
         """
         settings = get_settings()
         self.api_key = api_key or settings.gemini_api_key
@@ -78,40 +68,17 @@ class GeminiEmbeddingProvider(EmbeddingProvider):
             raise EmbeddingProviderError("Gemini API key is required")
 
         # Configure Gemini SDK
-        genai.configure(api_key=self.api_key)
+        genai.configure(api_key=self.api_key)  # pyright: ignore[reportPrivateImportUsage]
 
-        # Determine model name
-        if config:
-            model_name = config.model_name
-        else:
-            model_name = model_name or "text-embedding-004"
-
-        # Ensure model has correct prefix
+        # Ensure model name has the required "models/" prefix for API calls
+        model_name = config.model_name
         if not model_name.startswith("models/"):
             self.full_model_name = f"models/{model_name}"
         else:
             self.full_model_name = model_name
 
-        # Auto-detect dimension if not provided
-        if not embedding_dimension and not config:
-            embedding_dimension = GEMINI_MODEL_DIMENSIONS.get(
-                model_name, GEMINI_MODEL_DIMENSIONS.get(self.full_model_name, 768)
-            )
-            logger.debug(
-                f"Auto-detected dimension for {model_name}: {embedding_dimension}"
-            )
-
-        # Build configuration if not provided
-        if config is None:
-            config = EmbeddingConfig(
-                model_name=model_name,
-                embedding_dimension=embedding_dimension or 768,
-                task_type=task_type or EmbeddingTaskType.SEMANTIC_SIMILARITY,
-                **kwargs,
-            )
-
         # Initialize parent
-        super().__init__(config)
+        super().__init__(config, api_key=self.api_key)
 
         logger.info(
             f"Gemini embedding provider initialized - "
@@ -119,7 +86,7 @@ class GeminiEmbeddingProvider(EmbeddingProvider):
             f"Task: {self.config.task_type.value}"
         )
 
-    async def generate_embedding(self, text: str, **kwargs) -> List[float]:
+    async def generate_embedding(self, text: str, **kwargs) -> list[float]:
         """
         Generate an embedding for a single text (async)
 
@@ -144,7 +111,7 @@ class GeminiEmbeddingProvider(EmbeddingProvider):
             params = self._build_embedding_params(text, **kwargs)
 
             # Execute in thread pool (Gemini SDK is synchronous)
-            response = await asyncio.to_thread(genai.embed_content, **params)
+            response = await asyncio.to_thread(genai.embed_content, **params)  # pyright: ignore[reportPrivateImportUsage]
 
             # Extract embedding
             if not response or "embedding" not in response:
@@ -172,9 +139,9 @@ class GeminiEmbeddingProvider(EmbeddingProvider):
         except Exception as e:
             error_msg = f"Failed to generate Gemini embedding: {str(e)}"
             logger.error(error_msg, exc_info=True)
-            raise EmbeddingProviderError(error_msg)
+            raise EmbeddingProviderError(error_msg) from e
 
-    def generate_embedding_sync(self, text: str, **kwargs) -> List[float]:
+    def generate_embedding_sync(self, text: str, **kwargs) -> list[float]:
         """
         Generate an embedding for a single text (synchronous)
 
@@ -196,7 +163,7 @@ class GeminiEmbeddingProvider(EmbeddingProvider):
             params = self._build_embedding_params(text, **kwargs)
 
             # Execute API call
-            response = genai.embed_content(**params)
+            response = genai.embed_content(**params)  # pyright: ignore[reportPrivateImportUsage]
 
             # Extract embedding
             if not response or "embedding" not in response:
@@ -224,11 +191,9 @@ class GeminiEmbeddingProvider(EmbeddingProvider):
         except Exception as e:
             error_msg = f"Failed to generate Gemini embedding (sync): {str(e)}"
             logger.error(error_msg, exc_info=True)
-            raise EmbeddingProviderError(error_msg)
+            raise EmbeddingProviderError(error_msg) from e
 
-    async def generate_embeddings_batch(
-        self, texts: List[str], **kwargs
-    ) -> List[List[float]]:
+    async def generate_embeddings_batch(self, texts: list[str], **kwargs) -> list[list[float]]:
         """
         Generate embeddings for multiple texts (async)
 
@@ -261,9 +226,7 @@ class GeminiEmbeddingProvider(EmbeddingProvider):
 
             for i in range(0, len(processed_texts), batch_size):
                 batch = processed_texts[i : i + batch_size]
-                logger.debug(
-                    f"Processing batch {i // batch_size + 1}: {len(batch)} texts"
-                )
+                logger.debug(f"Processing batch {i // batch_size + 1}: {len(batch)} texts")
 
                 # Generate embeddings for batch
                 batch_embeddings = await self._generate_batch_async(batch, **kwargs)
@@ -281,11 +244,9 @@ class GeminiEmbeddingProvider(EmbeddingProvider):
         except Exception as e:
             error_msg = f"Failed to generate Gemini embeddings batch: {str(e)}"
             logger.error(error_msg, exc_info=True)
-            raise EmbeddingProviderError(error_msg)
+            raise EmbeddingProviderError(error_msg) from e
 
-    def generate_embeddings_batch_sync(
-        self, texts: List[str], **kwargs
-    ) -> List[List[float]]:
+    def generate_embeddings_batch_sync(self, texts: list[str], **kwargs) -> list[list[float]]:
         """
         Generate embeddings for multiple texts (synchronous)
 
@@ -327,11 +288,9 @@ class GeminiEmbeddingProvider(EmbeddingProvider):
         except Exception as e:
             error_msg = f"Failed to generate Gemini embeddings batch (sync): {str(e)}"
             logger.error(error_msg, exc_info=True)
-            raise EmbeddingProviderError(error_msg)
+            raise EmbeddingProviderError(error_msg) from e
 
-    async def _generate_batch_async(
-        self, texts: List[str], **kwargs
-    ) -> List[List[float]]:
+    async def _generate_batch_async(self, texts: list[str], **kwargs) -> list[list[float]]:
         """
         Generate embeddings for a batch using async concurrency
 
@@ -349,7 +308,7 @@ class GeminiEmbeddingProvider(EmbeddingProvider):
         embeddings = await asyncio.gather(*tasks)
         return embeddings
 
-    def _build_embedding_params(self, text: str, **kwargs) -> Dict[str, Any]:
+    def _build_embedding_params(self, text: str, **kwargs) -> dict[str, Any]:
         """
         Build parameters dictionary for Gemini embeddings API
 
@@ -362,9 +321,7 @@ class GeminiEmbeddingProvider(EmbeddingProvider):
         """
         # Get task type
         task_type = kwargs.get("task_type", self.config.task_type)
-        gemini_task_type = GEMINI_TASK_TYPE_MAPPING.get(
-            task_type, "SEMANTIC_SIMILARITY"
-        )
+        gemini_task_type = GEMINI_TASK_TYPE_MAPPING.get(task_type, "SEMANTIC_SIMILARITY")
 
         params = {
             "model": self.full_model_name,
@@ -384,7 +341,7 @@ class GeminiEmbeddingProvider(EmbeddingProvider):
 
         return params
 
-    def _normalize_vector(self, vector: List[float]) -> List[float]:
+    def _normalize_vector(self, vector: list[float]) -> list[float]:
         """
         Normalize a vector to unit length (L2 norm).
 
@@ -418,7 +375,7 @@ class GeminiEmbeddingProvider(EmbeddingProvider):
 
         return normalized
 
-    def get_model_info(self) -> Dict[str, Any]:
+    def get_model_info(self) -> dict[str, Any]:
         """
         Get information about the Gemini embedding model
 

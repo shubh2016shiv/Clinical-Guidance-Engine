@@ -18,7 +18,7 @@ class EmbeddingProviderError(Exception):
         details: Optional dictionary with additional error context
     """
 
-    def __init__(self, message: str, details: dict = None):
+    def __init__(self, message: str, details: dict | None = None):
         """
         Initialize the exception
 

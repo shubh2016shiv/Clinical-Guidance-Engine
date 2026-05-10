@@ -10,13 +10,15 @@ Supported Models:
 - text-embedding-ada-002 (1536 dimensions, legacy)
 """
 
-from typing import List, Optional, Dict, Any
-from openai import OpenAI, AsyncOpenAI
+from typing import Any
+
+from openai import AsyncOpenAI, OpenAI
 
 from src.config import get_settings
-from src.providers.exceptions import EmbeddingProviderError
 from src.logs import get_logger
-from .base import EmbeddingProvider, EmbeddingConfig
+from src.providers.exceptions import EmbeddingProviderError
+
+from .base import EmbeddingConfig, EmbeddingProvider
 
 logger = get_logger(__name__)
 
@@ -37,26 +39,16 @@ class OpenAIEmbeddingProvider(EmbeddingProvider):
     synchronous and asynchronous operations.
     """
 
-    def __init__(
-        self,
-        api_key: Optional[str] = None,
-        config: Optional[EmbeddingConfig] = None,
-        model_name: Optional[str] = None,
-        embedding_dimension: Optional[int] = None,
-        **kwargs,
-    ):
+    def __init__(self, config: EmbeddingConfig, api_key: str | None = None):
         """
-        Initialize the OpenAI embedding provider
+        Initialize the OpenAI embedding provider.
 
         Args:
-            api_key: OpenAI API key (defaults to settings)
-            config: Complete EmbeddingConfig object (takes precedence)
-            model_name: Model name (used if config not provided)
-            embedding_dimension: Embedding dimension (auto-detected if not provided)
-            **kwargs: Additional configuration parameters
+            config: Fully-resolved EmbeddingConfig object (built by the factory).
+            api_key: OpenAI API key. Defaults to the application settings.
 
         Raises:
-            EmbeddingProviderError: If API key is missing or configuration is invalid
+            EmbeddingProviderError: If the API key is missing.
         """
         settings = get_settings()
         self.api_key = api_key or settings.openai_api_key
@@ -64,29 +56,8 @@ class OpenAIEmbeddingProvider(EmbeddingProvider):
         if not self.api_key:
             raise EmbeddingProviderError("OpenAI API key is required")
 
-        # Determine model name
-        if config:
-            model_name = config.model_name
-        else:
-            model_name = model_name or "text-embedding-3-small"
-
-        # Auto-detect dimension if not provided
-        if not embedding_dimension and not config:
-            embedding_dimension = OPENAI_MODEL_DIMENSIONS.get(model_name, 1536)
-            logger.debug(
-                f"Auto-detected dimension for {model_name}: {embedding_dimension}"
-            )
-
-        # Build configuration if not provided
-        if config is None:
-            config = EmbeddingConfig(
-                model_name=model_name,
-                embedding_dimension=embedding_dimension or 1536,
-                **kwargs,
-            )
-
         # Initialize parent
-        super().__init__(config)
+        super().__init__(config, api_key=self.api_key)
 
         # Initialize OpenAI clients (both sync and async)
         self.client = OpenAI(api_key=self.api_key)
@@ -97,7 +68,7 @@ class OpenAIEmbeddingProvider(EmbeddingProvider):
             f"Model: {self.model_name}, Dimension: {self.embedding_dimension}"
         )
 
-    async def generate_embedding(self, text: str, **kwargs) -> List[float]:
+    async def generate_embedding(self, text: str, **kwargs) -> list[float]:
         """
         Generate an embedding for a single text (async)
 
@@ -143,9 +114,9 @@ class OpenAIEmbeddingProvider(EmbeddingProvider):
         except Exception as e:
             error_msg = f"Failed to generate OpenAI embedding: {str(e)}"
             logger.error(error_msg, exc_info=True)
-            raise EmbeddingProviderError(error_msg)
+            raise EmbeddingProviderError(error_msg) from e
 
-    def generate_embedding_sync(self, text: str, **kwargs) -> List[float]:
+    def generate_embedding_sync(self, text: str, **kwargs) -> list[float]:
         """
         Generate an embedding for a single text (synchronous)
 
@@ -191,11 +162,9 @@ class OpenAIEmbeddingProvider(EmbeddingProvider):
         except Exception as e:
             error_msg = f"Failed to generate OpenAI embedding (sync): {str(e)}"
             logger.error(error_msg, exc_info=True)
-            raise EmbeddingProviderError(error_msg)
+            raise EmbeddingProviderError(error_msg) from e
 
-    async def generate_embeddings_batch(
-        self, texts: List[str], **kwargs
-    ) -> List[List[float]]:
+    async def generate_embeddings_batch(self, texts: list[str], **kwargs) -> list[list[float]]:
         """
         Generate embeddings for multiple texts (async)
 
@@ -228,9 +197,7 @@ class OpenAIEmbeddingProvider(EmbeddingProvider):
                     f"Splitting {len(processed_texts)} texts into batches of "
                     f"{self.config.batch_size}"
                 )
-                return await self._generate_embeddings_in_batches(
-                    processed_texts, **kwargs
-                )
+                return await self._generate_embeddings_in_batches(processed_texts, **kwargs)
 
             # Build parameters for batch
             params = self._build_embedding_params(processed_texts, **kwargs)
@@ -249,9 +216,7 @@ class OpenAIEmbeddingProvider(EmbeddingProvider):
             # Validate embeddings
             for i, embedding in enumerate(embeddings):
                 if not self.validate_embedding(embedding):
-                    raise EmbeddingProviderError(
-                        f"Invalid embedding dimension at index {i}"
-                    )
+                    raise EmbeddingProviderError(f"Invalid embedding dimension at index {i}")
 
             logger.debug(
                 f"Generated {len(embeddings)} OpenAI embeddings - "
@@ -265,11 +230,9 @@ class OpenAIEmbeddingProvider(EmbeddingProvider):
         except Exception as e:
             error_msg = f"Failed to generate OpenAI embeddings batch: {str(e)}"
             logger.error(error_msg, exc_info=True)
-            raise EmbeddingProviderError(error_msg)
+            raise EmbeddingProviderError(error_msg) from e
 
-    def generate_embeddings_batch_sync(
-        self, texts: List[str], **kwargs
-    ) -> List[List[float]]:
+    def generate_embeddings_batch_sync(self, texts: list[str], **kwargs) -> list[list[float]]:
         """
         Generate embeddings for multiple texts (synchronous)
 
@@ -310,9 +273,7 @@ class OpenAIEmbeddingProvider(EmbeddingProvider):
             # Validate embeddings
             for i, embedding in enumerate(embeddings):
                 if not self.validate_embedding(embedding):
-                    raise EmbeddingProviderError(
-                        f"Invalid embedding dimension at index {i}"
-                    )
+                    raise EmbeddingProviderError(f"Invalid embedding dimension at index {i}")
 
             logger.debug(
                 f"Generated {len(embeddings)} OpenAI embeddings (sync) - "
@@ -326,11 +287,11 @@ class OpenAIEmbeddingProvider(EmbeddingProvider):
         except Exception as e:
             error_msg = f"Failed to generate OpenAI embeddings batch (sync): {str(e)}"
             logger.error(error_msg, exc_info=True)
-            raise EmbeddingProviderError(error_msg)
+            raise EmbeddingProviderError(error_msg) from e
 
     async def _generate_embeddings_in_batches(
-        self, texts: List[str], **kwargs
-    ) -> List[List[float]]:
+        self, texts: list[str], **kwargs
+    ) -> list[list[float]]:
         """
         Generate embeddings by splitting into smaller batches
 
@@ -358,9 +319,9 @@ class OpenAIEmbeddingProvider(EmbeddingProvider):
 
     def _build_embedding_params(
         self,
-        input_text: Any,  # Can be str or List[str]
+        input_text: str | list[str],
         **kwargs,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         Build parameters dictionary for OpenAI embeddings API
 
@@ -390,7 +351,7 @@ class OpenAIEmbeddingProvider(EmbeddingProvider):
 
         return params
 
-    def get_model_info(self) -> Dict[str, Any]:
+    def get_model_info(self) -> dict[str, Any]:
         """
         Get information about the OpenAI embedding model
 
