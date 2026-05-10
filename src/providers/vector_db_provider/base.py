@@ -12,10 +12,12 @@ The interface supports:
 - Integration with embedding providers
 """
 
+from __future__ import annotations
+
 from abc import ABC, abstractmethod
-from typing import List, Dict, Any, Optional
 from dataclasses import dataclass, field
 from enum import Enum
+from typing import Any
 
 from src.logs import get_logger
 
@@ -30,9 +32,7 @@ class SearchMetricType(Enum):
     """
 
     COSINE = "cosine"  # Cosine similarity (normalized vectors)
-    INNER_PRODUCT = (
-        "inner_product"  # Inner product (IP) - works with normalized vectors
-    )
+    INNER_PRODUCT = "inner_product"  # Inner product (IP) - works with normalized vectors
     EUCLIDEAN = "euclidean"  # L2 distance
     DOT_PRODUCT = "dot_product"  # Dot product
 
@@ -60,7 +60,7 @@ class VectorDBConnectionConfig:
     server_pem_path: str = ""
     server_name: str = ""
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Convert config to dictionary for logging/serialization"""
         return {
             "host": self.host,
@@ -84,16 +84,16 @@ class VectorDBSearchConfig:
     metric_type: SearchMetricType = SearchMetricType.INNER_PRODUCT
 
     # Index-specific search parameters
-    search_params: Dict[str, Any] = field(default_factory=dict)
+    search_params: dict[str, Any] = field(default_factory=dict)
 
     # Output configuration
-    output_fields: List[str] = field(default_factory=list)
+    output_fields: list[str] = field(default_factory=list)
     include_metadata: bool = True
 
     # Filter support
     enable_filters: bool = True
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Convert config to dictionary"""
         return {
             "top_k": self.top_k,
@@ -119,7 +119,7 @@ class VectorDBCollectionConfig:
     # Collection management
     load_on_startup: bool = True
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Convert config to dictionary"""
         return {
             "name": self.name,
@@ -139,14 +139,10 @@ class VectorDBConfig:
     """
 
     # Connection configuration
-    connection: VectorDBConnectionConfig = field(
-        default_factory=VectorDBConnectionConfig
-    )
+    connection: VectorDBConnectionConfig = field(default_factory=VectorDBConnectionConfig)
 
     # Collection configuration
-    collection: VectorDBCollectionConfig = field(
-        default_factory=VectorDBCollectionConfig
-    )
+    collection: VectorDBCollectionConfig = field(default_factory=VectorDBCollectionConfig)
 
     # Search configuration
     search: VectorDBSearchConfig = field(default_factory=VectorDBSearchConfig)
@@ -156,9 +152,9 @@ class VectorDBConfig:
     embedding_normalized: bool = True  # For IP metric compatibility
 
     # Additional provider-specific settings
-    extra_params: Dict[str, Any] = field(default_factory=dict)
+    extra_params: dict[str, Any] = field(default_factory=dict)
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Convert config to dictionary for logging/serialization"""
         return {
             "connection": self.connection.to_dict(),
@@ -176,20 +172,23 @@ class VectorDBConfig:
             True if valid
 
         Raises:
-            ValueError: If configuration is invalid
+            VectorDBConfigError: If configuration is invalid
         """
         # Validate embedding dimension matches collection dimension
         if self.embedding_dimension != self.collection.embedding_dimension:
-            raise ValueError(
+            from .exceptions import VectorDBConfigError
+
+            raise VectorDBConfigError(
                 f"Embedding dimension ({self.embedding_dimension}) must match "
-                f"collection embedding dimension ({self.collection.embedding_dimension})"
+                f"collection embedding dimension ({self.collection.embedding_dimension})",
+                details={
+                    "config_embedding_dim": self.embedding_dimension,
+                    "collection_embedding_dim": self.collection.embedding_dimension,
+                },
             )
 
         # Validate metric type is appropriate for normalized embeddings
-        if (
-            self.embedding_normalized
-            and self.search.metric_type != SearchMetricType.INNER_PRODUCT
-        ):
+        if self.embedding_normalized and self.search.metric_type != SearchMetricType.INNER_PRODUCT:
             logger.warning(
                 f"Normalized embeddings work best with INNER_PRODUCT metric, "
                 f"but {self.search.metric_type.value} is configured"
@@ -212,10 +211,10 @@ class SearchResult:
     score: float  # Similarity score (higher is better)
 
     # Result data
-    fields: Dict[str, Any]  # Field values from the database
-    metadata: Dict[str, Any] = field(default_factory=dict)  # Additional metadata
+    fields: dict[str, Any]  # Field values from the database
+    metadata: dict[str, Any] = field(default_factory=dict)  # Additional metadata
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Convert result to dictionary"""
         return {
             "id": self.id,
@@ -246,28 +245,39 @@ class VectorDBProvider(ABC):
     must follow, ensuring consistency and interchangeability.
     """
 
-    def __init__(self, config: VectorDBConfig):
+    def __init__(
+        self,
+        config: VectorDBConfig,
+        *,
+        embedding_provider: Any | None = None,
+    ):
         """
         Initialize the vector database provider with configuration
 
         Args:
-            config: VectorDBConfig object containing provider settings
+            config: VectorDBConfig object containing provider settings.
+            embedding_provider: Optional embedding provider for auto-generating
+                query embeddings on text-based search. Provider implementations
+                may require this or create a default internally.
         """
         self.config = config
         self.collection_name = config.collection.name
         self.embedding_dimension = config.collection.embedding_dimension
+        self.embedding_provider = embedding_provider
         self.provider_type = (
-            self.__class__.__name__.lower()
-            .replace("provider", "")
-            .replace("vector", "")
+            self.__class__.__name__.lower().replace("provider", "").replace("vector", "")
         )
 
         # Validate configuration
+        from .exceptions import VectorDBConfigError
+
         try:
             config.validate()
+        except VectorDBConfigError:
+            raise
         except ValueError as e:
             logger.error(f"Invalid vector database provider configuration: {e}")
-            raise
+            raise VectorDBConfigError(str(e)) from e
 
         logger.info(
             f"Initialized {self.provider_type} vector database provider - "
@@ -328,12 +338,12 @@ class VectorDBProvider(ABC):
     @abstractmethod
     async def search(
         self,
-        query_vector: List[float],
-        limit: Optional[int] = None,
-        filter_expression: Optional[str] = None,
-        output_fields: Optional[List[str]] = None,
-        **kwargs,
-    ) -> List[SearchResult]:
+        query_vector: list[float],
+        limit: int | None = None,
+        filter_expression: str | None = None,
+        output_fields: list[str] | None = None,
+        **kwargs: Any,
+    ) -> list[SearchResult]:
         """
         Perform vector similarity search (async)
 
@@ -358,12 +368,12 @@ class VectorDBProvider(ABC):
     @abstractmethod
     def search_sync(
         self,
-        query_vector: List[float],
-        limit: Optional[int] = None,
-        filter_expression: Optional[str] = None,
-        output_fields: Optional[List[str]] = None,
-        **kwargs,
-    ) -> List[SearchResult]:
+        query_vector: list[float],
+        limit: int | None = None,
+        filter_expression: str | None = None,
+        output_fields: list[str] | None = None,
+        **kwargs: Any,
+    ) -> list[SearchResult]:
         """
         Perform vector similarity search (synchronous)
 
@@ -387,7 +397,7 @@ class VectorDBProvider(ABC):
         pass
 
     @abstractmethod
-    async def get_collection_info(self) -> Dict[str, Any]:
+    async def get_collection_info(self) -> dict[str, Any]:
         """
         Get information about the collection
 
@@ -399,7 +409,7 @@ class VectorDBProvider(ABC):
         """
         pass
 
-    def validate_query_vector(self, query_vector: List[float]) -> bool:
+    def validate_query_vector(self, query_vector: list[float]) -> bool:
         """
         Validate that a query vector has the expected dimension
 
@@ -439,7 +449,7 @@ class VectorDBProvider(ABC):
             else:
                 logger.warning(f"Attempted to set unknown config key: {key}")
 
-    def get_provider_info(self) -> Dict[str, Any]:
+    def get_provider_info(self) -> dict[str, Any]:
         """
         Get comprehensive information about the vector database provider
 

@@ -52,42 +52,35 @@ Quick Start:
     await provider.disconnect()
 """
 
-# Base classes and interfaces
-from .base import (
-    VectorDBProvider,
+from .base import (  # Base classes and interfaces
+    SearchMetricType,
+    SearchResult,
+    VectorDBCollectionConfig,
     VectorDBConfig,
     VectorDBConnectionConfig,
-    VectorDBCollectionConfig,
+    VectorDBProvider,
     VectorDBSearchConfig,
-    SearchResult,
-    SearchMetricType,
 )
-
-# Factory functions
-from .factory import (
-    create_vector_db_provider,
-    get_cached_vector_db_provider,
+from .exceptions import (  # Exceptions
+    VectorDBAuthenticationError,
+    VectorDBCollectionError,
+    VectorDBConfigError,
+    VectorDBConnectionError,
+    VectorDBDimensionMismatchError,
+    VectorDBIndexError,
+    VectorDBProviderError,
+    VectorDBRateLimitError,
+    VectorDBSearchError,
+)
+from .factory import (  # Factory functions
     clear_vector_db_provider_cache,
+    create_vector_db_provider,
+    get_available_vector_db_providers,
+    get_cached_vector_db_provider,
     get_default_vector_db_provider,
     register_vector_db_provider,
-    get_available_vector_db_providers,
 )
-
-# Provider implementations
-from .milvus_provider import MilvusProvider
-
-# Exceptions
-from .exceptions import (
-    VectorDBProviderError,
-    VectorDBConnectionError,
-    VectorDBSearchError,
-    VectorDBConfigError,
-    VectorDBDimensionMismatchError,
-    VectorDBCollectionError,
-    VectorDBAuthenticationError,
-    VectorDBRateLimitError,
-    VectorDBIndexError,
-)
+from .milvus_provider import MilvusProvider  # Provider implementations
 
 # Version
 __version__ = "1.0.0"
