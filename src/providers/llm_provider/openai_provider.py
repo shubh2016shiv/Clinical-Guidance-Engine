@@ -1,134 +1,120 @@
 """
-OpenAI Provider Implementation
+OpenAI Provider Implementation.
 
-This module provides a comprehensive implementation of the LLM provider interface
-using OpenAI's API, supporting both Chat Completions and Responses API with
-full streaming capabilities.
-
-Features:
-- Chat Completions API (standard interface)
-- Responses API (newer conversational interface)
-- Streaming and non-streaming modes
-- Robust error handling and retries
-- Token usage tracking
+Supports both Chat Completions and Responses APIs with full streaming
+capabilities.  All public methods honour the :class:`LLMProvider`
+contract defined in :mod:`.base`.
 """
 
-import asyncio
-from typing import List, Dict, Any, Optional, Union, AsyncIterator
-from openai import OpenAI, AsyncOpenAI
+from __future__ import annotations
+
+from collections.abc import AsyncIterator
+from typing import Any, Literal, overload
+
+from openai import AsyncOpenAI, OpenAI
 from openai.types.chat import ChatCompletion
 
 from src.config import get_settings
-from src.providers.exceptions import LLMProviderError
 from src.logs import get_logger
-from .base import LLMProvider, LLMConfig, LLMResponse, APIType, StreamMode
+
+from .base import APIType, LLMConfig, LLMProvider, LLMResponse, StreamMode
+from .exceptions import (
+    LLMProviderError,
+    LLMProviderExecutionError,
+    LLMProviderStreamingError,
+    LLMProviderTokenLimitError,
+)
 
 logger = get_logger(__name__)
 
 
 class OpenAIProvider(LLMProvider):
-    """
-    OpenAI provider implementation supporting multiple API types
+    """OpenAI provider supporting Chat Completions and Responses APIs.
 
-    This provider supports:
-    1. Chat Completions API - Standard chat interface
-    2. Responses API - Simplified conversational interface with built-in context
-
-    Both APIs support streaming and non-streaming modes.
+    Both APIs can operate in streaming and non-streaming mode.
     """
+
+    # ------------------------------------------------------------------
+    # Initialisation
+    # ------------------------------------------------------------------
 
     def __init__(
         self,
-        api_key: Optional[str] = None,
-        config: Optional[LLMConfig] = None,
-        model_name: Optional[str] = None,
-        api_type: Optional[APIType] = None,
-        stream_mode: Optional[StreamMode] = None,
-        **kwargs,
-    ):
-        """
-        Initialize the OpenAI provider
-
-        Args:
-            api_key: OpenAI API key (defaults to settings)
-            config: Complete LLMConfig object (takes precedence)
-            model_name: Model name (used if config not provided)
-            api_type: API type to use (used if config not provided)
-            stream_mode: Streaming mode (used if config not provided)
-            **kwargs: Additional configuration parameters
-
-        Raises:
-            LLMProviderError: If API key is missing
-        """
+        api_key: str | None = None,
+        config: LLMConfig | None = None,
+        model_name: str | None = None,
+        api_type: APIType | None = None,
+        stream_mode: StreamMode | None = None,
+        **kwargs: Any,
+    ) -> None:
         settings = get_settings()
-        self.api_key = api_key or settings.openai_api_key
+        self._api_key = api_key or settings.openai_api_key
 
-        if not self.api_key:
-            raise LLMProviderError("OpenAI API key is required")
+        if not self._api_key:
+            raise LLMProviderError("OpenAI API key is required.")
 
-        # Build configuration if not provided
+        # Build config when one isn't supplied ---------------------------------
         if config is None:
-            # Pull settings from config.py as fallback values if not in kwargs
-            # This ensures centralized control via config.py
-            temperature = kwargs.pop("temperature", None)
-            if temperature is None:
-                temperature = settings.openai_temperature
-
-            top_p = kwargs.pop("top_p", None)
-            if top_p is None:
-                top_p = settings.openai_top_p
-
-            max_tokens = kwargs.pop("max_tokens", None)
-            if max_tokens is None:
-                max_tokens = settings.openai_max_output_tokens
-
             config = LLMConfig(
                 model_name=model_name or settings.openai_model_name or "gpt-4",
                 api_type=api_type or APIType.CHAT_COMPLETION,
                 stream_mode=stream_mode or StreamMode.DISABLED,
                 token_limit=kwargs.pop("token_limit", 8192),
-                temperature=temperature,
-                top_p=top_p,
-                max_tokens=max_tokens,
+                temperature=kwargs.pop("temperature", settings.openai_temperature),
+                top_p=kwargs.pop("top_p", settings.openai_top_p),
+                max_tokens=kwargs.pop("max_tokens", settings.openai_max_output_tokens),
                 **kwargs,
             )
 
-        # Initialize parent
         super().__init__(config)
 
-        # Initialize OpenAI clients (both sync and async)
-        self.client = OpenAI(api_key=self.api_key)
-        self.async_client = AsyncOpenAI(api_key=self.api_key)
+        # Clients — async is the primary workhorse; sync kept for edge cases.
+        self._client = OpenAI(api_key=self._api_key)
+        self._async_client = AsyncOpenAI(api_key=self._api_key)
 
         logger.info(
-            f"OpenAI provider initialized - "
-            f"Model: {self.model_name}, API: {self.config.api_type.value}"
+            "OpenAI provider ready – model=%s api=%s",
+            self.model_name,
+            self.config.api_type.value,
         )
 
+    # ------------------------------------------------------------------
+    # Public API — execute
+    # ------------------------------------------------------------------
+
+    @overload
     async def execute(
-        self, prompt: str, system_prompt: Optional[str] = None, **kwargs
-    ) -> Union[LLMResponse, AsyncIterator[str]]:
-        """
-        Execute an LLM call based on configured API type
+        self,
+        prompt: str,
+        system_prompt: str | None = None,
+        *,
+        stream: Literal[False] = False,
+        **kwargs: Any,
+    ) -> LLMResponse: ...
 
-        This method routes to the appropriate API implementation based on
-        the provider's configuration.
+    @overload
+    async def execute(
+        self,
+        prompt: str,
+        system_prompt: str | None = None,
+        *,
+        stream: Literal[True],
+        **kwargs: Any,
+    ) -> AsyncIterator[str]: ...
 
-        Args:
-            prompt: User input/prompt
-            system_prompt: Optional system instructions
-            **kwargs: Additional API-specific parameters
+    async def execute(
+        self,
+        prompt: str,
+        system_prompt: str | None = None,
+        *,
+        stream: bool = False,
+        **kwargs: Any,
+    ) -> LLMResponse | AsyncIterator[str]:
+        # When the caller hasn't explicitly requested streaming, honour the
+        # provider-level StreamMode configuration.
+        if not stream:
+            stream = self.should_stream()
 
-        Returns:
-            LLMResponse or streaming iterator based on stream_mode
-
-        Raises:
-            LLMProviderError: If execution fails
-        """
-        # Determine if we should stream
-        stream = kwargs.pop("stream", self.should_stream())
-
-        # Route to appropriate API
         if self.config.api_type == APIType.RESPONSES:
             return await self.execute_responses_api(
                 input_message=prompt,
@@ -136,278 +122,244 @@ class OpenAIProvider(LLMProvider):
                 stream=stream,
                 **kwargs,
             )
-        else:  # Default to CHAT_COMPLETION
-            # Build messages list
-            messages = []
-            if system_prompt:
-                messages.append({"role": "system", "content": system_prompt})
-            messages.append({"role": "user", "content": prompt})
 
-            return await self.execute_chat_completion(
-                messages=messages, stream=stream, **kwargs
-            )
+        # Chat Completions path ------------------------------------------------
+        messages: list[dict[str, str]] = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": prompt})
+
+        return await self.execute_chat_completion(messages=messages, stream=stream, **kwargs)
+
+    # ------------------------------------------------------------------
+    # Chat Completions API
+    # ------------------------------------------------------------------
+
+    @overload
+    async def execute_chat_completion(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        stream: Literal[False] = False,
+        **kwargs: Any,
+    ) -> LLMResponse: ...
+
+    @overload
+    async def execute_chat_completion(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        stream: Literal[True],
+        **kwargs: Any,
+    ) -> AsyncIterator[str]: ...
 
     async def execute_chat_completion(
-        self, messages: List[Dict[str, str]], stream: bool = False, **kwargs
-    ) -> Union[LLMResponse, AsyncIterator[str]]:
-        """
-        Execute a Chat Completion API call
-
-        The Chat Completions API is OpenAI's standard interface for
-        conversational interactions.
-
-        Args:
-            messages: List of message dicts with 'role' and 'content'
-            stream: Whether to stream the response
-            **kwargs: Additional parameters (overrides config defaults)
-
-        Returns:
-            LLMResponse for non-streaming, AsyncIterator[str] for streaming
-
-        Raises:
-            LLMProviderError: If API call fails
-        """
+        self,
+        messages: list[dict[str, str]],
+        *,
+        stream: bool = False,
+        **kwargs: Any,
+    ) -> LLMResponse | AsyncIterator[str]:
         try:
-            # Validate token limits (estimate from messages)
             total_prompt = " ".join(msg.get("content", "") for msg in messages)
             if not self.validate_token_limit(total_prompt, kwargs.get("max_tokens")):
-                raise LLMProviderError("Token limit exceeded")
+                raise LLMProviderTokenLimitError("Token budget exceeded for chat completion.")
 
-            # Build API parameters
             params = self._build_chat_params(messages, stream, **kwargs)
 
-            # Execute based on streaming mode
             if stream:
                 return self._stream_chat_completion(params)
-            else:
-                return await self._execute_chat_completion(params)
+            return await self._execute_chat_completion(params)
 
-        except Exception as e:
-            error_msg = f"Chat completion execution failed: {str(e)}"
-            logger.error(error_msg, exc_info=True)
-            raise LLMProviderError(error_msg)
+        except LLMProviderError:
+            raise
+        except Exception as exc:
+            raise LLMProviderExecutionError(f"Chat completion failed: {exc}") from exc
+
+    # ------------------------------------------------------------------
+    # Responses API
+    # ------------------------------------------------------------------
+
+    @overload
+    async def execute_responses_api(
+        self,
+        input_message: str,
+        instructions: str | None = None,
+        previous_response_id: str | None = None,
+        tools: list[dict[str, Any]] | None = None,
+        *,
+        stream: Literal[False] = False,
+        **kwargs: Any,
+    ) -> LLMResponse: ...
+
+    @overload
+    async def execute_responses_api(
+        self,
+        input_message: str,
+        instructions: str | None = None,
+        previous_response_id: str | None = None,
+        tools: list[dict[str, Any]] | None = None,
+        *,
+        stream: Literal[True],
+        **kwargs: Any,
+    ) -> AsyncIterator[str]: ...
 
     async def execute_responses_api(
         self,
         input_message: str,
-        instructions: Optional[str] = None,
-        previous_response_id: Optional[str] = None,
-        tools: Optional[List[Dict[str, Any]]] = None,
+        instructions: str | None = None,
+        previous_response_id: str | None = None,
+        tools: list[dict[str, Any]] | None = None,
+        *,
         stream: bool = False,
-        **kwargs,
-    ) -> Union[LLMResponse, AsyncIterator[str]]:
-        """
-        Execute a Responses API call
-
-        The Responses API is a newer OpenAI interface that simplifies
-        conversational interactions with built-in context management.
-
-        Args:
-            input_message: User's input message
-            instructions: System-level instructions for the assistant
-            previous_response_id: ID of previous response for context continuity
-            tools: List of available tools/functions
-            stream: Whether to stream the response
-            **kwargs: Additional API parameters
-
-        Returns:
-            LLMResponse for non-streaming, AsyncIterator[str] for streaming
-
-        Raises:
-            LLMProviderError: If API call fails
-        """
+        **kwargs: Any,
+    ) -> LLMResponse | AsyncIterator[str]:
         try:
-            # Validate token limits
             full_prompt = f"{instructions or ''}\n{input_message}"
             if not self.validate_token_limit(full_prompt, kwargs.get("max_tokens")):
-                raise LLMProviderError("Token limit exceeded")
+                raise LLMProviderTokenLimitError("Token budget exceeded for Responses API call.")
 
-            # Build API parameters
-            params = {
+            params: dict[str, Any] = {
                 "model": kwargs.get("model", self.model_name),
                 "input": input_message,
             }
-
-            # Add optional parameters
             if instructions:
                 params["instructions"] = instructions
             if previous_response_id:
                 params["previous_response_id"] = previous_response_id
             if tools:
                 params["tools"] = tools
-                # CRITICAL DEBUG: Log tools being sent to API
-                logger.info(
-                    "[DEBUG] Tools being sent to Response API via LLM Provider",
-                    tool_count=len(tools),
-                    tools=tools,
+                logger.debug(
+                    "Responses API call includes %d tool(s): %s",
+                    len(tools),
+                    [t.get("name", "unknown") for t in tools if isinstance(t, dict)],
                 )
-                # Log detailed parameters for each function tool
-                for i, tool in enumerate(tools):
-                    if isinstance(tool, dict) and tool.get("type") == "function":
-                        # CRITICAL FIX: Responses API uses flat structure (not nested "function" object)
-                        # The tool dict has: {"type": "function", "name": "...", "description": "...", "parameters": {...}}
-                        func_name = tool.get("name", "unknown")
-                        params_dict = tool.get("parameters", {})
-                        props = params_dict.get("properties", {})
-                        logger.info(
-                            f"[DEBUG] LLM Provider Tool {i} before API call",
-                            function_name=func_name,
-                            has_parameters=bool(params_dict),
-                            properties_count=len(props),
-                            property_names=list(props.keys()) if props else [],
-                            required_fields=params_dict.get("required", []),
-                            full_parameters=params_dict,
-                        )
 
-            # Add streaming flag
             params["stream"] = stream
-
-            # Merge with config defaults and kwargs
             params.update(self._get_generation_params(**kwargs))
 
-            # Execute based on streaming mode
             if stream:
-                # For streaming Responses API, return raw stream object directly
-                # This allows StreamManager to process OpenAI SDK events properly
-                logger.info("Returning raw Responses API stream for StreamManager")
-                return await self.async_client.responses.create(**params)
-            else:
-                return await self._execute_responses_api(params)
+                return self._stream_responses_api(params)
+            return await self._execute_responses_api(params)
 
-        except Exception as e:
-            error_msg = f"Responses API execution failed: {str(e)}"
-            logger.error(error_msg, exc_info=True)
-            raise LLMProviderError(error_msg)
+        except LLMProviderError:
+            raise
+        except Exception as exc:
+            raise LLMProviderExecutionError(f"Responses API call failed: {exc}") from exc
+
+    # ------------------------------------------------------------------
+    # Raw access (for callers that need SDK-level objects)
+    # ------------------------------------------------------------------
+
+    async def execute_responses_api_raw(
+        self,
+        input_message: str,
+        instructions: str | None = None,
+        previous_response_id: str | None = None,
+        tools: list[dict[str, Any]] | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        """Execute a Responses API call and return the **raw** OpenAI SDK
+        stream object.
+
+        .. warning::
+
+            This method deliberately **breaks** the ``LLMProvider``
+            abstraction.  It exists solely for higher-level components
+            (e.g. ``StreamManager``) that need access to SDK-specific
+            event types.  Prefer :meth:`execute_responses_api` for all
+            other use-cases.
+        """
+        params: dict[str, Any] = {
+            "model": kwargs.get("model", self.model_name),
+            "input": input_message,
+            "stream": True,
+        }
+        if instructions:
+            params["instructions"] = instructions
+        if previous_response_id:
+            params["previous_response_id"] = previous_response_id
+        if tools:
+            params["tools"] = tools
+
+        params.update(self._get_generation_params(**kwargs))
+
+        logger.debug("Raw Responses API stream requested.")
+        return await self._async_client.responses.create(**params)
+
+    # ==================================================================
+    # Internal helpers
+    # ==================================================================
+
+    # -- parameter builders ---------------------------------------------------
 
     def _build_chat_params(
-        self, messages: List[Dict[str, str]], stream: bool, **kwargs
-    ) -> Dict[str, Any]:
-        """
-        Build parameters dictionary for Chat Completions API
-
-        Args:
-            messages: List of message dictionaries
-            stream: Whether to enable streaming
-            **kwargs: Additional parameter overrides
-
-        Returns:
-            Complete parameters dictionary for API call
-        """
-        params = {
+        self,
+        messages: list[dict[str, str]],
+        stream: bool,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        params: dict[str, Any] = {
             "model": kwargs.get("model", self.model_name),
             "messages": messages,
             "stream": stream,
         }
-
-        # Merge generation parameters from config and kwargs
         params.update(self._get_generation_params(**kwargs))
+        return params
+
+    def _get_generation_params(self, **kwargs: Any) -> dict[str, Any]:
+        """Return a dict of generation parameters, merging config defaults
+        with explicit *kwargs*.  Parameters that are unsupported by the
+        active API type are automatically excluded."""
+        params: dict[str, Any] = {}
+        is_responses = self.config.api_type == APIType.RESPONSES
+
+        # Temperature ---------------------------------------------------------
+        temperature = kwargs.get("temperature", self.config.temperature)
+        if temperature is not None and not is_responses:
+            params["temperature"] = temperature
+
+        # Max tokens ----------------------------------------------------------
+        max_tokens = kwargs.get("max_tokens", self.config.max_tokens)
+        if max_tokens is not None and not is_responses:
+            params["max_tokens"] = max_tokens
+
+        # Top-P ---------------------------------------------------------------
+        top_p = kwargs.get("top_p", self.config.top_p)
+        if top_p is not None and not is_responses:
+            params["top_p"] = top_p
+
+        # Chat Completions – only -------------------------------------------------
+        if not is_responses:
+            for attr in (
+                "frequency_penalty",
+                "presence_penalty",
+                "stop",
+            ):
+                value = kwargs.get(attr, getattr(self.config, attr, None))
+                if value is not None:
+                    params[attr] = value
 
         return params
 
-    def _get_generation_params(self, **kwargs) -> Dict[str, Any]:
-        """
-        Build generation parameters from config and kwargs
+    # -- Chat Completions execution -------------------------------------------
 
-        Priority: kwargs > config > defaults
+    async def _execute_chat_completion(self, params: dict[str, Any]) -> LLMResponse:
+        response: ChatCompletion = await self._async_client.chat.completions.create(**params)
 
-        CRITICAL: Responses API may not support temperature, top_p, max_output_tokens
-        on all models. These parameters are conditionally included based on API type.
-
-        Args:
-            **kwargs: Parameter overrides
-
-        Returns:
-            Dictionary of generation parameters
-        """
-        params = {}
-        is_responses_api = self.config.api_type == APIType.RESPONSES
-
-        # Temperature - only include if explicitly in kwargs for Responses API
-        # For Chat Completions, always include from config if available
-        if "temperature" in kwargs:
-            if not is_responses_api:
-                params["temperature"] = kwargs["temperature"]
-            # For Responses API, only include if explicitly requested
-            elif is_responses_api and kwargs.get("temperature") is not None:
-                params["temperature"] = kwargs["temperature"]
-        elif self.config.temperature is not None and not is_responses_api:
-            # Include from config only for Chat Completions API
-            params["temperature"] = self.config.temperature
-
-        # Max tokens - only include if explicitly in kwargs for Responses API
-        if "max_tokens" in kwargs:
-            if not is_responses_api:
-                params["max_tokens"] = kwargs["max_tokens"]
-            elif is_responses_api and kwargs.get("max_tokens") is not None:
-                params["max_tokens"] = kwargs["max_tokens"]
-        elif self.config.max_tokens is not None and not is_responses_api:
-            params["max_tokens"] = self.config.max_tokens
-
-        # Top P - only include if explicitly in kwargs for Responses API
-        if "top_p" in kwargs:
-            if not is_responses_api:
-                params["top_p"] = kwargs["top_p"]
-            elif is_responses_api and kwargs.get("top_p") is not None:
-                params["top_p"] = kwargs["top_p"]
-        elif self.config.top_p is not None and not is_responses_api:
-            params["top_p"] = self.config.top_p
-
-        # Frequency penalty - only for Chat Completions
-        if not is_responses_api:
-            if "frequency_penalty" in kwargs:
-                params["frequency_penalty"] = kwargs["frequency_penalty"]
-            elif self.config.frequency_penalty is not None:
-                params["frequency_penalty"] = self.config.frequency_penalty
-
-            # Presence penalty - only for Chat Completions
-            if "presence_penalty" in kwargs:
-                params["presence_penalty"] = kwargs["presence_penalty"]
-            elif self.config.presence_penalty is not None:
-                params["presence_penalty"] = self.config.presence_penalty
-
-            # Stop sequences - only for Chat Completions
-            if "stop" in kwargs:
-                params["stop"] = kwargs["stop"]
-            elif self.config.stop is not None:
-                params["stop"] = self.config.stop
-
-        return params
-
-    async def _execute_chat_completion(self, params: Dict[str, Any]) -> LLMResponse:
-        """
-        Execute non-streaming Chat Completion API call
-
-        Args:
-            params: API parameters
-
-        Returns:
-            LLMResponse with complete response
-
-        Raises:
-            LLMProviderError: If API call fails
-        """
-        response: ChatCompletion = await self.async_client.chat.completions.create(
-            **params
-        )
-
-        # Extract content
         if not response.choices or not response.choices[0].message:
-            raise LLMProviderError("No content in API response")
+            raise LLMProviderExecutionError("Chat completion returned no choices.")
 
-        content = response.choices[0].message.content or ""
-
-        # Build standardized response
+        choice = response.choices[0]
         return LLMResponse(
-            content=content,
+            content=choice.message.content or "",
             model=response.model,
             provider_type=self.provider_type,
             api_type=APIType.CHAT_COMPLETION,
             prompt_tokens=response.usage.prompt_tokens if response.usage else None,
-            completion_tokens=response.usage.completion_tokens
-            if response.usage
-            else None,
+            completion_tokens=response.usage.completion_tokens if response.usage else None,
             total_tokens=response.usage.total_tokens if response.usage else None,
-            finish_reason=response.choices[0].finish_reason,
+            finish_reason=choice.finish_reason,
             response_id=response.id,
             metadata={
                 "created": response.created,
@@ -415,95 +367,41 @@ class OpenAIProvider(LLMProvider):
             },
         )
 
-    async def _stream_chat_completion(
-        self, params: Dict[str, Any]
-    ) -> AsyncIterator[str]:
-        """
-        Execute streaming Chat Completion API call
-
-        Args:
-            params: API parameters
-
-        Yields:
-            Content chunks as they arrive
-
-        Raises:
-            LLMProviderError: If streaming fails
-        """
+    async def _stream_chat_completion(self, params: dict[str, Any]) -> AsyncIterator[str]:
         try:
-            stream = await self.async_client.chat.completions.create(**params)
-
+            stream = await self._async_client.chat.completions.create(**params)
             async for chunk in stream:
                 if chunk.choices and chunk.choices[0].delta.content:
                     yield chunk.choices[0].delta.content
+        except Exception as exc:
+            raise LLMProviderStreamingError(f"Chat completion stream failed: {exc}") from exc
 
-        except Exception as e:
-            error_msg = f"Streaming chat completion failed: {str(e)}"
-            logger.error(error_msg)
-            raise LLMProviderError(error_msg)
+    # -- Responses API execution ----------------------------------------------
 
-    async def _execute_responses_api(self, params: Dict[str, Any]) -> LLMResponse:
-        """
-        Execute non-streaming Responses API call
+    async def _execute_responses_api(self, params: dict[str, Any]) -> LLMResponse:
+        params_copy = {k: v for k, v in params.items() if k != "stream"}
+        response = await self._async_client.responses.create(**params_copy)
 
-        Note: This uses synchronous client with asyncio.to_thread because
-        the Responses API might not have full async support yet.
-
-        Args:
-            params: API parameters
-
-        Returns:
-            LLMResponse with complete response
-
-        Raises:
-            LLMProviderError: If API call fails
-        """
-        # Remove stream parameter for non-streaming call
-        params_copy = params.copy()
-        params_copy.pop("stream", None)
-
-        # Execute in thread pool to avoid blocking
-        response = await asyncio.to_thread(self.client.responses.create, **params_copy)
-
-        # Extract content (adapt based on actual response structure)
         content = getattr(response, "content", "") or str(response)
 
-        # Build standardized response
         return LLMResponse(
             content=content,
             model=params["model"],
             provider_type=self.provider_type,
             api_type=APIType.RESPONSES,
             response_id=getattr(response, "id", None),
-            metadata={
-                "response_object": response,
-            },
+            metadata={"response_object": response},
         )
 
-    async def _stream_responses_api(self, params: Dict[str, Any]) -> AsyncIterator[str]:
-        """
-        Execute streaming Responses API call
-
-        Args:
-            params: API parameters
-
-        Yields:
-            Content chunks as they arrive
-
-        Raises:
-            LLMProviderError: If streaming fails
-        """
+    async def _stream_responses_api(self, params: dict[str, Any]) -> AsyncIterator[str]:
         try:
-            stream = await self.async_client.responses.create(**params)
-
-            async for chunk in stream:
-                # Adapt based on actual streaming response structure
-                if hasattr(chunk, "content"):
-                    yield chunk.content
-                elif hasattr(chunk, "delta"):
-                    yield chunk.delta
-
-        except Exception as e:
-            error_msg = f"Streaming Responses API failed: {str(e)}"
-            logger.error(error_msg)
-            raise LLMProviderError(error_msg)
+            stream = await self._async_client.responses.create(**params)
+            async for event in stream:
+                # OpenAI streaming responses emit events with different
+                # shapes depending on the event type.
+                if hasattr(event, "delta") and event.delta:
+                    yield event.delta
+                elif hasattr(event, "content"):
+                    yield event.content
+        except Exception as exc:
+            raise LLMProviderStreamingError(f"Responses API stream failed: {exc}") from exc

@@ -1,170 +1,136 @@
 """
-LLM Provider Factory
+LLM Provider Factory.
 
-This module provides factory functions for creating and managing LLM provider instances.
-It supports:
-- Multiple provider types (OpenAI, Gemini, etc.)
-- Configuration-driven instantiation
-- Provider registry management
-- Default provider settings from config
+Centralised factory for creating and caching LLM provider instances.
+Supports a registry of named providers so that new backends can be
+plugged in without modifying the factory itself.
 """
 
-from typing import Dict, Optional, Type
+from __future__ import annotations
+
 from functools import lru_cache
+from typing import Any
 
 from src.config import get_settings
-from src.providers.exceptions import LLMProviderError
 from src.logs import get_logger
-from .base import LLMProvider, LLMConfig, APIType, StreamMode
+
+from .base import APIType, LLMConfig, LLMProvider, StreamMode
+from .exceptions import LLMProviderError
 from .openai_provider import OpenAIProvider
 
 logger = get_logger(__name__)
 
+# ---------------------------------------------------------------------------
+# Provider registry
+# ---------------------------------------------------------------------------
 
-# Provider registry - maps provider names to their implementation classes
-PROVIDER_REGISTRY: Dict[str, Type[LLMProvider]] = {
+PROVIDER_REGISTRY: dict[str, type[LLMProvider]] = {
     "openai": OpenAIProvider,
-    # Add more providers here as they're implemented
+    # Register additional providers here, e.g.:
     # "anthropic": AnthropicProvider,
     # "gemini": GeminiProvider,
 }
 
 
-def register_provider(name: str, provider_class: Type[LLMProvider]) -> None:
-    """
-    Register a new provider implementation
-
-    This allows dynamic registration of custom provider implementations
-    without modifying the factory code.
+def register_provider(name: str, provider_class: type[LLMProvider]) -> None:
+    """Register a new provider implementation at runtime.
 
     Args:
-        name: Provider name/identifier (e.g., "openai", "custom")
-        provider_class: Provider class that implements LLMProvider interface
-
-    Raises:
-        ValueError: If provider is already registered
+        name: Unique provider slug (case-insensitive).
+        provider_class: Class that implements :class:`LLMProvider`.
     """
     name = name.lower()
     if name in PROVIDER_REGISTRY:
-        logger.warning(f"Overwriting existing provider registration: {name}")
-
+        logger.warning("Overwriting existing provider registration: %s", name)
     PROVIDER_REGISTRY[name] = provider_class
-    logger.info(f"Registered provider: {name} -> {provider_class.__name__}")
+    logger.info("Registered provider: %s -> %s", name, provider_class.__name__)
 
 
 def get_available_providers() -> list[str]:
-    """
-    Get list of available provider names
-
-    Returns:
-        List of registered provider identifiers
-    """
+    """Return the slugs of all registered providers."""
     return list(PROVIDER_REGISTRY.keys())
 
 
-def create_llm_provider(
-    provider_type: Optional[str] = None,
-    config: Optional[LLMConfig] = None,
-    model_name: Optional[str] = None,
-    api_type: Optional[APIType] = None,
-    stream_mode: Optional[StreamMode] = None,
-    **kwargs,
-) -> LLMProvider:
-    """
-    Factory function to create an LLM provider instance
+# ---------------------------------------------------------------------------
+# Factory
+# ---------------------------------------------------------------------------
 
-    This is the main entry point for creating providers. It supports multiple
-    ways of specifying configuration:
-    1. Complete LLMConfig object
-    2. Individual parameters (model_name, api_type, etc.)
-    3. Settings from environment/config file
+
+def create_llm_provider(
+    provider_type: str | None = None,
+    config: LLMConfig | None = None,
+    model_name: str | None = None,
+    api_type: APIType | None = None,
+    stream_mode: StreamMode | None = None,
+    **kwargs: Any,
+) -> LLMProvider:
+    """Create and return a configured LLM provider instance.
+
+    Configuration can be supplied via a pre-built :class:`LLMConfig`
+    object, as individual keyword arguments, or through application
+    settings (``config.py`` / ``.env``).
 
     Args:
-        provider_type: Provider identifier (e.g., "openai", "gemini")
-                      Defaults to settings.default_llm_provider
-        config: Complete LLMConfig object (takes precedence)
-        model_name: Model name to use
-        api_type: API type (chat_completion, responses, etc.)
-        stream_mode: Streaming mode (enabled, disabled, auto)
-        **kwargs: Additional configuration parameters and provider-specific args
+        provider_type: Provider slug (e.g. ``"openai"``).  Defaults to
+            the application setting ``default_llm_provider``, or
+            ``"openai"`` if none is set.
+        config: Complete :class:`LLMConfig` — takes precedence over
+            individual parameters.
+        model_name: Override the model name.
+        api_type: Override the API type.
+        stream_mode: Override the streaming mode.
+        **kwargs: Additional parameters forwarded to the provider
+            constructor.
 
     Returns:
-        Configured LLM provider instance
+        A fully initialised :class:`LLMProvider`.
 
     Raises:
-        LLMProviderError: If provider type is not supported or initialization fails
-
-    Examples:
-        # Using defaults from config
-        provider = create_llm_provider()
-
-        # Specify provider and model
-        provider = create_llm_provider(
-            provider_type="openai",
-            model_name="gpt-4-turbo"
-        )
-
-        # Using complete config object
-        config = LLMConfig(
-            model_name="gpt-4",
-            api_type=APIType.RESPONSES,
-            stream_mode=StreamMode.ENABLED,
-            temperature=0.8
-        )
-        provider = create_llm_provider(provider_type="openai", config=config)
-
-        # Enable streaming with Responses API
-        provider = create_llm_provider(
-            provider_type="openai",
-            model_name="gpt-4",
-            api_type=APIType.RESPONSES,
-            stream_mode=StreamMode.ENABLED
-        )
+        LLMProviderError: If the provider slug is unknown or
+            initialisation fails.
     """
     settings = get_settings()
-
-    # Determine provider type
     provider_type = (provider_type or settings.default_llm_provider or "openai").lower()
 
-    # Validate provider exists
     if provider_type not in PROVIDER_REGISTRY:
         supported = ", ".join(get_available_providers())
-        error_msg = (
-            f"Unsupported LLM provider: '{provider_type}'. "
-            f"Supported providers: {supported}"
+        raise LLMProviderError(
+            f"Unsupported LLM provider: '{provider_type}'. Supported: {supported}"
         )
-        logger.error(error_msg)
-        raise LLMProviderError(error_msg)
 
-    # Get provider class
     provider_class = PROVIDER_REGISTRY[provider_type]
 
     logger.debug(
-        f"Creating LLM provider - Type: {provider_type}, "
-        f"Model: {model_name or 'default'}, "
-        f"API: {api_type.value if api_type else 'default'}"
+        "Creating LLM provider – type=%s model=%s api=%s",
+        provider_type,
+        model_name or "default",
+        api_type.value if api_type else "default",
     )
 
     try:
-        # Create provider instance
-        # Pass all parameters and let the provider handle them
-        # Note: Settings from config.py are automatically pulled by provider __init__
-        # if not explicitly provided in kwargs. This ensures centralized control.
-        provider = provider_class(
-            config=config,
-            model_name=model_name,
-            api_type=api_type,
-            stream_mode=stream_mode,
-            **kwargs,
-        )
+        # Build the constructor kwargs, omitting None values so that
+        # each provider's own defaults (e.g. from Settings) can kick in.
+        init_kwargs: dict[str, Any] = {}
+        if config is not None:
+            init_kwargs["config"] = config
+        if model_name is not None:
+            init_kwargs["model_name"] = model_name
+        if api_type is not None:
+            init_kwargs["api_type"] = api_type
+        if stream_mode is not None:
+            init_kwargs["stream_mode"] = stream_mode
+        init_kwargs.update(kwargs)
 
-        logger.info(f"Successfully created {provider_type} provider")
+        provider = provider_class(**init_kwargs)
+        logger.info("Created %s provider successfully.", provider_type)
         return provider
+    except Exception as exc:
+        raise LLMProviderError(f"Failed to initialise '{provider_type}' provider: {exc}") from exc
 
-    except Exception as e:
-        error_msg = f"Failed to initialize {provider_type} provider: {str(e)}"
-        logger.error(error_msg, exc_info=True)
-        raise LLMProviderError(error_msg)
+
+# ---------------------------------------------------------------------------
+# Caching
+# ---------------------------------------------------------------------------
 
 
 @lru_cache(maxsize=10)
@@ -174,30 +140,35 @@ def get_cached_provider(
     api_type: str = "chat_completion",
     stream_mode: str = "disabled",
 ) -> LLMProvider:
-    """
-    Get or create a cached provider instance
+    """Return a cached provider, or create and cache a new one.
 
-    This function caches provider instances to avoid repeated initialization
-    overhead. Useful when using the same provider configuration multiple times.
-
-    Note: Only use caching when provider configuration is stable. For dynamic
-    configurations, use create_llm_provider() directly.
+    Only use this when provider configuration is **stable**.  For
+    dynamic configurations use :func:`create_llm_provider` directly.
 
     Args:
-        provider_type: Provider identifier
-        model_name: Model name
-        api_type: API type as string
-        stream_mode: Stream mode as string
-
-    Returns:
-        Cached or newly created provider instance
+        provider_type: Provider slug.
+        model_name: Model name.
+        api_type: API type as a string (``"chat_completion"`` or
+            ``"responses"``).
+        stream_mode: Stream mode as a string (``"enabled"``,
+            ``"disabled"``, or ``"auto"``).
 
     Raises:
-        LLMProviderError: If provider creation fails
+        ValueError: If *api_type* or *stream_mode* is not a valid enum value.
     """
-    # Convert string enums to actual enums
-    api_type_enum = APIType(api_type)
-    stream_mode_enum = StreamMode(stream_mode)
+    try:
+        api_type_enum = APIType(api_type)
+    except ValueError as exc:
+        raise ValueError(
+            f"Invalid api_type '{api_type}'. Valid options: {[e.value for e in APIType]}"
+        ) from exc
+
+    try:
+        stream_mode_enum = StreamMode(stream_mode)
+    except ValueError as exc:
+        raise ValueError(
+            f"Invalid stream_mode '{stream_mode}'. Valid options: {[e.value for e in StreamMode]}"
+        ) from exc
 
     return create_llm_provider(
         provider_type=provider_type,
@@ -208,52 +179,30 @@ def get_cached_provider(
 
 
 def clear_provider_cache() -> None:
-    """
-    Clear the provider cache
-
-    Call this when you need to force recreation of cached providers,
-    for example after configuration changes.
-    """
+    """Invalidate all cached provider instances."""
     get_cached_provider.cache_clear()
-    logger.info("Provider cache cleared")
+    logger.info("Provider cache cleared.")
+
+
+# ---------------------------------------------------------------------------
+# Convenience
+# ---------------------------------------------------------------------------
 
 
 def get_default_provider() -> LLMProvider:
-    """
-    Get the default LLM provider based on application settings
-
-    This is a convenience function that creates a provider using
-    all defaults from the configuration system.
-
-    Returns:
-        Default configured provider instance
-
-    Raises:
-        LLMProviderError: If provider creation fails
-    """
+    """Return a provider configured entirely from application settings."""
     settings = get_settings()
-
     return create_llm_provider(
         provider_type=settings.default_llm_provider,
         model_name=settings.default_model_name,
     )
 
 
-# Convenience function alias for backward compatibility
-def get_llm_provider(provider_type: str = "openai", **kwargs) -> LLMProvider:
+def get_llm_provider(provider_type: str = "openai", **kwargs: Any) -> LLMProvider:
+    """Legacy alias for :func:`create_llm_provider`.
+
+    .. deprecated::
+        Use :func:`create_llm_provider` in new code.
     """
-    Legacy factory function - use create_llm_provider() for new code
-
-    This function is maintained for backward compatibility with existing code.
-
-    Args:
-        provider_type: Provider identifier
-        **kwargs: Additional configuration parameters
-
-    Returns:
-        Configured LLM provider instance
-    """
-    logger.debug(
-        "Using legacy get_llm_provider() - consider using create_llm_provider()"
-    )
+    logger.debug("get_llm_provider() is deprecated — use create_llm_provider().")
     return create_llm_provider(provider_type=provider_type, **kwargs)

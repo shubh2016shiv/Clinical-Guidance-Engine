@@ -1,78 +1,57 @@
 """
-LLM Provider Module
+LLM Provider Module.
 
-This module provides a centralized, professional interface for working with
-Large Language Model providers.
+Provides a centralised interface for working with Large Language Model
+providers (OpenAI, Gemini, Anthropic, etc.).
 
-Key Features:
-- Multiple provider support (OpenAI, Gemini, etc.)
-- Dual API support (Chat Completions & Responses API)
-- Streaming and non-streaming modes
-- Flexible configuration management
-- Type-safe interfaces with dataclasses
-- Comprehensive error handling
-- Token validation and estimation
+Key features:
+- Multiple provider support via a pluggable registry.
+- Dual API support (Chat Completions & Responses API).
+- Streaming and non-streaming modes.
+- Type-safe configuration and response dataclasses.
+- Comprehensive, correctly-chained exception hierarchy.
 
-Quick Start:
-    from src.providers import create_llm_provider, APIType, StreamMode
+Quick start::
 
-    # Create a provider
+    from src.providers.llm_provider import create_llm_provider, APIType, StreamMode
+
     provider = create_llm_provider(
         provider_type="openai",
-        model_name="gpt-4",
+        model_name="gpt-4o",
         api_type=APIType.RESPONSES,
-        stream_mode=StreamMode.ENABLED
+        stream_mode=StreamMode.ENABLED,
     )
 
-    # Execute
     response = await provider.execute(
         prompt="Your prompt here",
-        system_prompt="System instructions"
+        system_prompt="System instructions",
     )
-
-See usage_examples.py for comprehensive examples.
 """
 
-# Base classes and interfaces
-from .base import (
-    LLMProvider,
-    LLMConfig,
-    LLMResponse,
-    APIType,
-    StreamMode,
-)
-
-# Factory functions
-from .factory import (
-    create_llm_provider,
-    get_llm_provider,  # Legacy
-    get_default_provider,
-    get_cached_provider,
-    clear_provider_cache,
-    register_provider,
-    get_available_providers,
-)
-
-# Provider implementations
-from .openai_provider import OpenAIProvider
-
-# Exceptions
+from .base import APIType, LLMConfig, LLMProvider, LLMResponse, StreamMode
 from .exceptions import (
-    LLMProviderError,
-    LLMProviderInitializationError,
-    LLMProviderExecutionError,
-    LLMProviderTokenLimitError,
-    LLMProviderStreamingError,
     LLMProviderAuthenticationError,
+    LLMProviderError,
+    LLMProviderExecutionError,
+    LLMProviderInitializationError,
     LLMProviderRateLimitError,
+    LLMProviderStreamingError,
+    LLMProviderTokenLimitError,
     LLMProviderUnsupportedOperationError,
 )
+from .factory import (
+    clear_provider_cache,
+    create_llm_provider,
+    get_available_providers,
+    get_cached_provider,
+    get_default_provider,
+    get_llm_provider,  # legacy
+    register_provider,
+)
+from .openai_provider import OpenAIProvider
 
+__version__ = "2.1.0"
 
-# Version
-__version__ = "2.0.0"
-
-# Public API
 __all__ = [
     # Base classes
     "LLMProvider",
@@ -80,7 +59,7 @@ __all__ = [
     "LLMResponse",
     "APIType",
     "StreamMode",
-    # Factory functions
+    # Factory
     "create_llm_provider",
     "get_llm_provider",
     "get_default_provider",

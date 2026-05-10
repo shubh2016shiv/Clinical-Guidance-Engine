@@ -1,77 +1,80 @@
 """
-Abstract LLM Provider Interface
+Abstract LLM Provider Interface.
 
-This module provides an abstract interface for LLM providers,
-allowing easy extension to support different AI models and APIs.
-
-The interface supports:
-- Multiple API types (Chat Completions, Responses, etc.)
-- Streaming and non-streaming responses
-- Token validation and estimation
-- Flexible configuration management
+Defines the contract that every LLM provider implementation must fulfil.
+The interface supports multiple API paradigms (chat-completion, responses,
+etc.), streaming and non-streaming modes, and token-budget validation.
 """
 
+from __future__ import annotations
+
 from abc import ABC, abstractmethod
-from typing import List, Dict, Any, Optional, Union, AsyncIterator
-from enum import Enum
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
+from enum import Enum
+from typing import Any
 
 from src.logs import get_logger
 
 logger = get_logger(__name__)
 
 
+# ---------------------------------------------------------------------------
+# Enums
+# ---------------------------------------------------------------------------
+
+
 class APIType(Enum):
-    """Supported API types for LLM providers"""
+    """Supported LLM API paradigms."""
 
     CHAT_COMPLETION = "chat_completion"
     RESPONSES = "responses"
-    COMPLETION = "completion"
+    COMPLETION = "completion"  # legacy text-completion
 
 
 class StreamMode(Enum):
-    """Streaming modes for LLM responses"""
+    """Streaming behaviour for LLM responses."""
 
     DISABLED = "disabled"
     ENABLED = "enabled"
-    AUTO = "auto"  # Provider decides based on context
+    AUTO = "auto"  # provider decides per-request
+
+
+# ---------------------------------------------------------------------------
+# Configuration & Response dataclasses
+# ---------------------------------------------------------------------------
 
 
 @dataclass
 class LLMConfig:
-    """
-    Configuration container for LLM provider settings
+    """Provider-agnostic configuration for an LLM provider."""
 
-    This dataclass centralizes all configuration options for LLM providers,
-    making it easy to manage and extend settings.
-    """
-
-    # Model configuration
+    # ---- Model selection ---------------------------------------------------
     model_name: str
     api_type: APIType = APIType.CHAT_COMPLETION
     token_limit: int = 8192
 
-    # Generation parameters
+    # ---- Generation parameters ---------------------------------------------
     temperature: float = 0.7
-    max_tokens: Optional[int] = None
-    top_p: Optional[float] = None
-    frequency_penalty: Optional[float] = None
-    presence_penalty: Optional[float] = None
-    stop: Optional[Union[str, List[str]]] = None
+    max_tokens: int | None = None
+    top_p: float | None = None
+    frequency_penalty: float | None = None
+    presence_penalty: float | None = None
+    stop: str | list[str] | None = None
 
-    # Streaming configuration
+    # ---- Streaming ---------------------------------------------------------
     stream_mode: StreamMode = StreamMode.DISABLED
 
-    # API-specific settings
-    timeout: int = 60  # Request timeout in seconds
+    # ---- Resilience --------------------------------------------------------
+    timeout: int = 60  # seconds
     max_retries: int = 3
-    retry_delay: float = 1.0  # Initial retry delay in seconds
+    retry_delay: float = 1.0  # initial back-off in seconds
 
-    # Additional provider-specific settings
-    extra_params: Dict[str, Any] = field(default_factory=dict)
+    # ---- Extension point ---------------------------------------------------
+    extra_params: dict[str, Any] = field(default_factory=dict)
 
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert config to dictionary for logging/serialization"""
+    def to_dict(self) -> dict[str, Any]:
+        """Serialise config (excluding secrets) for logging."""
         return {
             "model_name": self.model_name,
             "api_type": self.api_type.value,
@@ -86,32 +89,25 @@ class LLMConfig:
 
 @dataclass
 class LLMResponse:
-    """
-    Standardized response object from LLM providers
-
-    This class ensures consistent response structure across different
-    provider implementations and API types.
-    """
+    """Normalised response returned by any LLM provider."""
 
     content: str
     model: str
     provider_type: str
     api_type: APIType
 
-    # Usage statistics
-    prompt_tokens: Optional[int] = None
-    completion_tokens: Optional[int] = None
-    total_tokens: Optional[int] = None
+    # ---- Usage (tokens) ----------------------------------------------------
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+    total_tokens: int | None = None
 
-    # Response metadata
-    finish_reason: Optional[str] = None
-    response_id: Optional[str] = None
+    # ---- Metadata ----------------------------------------------------------
+    finish_reason: str | None = None
+    response_id: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
 
-    # Additional provider-specific data
-    metadata: Dict[str, Any] = field(default_factory=dict)
-
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert response to dictionary"""
+    def to_dict(self) -> dict[str, Any]:
+        """Serialise response for downstream consumers."""
         return {
             "content": self.content,
             "model": self.model,
@@ -126,190 +122,213 @@ class LLMResponse:
         }
 
 
+# ---------------------------------------------------------------------------
+# Abstract Provider
+# ---------------------------------------------------------------------------
+
+
 class LLMProvider(ABC):
-    """
-    Abstract base class for LLM providers
+    """Abstract base class for every LLM provider implementation.
 
-    This class defines the interface that all LLM provider implementations
-    must follow, ensuring consistency and interchangeability.
+    Subclasses must implement at least ``execute_chat_completion``.
+    The ``execute_responses_api`` method is *optional* — providers that
+    do not support it should raise
+    :exc:`~.exceptions.LLMProviderUnsupportedOperationError`.
     """
 
-    def __init__(self, config: LLMConfig):
-        """
-        Initialize the LLM provider with configuration
+    # ------------------------------------------------------------------
+    # Initialisation
+    # ------------------------------------------------------------------
+
+    def __init__(self, config: LLMConfig, **kwargs: Any) -> None:
+        """Initialise the provider.
 
         Args:
-            config: LLMConfig object containing provider settings
+            config: Fully populated :class:`LLMConfig`.
+            **kwargs: Provider-specific keyword arguments (e.g. ``api_key``,
+                ``model_name``).  Subclasses may consume these in their own
+                ``__init__`` before calling ``super().__init__(config)``.
         """
         self.config = config
         self.model_name = config.model_name
         self.token_limit = config.token_limit
-        self.provider_type = self.__class__.__name__.lower().replace("provider", "")
+
+        # Derive a stable, human-readable provider-type slug.
+        cls_name = self.__class__.__name__
+        if cls_name.endswith("Provider"):
+            cls_name = cls_name[: -len("Provider")]
+        self.provider_type = cls_name.lower()
 
         logger.info(
-            f"Initialized {self.provider_type} provider - "
-            f"Model: {self.model_name}, API: {config.api_type.value}, "
-            f"Stream: {config.stream_mode.value}"
+            "Initialised %s provider – model=%s api=%s stream=%s",
+            self.provider_type,
+            self.model_name,
+            config.api_type.value,
+            config.stream_mode.value,
         )
+
+    # ------------------------------------------------------------------
+    # Core abstract methods
+    # ------------------------------------------------------------------
 
     @abstractmethod
     async def execute(
-        self, prompt: str, system_prompt: Optional[str] = None, **kwargs
-    ) -> Union[LLMResponse, AsyncIterator[str]]:
-        """
-        Execute an LLM call with the given prompt
-
-        This is the main entry point for LLM execution. Based on configuration,
-        it returns either a complete response or a streaming iterator.
+        self,
+        prompt: str,
+        system_prompt: str | None = None,
+        *,
+        stream: bool = False,
+        **kwargs: Any,
+    ) -> LLMResponse | AsyncIterator[str]:
+        """Execute an LLM call, routing to the appropriate API internally.
 
         Args:
-            prompt: The user prompt/input
-            system_prompt: Optional system instructions
-            **kwargs: Additional provider-specific arguments
+            prompt: The user prompt.
+            system_prompt: Optional system-level instructions.
+            stream: When ``True``, return an ``AsyncIterator[str]`` of
+                content chunks.  When ``False`` (default), return a
+                complete :class:`LLMResponse`.
+            **kwargs: Additional provider-specific parameters.
 
         Returns:
-            LLMResponse object for non-streaming, or AsyncIterator for streaming
-
-        Raises:
-            LLMProviderError: If execution fails
+            ``LLMResponse`` for non-streaming, ``AsyncIterator[str]``
+            for streaming.
         """
-        pass
+        ...
 
     @abstractmethod
     async def execute_chat_completion(
-        self, messages: List[Dict[str, str]], stream: bool = False, **kwargs
-    ) -> Union[LLMResponse, AsyncIterator[str]]:
-        """
-        Execute a chat completion API call
+        self,
+        messages: list[dict[str, str]],
+        *,
+        stream: bool = False,
+        **kwargs: Any,
+    ) -> LLMResponse | AsyncIterator[str]:
+        """Execute a chat-completion API call.
 
         Args:
-            messages: List of message dictionaries with 'role' and 'content'
-            stream: Whether to stream the response
-            **kwargs: Additional API-specific parameters
+            messages: Ordered list of message dicts with ``role`` and
+                ``content`` keys.
+            stream: When ``True``, return an async iterator of content
+                chunks instead of a complete ``LLMResponse``.
+            **kwargs: Additional provider-specific parameters.
 
         Returns:
-            LLMResponse or streaming iterator
-
-        Raises:
-            LLMProviderError: If execution fails
+            ``LLMResponse`` for non-streaming, ``AsyncIterator[str]``
+            for streaming.
         """
-        pass
+        ...
 
-    @abstractmethod
+    # ------------------------------------------------------------------
+    # Optional / specialised methods
+    # ------------------------------------------------------------------
+
     async def execute_responses_api(
         self,
         input_message: str,
-        instructions: Optional[str] = None,
-        previous_response_id: Optional[str] = None,
-        tools: Optional[List[Dict[str, Any]]] = None,
+        instructions: str | None = None,
+        previous_response_id: str | None = None,
+        tools: list[dict[str, Any]] | None = None,
+        *,
         stream: bool = False,
-        **kwargs,
-    ) -> Union[LLMResponse, AsyncIterator[str]]:
+        **kwargs: Any,
+    ) -> LLMResponse | AsyncIterator[str]:
+        """Execute an OpenAI Responses-API call.
+
+        The default implementation raises
+        :exc:`~.exceptions.LLMProviderUnsupportedOperationError`.
+        Providers that support the Responses API **must** override this
+        method.
+
+        .. note::
+
+            This method is deliberately **not** abstract so that
+            non-OpenAI providers are not forced to implement it.
         """
-        Execute a Responses API call (OpenAI-specific)
+        from .exceptions import LLMProviderUnsupportedOperationError
 
-        The Responses API is a newer interface that simplifies interactions
-        with conversational context and tool use.
+        raise LLMProviderUnsupportedOperationError(
+            f"{self.provider_type} does not support the Responses API."
+        )
 
-        Args:
-            input_message: User input message
-            instructions: System-level instructions
-            previous_response_id: ID of previous response for context
-            tools: List of available tools/functions
-            stream: Whether to stream the response
-            **kwargs: Additional API-specific parameters
+    # ------------------------------------------------------------------
+    # Token helpers
+    # ------------------------------------------------------------------
 
-        Returns:
-            LLMResponse or streaming iterator
+    @staticmethod
+    def estimate_tokens(text: str) -> int:
+        """Return a conservative token-count estimate for *text*.
 
-        Raises:
-            LLMProviderError: If execution fails
+        Uses ``tiktoken`` when available; falls back to the ``chars /
+        4`` heuristic otherwise.  The fallback is intentionally
+        conservative (it over-estimates) to avoid accidental context-
+        window violations.
         """
-        pass
+        try:
+            import tiktoken
 
-    def estimate_tokens(self, text: str) -> int:
-        """
-        Estimate the number of tokens in the given text
-
-        This is a simple approximation. For production use, consider
-        using provider-specific tokenizers (e.g., tiktoken for OpenAI).
-
-        Args:
-            text: Text to estimate tokens for
-
-        Returns:
-            Estimated token count
-        """
-        # Rough estimation: 1 token ≈ 4 characters for English text
-        # This is conservative; actual tokenization may vary
-        return len(text) // 4
+            encoding = tiktoken.get_encoding("cl100k_base")
+            return len(encoding.encode(text))
+        except Exception:
+            # Fallback: ~4 characters per token for English text.
+            return max(1, len(text) // 4)
 
     def validate_token_limit(
         self,
         prompt: str,
-        max_tokens: Optional[int] = None,
-        system_prompt: Optional[str] = None,
+        max_tokens: int | None = None,
+        system_prompt: str | None = None,
     ) -> bool:
-        """
-        Validate that the prompt and expected response fit within token limits
-
-        Args:
-            prompt: The user prompt text
-            max_tokens: Maximum tokens for response (uses config default if None)
-            system_prompt: Optional system prompt to include in calculation
-
-        Returns:
-            True if within limits, False otherwise
-        """
-        # Calculate total input tokens
+        """Return ``True`` when *prompt* + expected response fits within
+        the model's token budget."""
         prompt_tokens = self.estimate_tokens(prompt)
         if system_prompt:
             prompt_tokens += self.estimate_tokens(system_prompt)
 
-        # Determine max response tokens
-        response_tokens = (
-            max_tokens or self.config.max_tokens or (self.token_limit - prompt_tokens)
-        )
+        # Resolve response allocation: explicit > config > remaining budget.
+        if max_tokens is not None:
+            response_tokens = max_tokens
+        elif self.config.max_tokens is not None:
+            response_tokens = self.config.max_tokens
+        else:
+            response_tokens = max(0, self.token_limit - prompt_tokens)
 
-        total_tokens = prompt_tokens + response_tokens
+        total = prompt_tokens + response_tokens
 
-        if total_tokens > self.token_limit:
+        if total > self.token_limit:
             logger.warning(
-                f"Token limit exceeded: {total_tokens} > {self.token_limit} "
-                f"(input: {prompt_tokens}, response: {response_tokens})"
+                "Token limit exceeded: %d > %d (input=%d, response=%d)",
+                total,
+                self.token_limit,
+                prompt_tokens,
+                response_tokens,
             )
             return False
 
         logger.debug(
-            f"Token validation passed: {total_tokens}/{self.token_limit} "
-            f"(input: {prompt_tokens}, response: {response_tokens})"
+            "Token budget ok: %d / %d (input=%d, response=%d)",
+            total,
+            self.token_limit,
+            prompt_tokens,
+            response_tokens,
         )
         return True
 
-    def update_config(self, **kwargs) -> None:
-        """
-        Update provider configuration dynamically
+    # ------------------------------------------------------------------
+    # Utility
+    # ------------------------------------------------------------------
 
-        This allows runtime modification of settings without recreating
-        the provider instance.
-
-        Args:
-            **kwargs: Configuration parameters to update
-        """
+    def update_config(self, **kwargs: Any) -> None:
+        """Update one or more config values at runtime."""
         for key, value in kwargs.items():
             if hasattr(self.config, key):
                 setattr(self.config, key, value)
-                logger.debug(f"Updated config: {key} = {value}")
+                logger.debug("config updated: %s = %s", key, value)
             else:
-                logger.warning(f"Attempted to set unknown config key: {key}")
+                logger.warning("Ignored unknown config key: %s", key)
 
-    def get_model_info(self) -> Dict[str, Any]:
-        """
-        Get comprehensive information about the LLM provider
-
-        Returns:
-            Dictionary with provider information and current configuration
-        """
+    def get_model_info(self) -> dict[str, Any]:
+        """Return a snapshot of the provider's identity & configuration."""
         return {
             "provider_type": self.provider_type,
             "model_name": self.model_name,
@@ -320,17 +339,10 @@ class LLMProvider(ABC):
         }
 
     def should_stream(self) -> bool:
-        """
-        Determine if responses should be streamed based on configuration
-
-        Returns:
-            True if streaming should be enabled
-        """
+        """Return ``True`` when the provider is configured to stream."""
         if self.config.stream_mode == StreamMode.ENABLED:
             return True
-        elif self.config.stream_mode == StreamMode.DISABLED:
+        if self.config.stream_mode == StreamMode.DISABLED:
             return False
-        else:  # AUTO mode
-            # In AUTO mode, providers can implement custom logic
-            # Default: disable streaming
-            return False
+        # AUTO — default to non-streaming.
+        return False

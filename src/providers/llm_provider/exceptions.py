@@ -1,79 +1,75 @@
-class LLMProviderError(Exception):
-    """
-    Base exception for LLM provider errors
+"""
+LLM Provider Exception Hierarchy.
 
-    All provider-specific exceptions should inherit from this class
-    to allow for unified error handling.
-    """
+All exceptions inherit from the shared ``ProviderError`` base class
+(``src.providers.exceptions``) so that a single ``except ProviderError``
+can catch failures from *any* provider subsystem.
+"""
 
-    pass
+from __future__ import annotations
+
+from src.providers.exceptions import ProviderError
+
+
+class LLMProviderError(ProviderError):
+    """Base exception for LLM provider errors.
+
+    Every LLM-provider-specific exception inherits from this class so
+    callers can handle all LLM failures with a single ``except`` clause.
+    """
 
 
 class LLMProviderInitializationError(LLMProviderError):
-    """
-    Raised when provider initialization fails
+    """Raised when provider initialisation fails.
 
-    Examples: Missing API keys, invalid configuration, network issues
+    Common causes:
+    - Missing or invalid API keys.
+    - Unreachable API endpoint.
+    - Invalid configuration values.
     """
-
-    pass
 
 
 class LLMProviderExecutionError(LLMProviderError):
-    """
-    Raised when LLM execution fails
+    """Raised when an LLM API call fails at runtime.
 
-    Examples: API errors, timeout, rate limiting, invalid parameters
+    Common causes:
+    - API returned an error response (4xx / 5xx).
+    - Request timed out.
+    - Malformed request parameters.
     """
-
-    pass
 
 
 class LLMProviderTokenLimitError(LLMProviderError):
-    """
-    Raised when token limits are exceeded
+    """Raised when the prompt + expected response exceeds the token budget.
 
-    This helps distinguish token limit issues from other execution errors.
+    Callers can catch this specifically to implement truncation or
+    fall-back-to-shorter-model strategies.
     """
-
-    pass
 
 
 class LLMProviderStreamingError(LLMProviderError):
-    """
-    Raised when streaming operations fail
+    """Raised when a streaming response fails part-way through.
 
-    Examples: Connection drops, incomplete streams, parsing errors
+    Common causes:
+    - Connection dropped mid-stream.
+    - Malformed server-sent event.
     """
-
-    pass
 
 
 class LLMProviderAuthenticationError(LLMProviderError):
-    """
-    Raised when authentication fails
-
-    Examples: Invalid API key, expired credentials
-    """
-
-    pass
+    """Raised when the provider rejects the API key or credentials."""
 
 
 class LLMProviderRateLimitError(LLMProviderError):
-    """
-    Raised when rate limits are hit
+    """Raised when the provider's rate limit is exceeded.
 
-    This allows for specific retry logic for rate limiting scenarios.
+    Callers can implement exponential-backoff retry logic specifically
+    for this exception type.
     """
-
-    pass
 
 
 class LLMProviderUnsupportedOperationError(LLMProviderError):
+    """Raised when the configured provider / API type does not support
+    the requested operation (e.g. streaming on a provider that only
+    offers batch completions).
     """
-    Raised when an unsupported operation is attempted
-
-    Examples: Streaming not supported by provider, invalid API type
-    """
-
-    pass
