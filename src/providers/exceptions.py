@@ -1,7 +1,7 @@
 class ProviderError(Exception):
     """Base exception for provider errors"""
 
-    def __init__(self, message: str, details: dict = None):
+    def __init__(self, message: str, details: dict | None = None):
         """
         Initialize provider error
 
