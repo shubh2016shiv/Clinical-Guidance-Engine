@@ -1,0 +1,66 @@
+[project]
+name = "drug-recommendation-chatbot"
+version = "0.1.0"
+description = "Healthcare AI Agent for drug recommendations with RAG-powered knowledge retrieval"
+readme = "Chainlit_Frontend_Documentation.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [
+    { name = "Your Name", email = "you@example.com" }
+]
+keywords = ["healthcare", "drug-recommendation", "rag", "chatbot", "chainlit"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Healthcare Industry",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+
+dependencies = [
+    "chainlit>=2.0.0",
+    "google-generativeai>=0.8.0",
+    "openai",
+    "pandas[excel]==2.3.3",
+    "pydantic>=2.0.0",
+    "pydantic-settings",
+    "pymilvus==2.6.3",
+    "python-dotenv",
+    "pyyaml>=6.0.0",
+    "redis>=5.0.0",
+    "structlog>=24.1.0",
+    "tabulate==0.9.0",
+    "tiktoken>=0.12.0",
+    "tqdm>=4.67.1",
+]
+
+[dependency-groups]
+dev = [
+    "pre-commit",
+    "ruff",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "N",   # pep8-naming
+    "UP",  # pyupgrade
+    "B",   # flake8-bugbear
+]
+ignore = [
+    "E501",  # line too long (handled by formatter)
+]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+
+[tool.ruff.lint.isort]
+known-first-party = ["src", "chatbot_ui", "drug_data_ingestion_pipeline", "pharmaceutical_knowledge_base", "infrastructure"]
