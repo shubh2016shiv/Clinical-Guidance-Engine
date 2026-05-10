@@ -23,9 +23,9 @@ Key Design Principles:
 """
 
 from abc import ABC, abstractmethod
-from typing import Dict, Any, List, Optional
 from dataclasses import dataclass, field
 from enum import Enum
+from typing import Any
 
 from src.logs import get_logger
 
@@ -91,7 +91,7 @@ class CacheConfig:
     host: str = "localhost"
     port: int = 6379
     db: int = 0
-    password: Optional[str] = None
+    password: str | None = None
 
     # Connection pool settings
     max_connections: int = 50
@@ -114,9 +114,9 @@ class CacheConfig:
     max_chain_length: int = 20  # Maximum response chain length
 
     # Additional provider-specific settings
-    extra_params: Dict[str, Any] = field(default_factory=dict)
+    extra_params: dict[str, Any] = field(default_factory=dict)
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """
         Convert config to dictionary for logging/serialization
 
@@ -159,10 +159,10 @@ class ActiveSessionContext:
     """
 
     session_id: str
-    metadata: Dict[str, Any]
-    last_response_id: Optional[str] = None
-    vector_store_id: Optional[str] = None
-    root_response_id: Optional[str] = None
+    metadata: dict[str, Any]
+    last_response_id: str | None = None
+    vector_store_id: str | None = None
+    root_response_id: str | None = None
 
 
 class CacheProvider(ABC):
@@ -246,7 +246,7 @@ class CacheProvider(ABC):
     # ==================== Session Management ====================
 
     @abstractmethod
-    async def get_session_metadata(self, session_id: str) -> Optional[Dict[str, Any]]:
+    async def get_session_metadata(self, session_id: str) -> dict[str, Any] | None:
         """
         Retrieve session metadata from cache
 
@@ -263,7 +263,7 @@ class CacheProvider(ABC):
 
     @abstractmethod
     async def set_session_metadata(
-        self, session_id: str, metadata: Dict[str, Any], ttl: Optional[int] = None
+        self, session_id: str, metadata: dict[str, Any], ttl: int | None = None
     ) -> bool:
         """
         Store session metadata in cache
@@ -321,9 +321,7 @@ class CacheProvider(ABC):
         pass
 
     @abstractmethod
-    async def get_active_session_context(
-        self, session_id: str
-    ) -> Optional[ActiveSessionContext]:
+    async def get_active_session_context(self, session_id: str) -> ActiveSessionContext | None:
         """
         Retrieve comprehensive context for an active session.
 
@@ -390,7 +388,7 @@ class CacheProvider(ABC):
         pass
 
     @abstractmethod
-    async def get_response_chain(self, session_id: str) -> List[str]:
+    async def get_response_chain(self, session_id: str) -> list[str]:
         """
         Retrieve the complete response chain for a session
 
@@ -407,7 +405,7 @@ class CacheProvider(ABC):
         pass
 
     @abstractmethod
-    async def get_last_response_id(self, session_id: str) -> Optional[str]:
+    async def get_last_response_id(self, session_id: str) -> str | None:
         """
         Get the most recent response ID for a session
 
@@ -424,7 +422,7 @@ class CacheProvider(ABC):
 
     @abstractmethod
     async def set_last_response_id(
-        self, session_id: str, response_id: str, ttl: Optional[int] = None
+        self, session_id: str, response_id: str, ttl: int | None = None
     ) -> bool:
         """
         Set the last response ID for quick access
@@ -449,7 +447,7 @@ class CacheProvider(ABC):
 
     @abstractmethod
     async def cache_history(
-        self, session_id: str, history: List[Dict[str, Any]], ttl: Optional[int] = None
+        self, session_id: str, history: list[dict[str, Any]], ttl: int | None = None
     ) -> bool:
         """
         Cache conversation history for quick retrieval
@@ -472,9 +470,7 @@ class CacheProvider(ABC):
         pass
 
     @abstractmethod
-    async def get_cached_history(
-        self, session_id: str
-    ) -> Optional[List[Dict[str, Any]]]:
+    async def get_cached_history(self, session_id: str) -> list[dict[str, Any]] | None:
         """
         Retrieve cached conversation history
 
@@ -513,8 +509,8 @@ class CacheProvider(ABC):
     async def add_message(
         self,
         session_id: str,
-        message: Dict[str, Any],
-        max_messages: Optional[int] = None,
+        message: dict[str, Any],
+        max_messages: int | None = None,
     ) -> bool:
         """
         Add a message to the session's message history list.
@@ -538,9 +534,7 @@ class CacheProvider(ABC):
         pass
 
     @abstractmethod
-    async def get_messages(
-        self, session_id: str, limit: Optional[int] = None
-    ) -> List[Dict[str, Any]]:
+    async def get_messages(self, session_id: str, limit: int | None = None) -> list[dict[str, Any]]:
         """
         Retrieve messages from session history.
 
@@ -565,8 +559,8 @@ class CacheProvider(ABC):
         self,
         session_id: str,
         request_id: str,
-        state: Dict[str, Any],
-        ttl: Optional[int] = None,
+        state: dict[str, Any],
+        ttl: int | None = None,
     ) -> bool:
         """
         Store tool execution state for tracking in-progress operations
@@ -592,7 +586,7 @@ class CacheProvider(ABC):
     @abstractmethod
     async def get_tool_execution_state(
         self, session_id: str, request_id: str
-    ) -> Optional[Dict[str, Any]]:
+    ) -> dict[str, Any] | None:
         """
         Retrieve tool execution state
 
@@ -610,9 +604,7 @@ class CacheProvider(ABC):
         pass
 
     @abstractmethod
-    async def clear_tool_execution_state(
-        self, session_id: str, request_id: str
-    ) -> bool:
+    async def clear_tool_execution_state(self, session_id: str, request_id: str) -> bool:
         """
         Clear tool execution state after completion
 
@@ -635,8 +627,8 @@ class CacheProvider(ABC):
         self,
         session_id: str,
         request_id: str,
-        state: Dict[str, Any],
-        ttl: Optional[int] = None,
+        state: dict[str, Any],
+        ttl: int | None = None,
     ) -> bool:
         """
         Store streaming state for active streaming sessions
@@ -660,9 +652,7 @@ class CacheProvider(ABC):
         pass
 
     @abstractmethod
-    async def get_streaming_state(
-        self, session_id: str, request_id: str
-    ) -> Optional[Dict[str, Any]]:
+    async def get_streaming_state(self, session_id: str, request_id: str) -> dict[str, Any] | None:
         """
         Retrieve streaming state
 
@@ -702,8 +692,8 @@ class CacheProvider(ABC):
     async def cache_vector_store_validation(
         self,
         vector_store_id: str,
-        validation_data: Dict[str, Any],
-        ttl: Optional[int] = None,
+        validation_data: dict[str, Any],
+        ttl: int | None = None,
     ) -> bool:
         """
         Cache vector store validation results
@@ -726,9 +716,7 @@ class CacheProvider(ABC):
         pass
 
     @abstractmethod
-    async def get_vector_store_validation(
-        self, vector_store_id: str
-    ) -> Optional[Dict[str, Any]]:
+    async def get_vector_store_validation(self, vector_store_id: str) -> dict[str, Any] | None:
         """
         Retrieve cached vector store validation results
 
@@ -747,9 +735,7 @@ class CacheProvider(ABC):
     # ==================== Rate Limiting ====================
 
     @abstractmethod
-    async def increment_request_count(
-        self, session_id: str, window_seconds: int = 3600
-    ) -> int:
+    async def increment_request_count(self, session_id: str, window_seconds: int = 3600) -> int:
         """
         Increment request count for rate limiting
 
@@ -769,9 +755,7 @@ class CacheProvider(ABC):
         pass
 
     @abstractmethod
-    async def get_request_count(
-        self, session_id: str, window_seconds: int = 3600
-    ) -> int:
+    async def get_request_count(self, session_id: str, window_seconds: int = 3600) -> int:
         """
         Get current request count within time window
 
@@ -814,8 +798,8 @@ class CacheProvider(ABC):
         self,
         session_id: str,
         request_id: str,
-        correlation_data: Dict[str, Any],
-        ttl: Optional[int] = None,
+        correlation_data: dict[str, Any],
+        ttl: int | None = None,
     ) -> bool:
         """
         Store request correlation data for debugging and tracing
@@ -841,7 +825,7 @@ class CacheProvider(ABC):
     @abstractmethod
     async def get_request_correlation(
         self, session_id: str, request_id: str
-    ) -> Optional[Dict[str, Any]]:
+    ) -> dict[str, Any] | None:
         """
         Retrieve request correlation data
 
@@ -862,7 +846,7 @@ class CacheProvider(ABC):
 
     @abstractmethod
     async def set_chat_mapping(
-        self, chat_id: str, response_id: str, ttl: Optional[int] = None
+        self, chat_id: str, response_id: str, ttl: int | None = None
     ) -> bool:
         """
         Map chat ID to last response ID
@@ -884,7 +868,7 @@ class CacheProvider(ABC):
         pass
 
     @abstractmethod
-    async def get_chat_mapping(self, chat_id: str) -> Optional[str]:
+    async def get_chat_mapping(self, chat_id: str) -> str | None:
         """
         Get response ID for a chat ID
 
@@ -952,7 +936,7 @@ class CacheProvider(ABC):
         pass
 
     @abstractmethod
-    async def get_ttl(self, key: str) -> Optional[int]:
+    async def get_ttl(self, key: str) -> int | None:
         """
         Get remaining TTL for a key
 

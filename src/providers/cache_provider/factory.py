@@ -17,12 +17,12 @@ Key Features:
 - Comprehensive error handling
 """
 
-from typing import Dict, Optional, Type
 from functools import lru_cache
 
 from src.config import get_settings
 from src.logs import get_logger
-from .base import CacheProvider, CacheConfig
+
+from .base import CacheConfig, CacheProvider
 from .exceptions import CacheConfigError
 from .redis_provider import RedisProvider
 
@@ -30,7 +30,7 @@ logger = get_logger(__name__)
 
 
 # Provider registry - maps provider names to their implementation classes
-CACHE_PROVIDER_REGISTRY: Dict[str, Type[CacheProvider]] = {
+CACHE_PROVIDER_REGISTRY: dict[str, type[CacheProvider]] = {
     "redis": RedisProvider,
     # Add more providers here as they're implemented
     # "memcached": MemcachedProvider,
@@ -38,7 +38,7 @@ CACHE_PROVIDER_REGISTRY: Dict[str, Type[CacheProvider]] = {
 }
 
 
-def register_cache_provider(name: str, provider_class: Type[CacheProvider]) -> None:
+def register_cache_provider(name: str, provider_class: type[CacheProvider]) -> None:
     """
     Register a new cache provider implementation
 
@@ -92,7 +92,7 @@ def get_available_cache_providers() -> list[str]:
 
 
 def create_cache_provider(
-    provider_type: Optional[str] = None, config: Optional[CacheConfig] = None, **kwargs
+    provider_type: str | None = None, config: CacheConfig | None = None, **kwargs
 ) -> CacheProvider:
     """
     Factory function to create a cache provider instance
@@ -158,8 +158,7 @@ def create_cache_provider(
     if provider_type not in CACHE_PROVIDER_REGISTRY:
         supported = ", ".join(get_available_cache_providers())
         error_msg = (
-            f"Unsupported cache provider: '{provider_type}'. "
-            f"Supported providers: {supported}"
+            f"Unsupported cache provider: '{provider_type}'. Supported providers: {supported}"
         )
         logger.error(
             error_msg,
@@ -183,14 +182,10 @@ def create_cache_provider(
             # Extract configuration parameters with fallback to settings
             config_params = {
                 # Connection settings
-                "host": kwargs.pop(
-                    "host", getattr(settings, "redis_host", "localhost")
-                ),
+                "host": kwargs.pop("host", getattr(settings, "redis_host", "localhost")),
                 "port": kwargs.pop("port", getattr(settings, "redis_port", 6379)),
                 "db": kwargs.pop("db", getattr(settings, "redis_db", 0)),
-                "password": kwargs.pop(
-                    "password", getattr(settings, "redis_password", None)
-                ),
+                "password": kwargs.pop("password", getattr(settings, "redis_password", None)),
                 # Connection pool settings
                 "max_connections": kwargs.pop(
                     "max_connections", getattr(settings, "redis_max_connections", 50)
@@ -210,13 +205,9 @@ def create_cache_provider(
                     "default_history_ttl",
                     getattr(settings, "redis_default_history_ttl", 1800),
                 ),
-                "default_tool_execution_ttl": kwargs.pop(
-                    "default_tool_execution_ttl", 300
-                ),
+                "default_tool_execution_ttl": kwargs.pop("default_tool_execution_ttl", 300),
                 "default_streaming_ttl": kwargs.pop("default_streaming_ttl", 120),
-                "default_vector_store_ttl": kwargs.pop(
-                    "default_vector_store_ttl", 86400
-                ),
+                "default_vector_store_ttl": kwargs.pop("default_vector_store_ttl", 86400),
                 "default_rate_limit_ttl": kwargs.pop("default_rate_limit_ttl", 3600),
                 "default_request_correlation_ttl": kwargs.pop(
                     "default_request_correlation_ttl", 3600
@@ -254,7 +245,7 @@ def create_cache_provider(
             subcomponent="Factory",
             exc_info=True,
         )
-        raise CacheConfigError(error_msg)
+        raise CacheConfigError(error_msg) from e
 
 
 @lru_cache(maxsize=5)

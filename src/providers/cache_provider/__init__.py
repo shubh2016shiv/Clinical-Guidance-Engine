@@ -65,38 +65,37 @@ See README.md for comprehensive documentation and usage examples.
 
 # Base classes and interfaces
 from .base import (
-    CacheProvider,
+    ActiveSessionContext,
     CacheConfig,
     CacheOperationType,
-    ActiveSessionContext,
+    CacheProvider,
+)
+
+# Exceptions
+from .exceptions import (
+    CacheAuthenticationError,
+    CacheConfigError,
+    CacheConnectionError,
+    CacheKeyError,
+    CacheOperationError,
+    CacheProviderError,
+    CacheSerializationError,
+    CacheTTLError,
 )
 
 # Factory functions
 from .factory import (
-    create_cache_provider,
-    get_cache_provider,  # Legacy
-    get_default_cache_provider,
-    get_cached_cache_provider,
     clear_cache_provider_cache,
-    register_cache_provider,
+    create_cache_provider,
     get_available_cache_providers,
+    get_cache_provider,  # Legacy
+    get_cached_cache_provider,
+    get_default_cache_provider,
+    register_cache_provider,
 )
 
 # Provider implementations
 from .redis_provider import RedisProvider
-
-# Exceptions
-from .exceptions import (
-    CacheProviderError,
-    CacheConnectionError,
-    CacheAuthenticationError,
-    CacheConfigError,
-    CacheOperationError,
-    CacheSerializationError,
-    CacheKeyError,
-    CacheTTLError,
-)
-
 
 # Version
 __version__ = "1.0.0"

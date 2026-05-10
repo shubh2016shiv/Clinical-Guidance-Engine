@@ -43,7 +43,7 @@ class CacheProviderError(ProviderError):
             # Fallback to database or return default
     """
 
-    def __init__(self, message: str, details: dict = None):
+    def __init__(self, message: str, details: dict | None = None):
         """
         Initialize the exception
 

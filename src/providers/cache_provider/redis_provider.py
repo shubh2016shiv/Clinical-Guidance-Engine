@@ -25,27 +25,34 @@ Key Design Decisions:
 - Includes health check with PING command
 """
 
+from __future__ import annotations
+
+import asyncio
 import json
 import time
-from typing import Dict, Any, List, Optional
+from datetime import timedelta
+from typing import Any
 
-import redis.asyncio as redis
+import redis.asyncio as aioredis
+from aiobreaker import CircuitBreaker
 from redis.exceptions import (
     ConnectionError as RedisConnectionError,
-    AuthenticationError as RedisAuthenticationError,
+)
+from redis.exceptions import (
     TimeoutError as RedisTimeoutError,
 )
 
+from src.config import get_settings
 from src.logs import get_component_logger
 from src.providers.cache_provider.base import (
-    CacheProvider,
+    ActiveSessionContext,
     CacheConfig,
     CacheOperationType,
-    ActiveSessionContext,
+    CacheProvider,
 )
 from src.providers.cache_provider.exceptions import (
-    CacheConnectionError,
     CacheAuthenticationError,
+    CacheConnectionError,
     CacheOperationError,
     CacheSerializationError,
     CacheTTLError,
@@ -87,8 +94,24 @@ class RedisProvider(CacheProvider):
         """
         super().__init__(config)
 
-        self.redis_client: Optional[redis.Redis] = None
-        self._connection_pool: Optional[redis.ConnectionPool] = None
+        self.redis_client: aioredis.Redis | None = None
+        self._connection_pool: aioredis.ConnectionPool | None = None
+
+        # -- Circuit breaker & retry config from central settings --------
+        _settings = get_settings()
+        self._cb = CircuitBreaker(
+            fail_max=_settings.redis_circuit_breaker_fail_max,
+            timeout_duration=timedelta(seconds=_settings.redis_circuit_breaker_timeout),
+        )
+        self._cb.add_excluded_exceptions(
+            CacheSerializationError,
+            CacheTTLError,
+            ValueError,
+            TypeError,
+        )
+        self._retry_max_attempts = _settings.redis_retry_max_attempts
+        self._retry_base_delay = _settings.redis_retry_base_delay
+        self._retry_max_delay = _settings.redis_retry_max_delay
 
         logger.info(
             "Redis provider initialized",
@@ -100,99 +123,112 @@ class RedisProvider(CacheProvider):
             max_connections=config.max_connections,
         )
 
+    # ==================== Helpers ====================================
+
+    def _require_client(self) -> aioredis.Redis:
+        """Return the connected Redis client, raising if not connected."""
+        if self.redis_client is None:
+            raise CacheConnectionError("Redis client is not connected. Call connect() first.")
+        return self.redis_client
+
+    async def _retry_operation(self, operation_name: str, coro_factory):
+        """Execute *coro_factory()* with exponential backoff retry."""
+        last_exc: BaseException | None = None
+        for attempt in range(self._retry_max_attempts + 1):
+            try:
+                return await coro_factory()
+            except (
+                RedisConnectionError,
+                RedisTimeoutError,
+                ConnectionResetError,
+                OSError,
+            ) as exc:
+                last_exc = exc
+                if attempt < self._retry_max_attempts:
+                    delay = min(
+                        self._retry_base_delay * (2**attempt),
+                        self._retry_max_delay,
+                    )
+                    logger.warning(
+                        f"Retrying {operation_name} after error",
+                        component="Cache",
+                        subcomponent="RedisProvider",
+                        attempt=attempt + 1,
+                        max_attempts=self._retry_max_attempts,
+                        delay=f"{delay:.2f}s",
+                        error=str(exc),
+                    )
+                    await asyncio.sleep(delay)
+        raise CacheOperationError(
+            f"{operation_name} failed after {self._retry_max_attempts + 1} attempt(s): {last_exc}"
+        )
+
     # ==================== Connection Management ====================
 
-    async def connect(self) -> None:
-        """
-        Establish connection to Redis server
+    async def _connect_once(self) -> None:
+        """Single connection attempt (called inside the retry loop)."""
+        logger.info(
+            "Connecting to Redis server",
+            component="Cache",
+            subcomponent="RedisProvider",
+            host=self.config.host,
+            port=self.config.port,
+        )
 
-        Creates a connection pool and initializes the Redis client.
-        Verifies connectivity with a PING command.
+        connection_kwargs = {
+            "host": self.config.host,
+            "port": self.config.port,
+            "db": self.config.db,
+            "password": self.config.password,
+            "max_connections": self.config.max_connections,
+            "socket_timeout": self.config.socket_timeout,
+            "socket_connect_timeout": self.config.socket_connect_timeout,
+            "decode_responses": self.config.decode_responses,
+        }
+
+        if self.config.ssl:
+            logger.warning(
+                "SSL is enabled but SSL parameters not fully configured. SSL connection may fail.",
+                component="Cache",
+                subcomponent="RedisProvider",
+            )
+
+        self._connection_pool = aioredis.ConnectionPool(**connection_kwargs)
+        self.redis_client = aioredis.Redis(connection_pool=self._connection_pool)
+        await self._require_client().ping()
+
+        logger.info(
+            "Successfully connected to Redis server",
+            component="Cache",
+            subcomponent="RedisProvider",
+            host=self.config.host,
+            port=self.config.port,
+        )
+
+    async def connect(self) -> None:
+        """Establish connection to Redis with retry and circuit breaker.
 
         Raises:
-            CacheConnectionError: If connection fails
-            CacheAuthenticationError: If authentication fails
+            CacheConnectionError: If all retries are exhausted or the
+                circuit breaker is open.
+            CacheAuthenticationError: If credentials are rejected.
         """
         try:
-            logger.info(
-                "Connecting to Redis server",
-                component="Cache",
-                subcomponent="RedisProvider",
-                host=self.config.host,
-                port=self.config.port,
+            await self._cb.call_async(
+                self._retry_operation,
+                "connect",
+                self._connect_once,
             )
-
-            # Create connection pool
-            # Note: SSL is not directly supported by redis.asyncio.ConnectionPool
-            # For SSL connections, use ssl_cert_reqs, ssl_ca_certs, etc. if needed
-            connection_kwargs = {
-                "host": self.config.host,
-                "port": self.config.port,
-                "db": self.config.db,
-                "password": self.config.password,
-                "max_connections": self.config.max_connections,
-                "socket_timeout": self.config.socket_timeout,
-                "socket_connect_timeout": self.config.socket_connect_timeout,
-                "decode_responses": self.config.decode_responses,
-            }
-
-            # Add SSL parameters only if SSL is enabled and additional SSL config exists
-            if self.config.ssl:
-                # For SSL connections, additional parameters may be needed:
-                # ssl_cert_reqs, ssl_ca_certs, ssl_certfile, ssl_keyfile
-                # These would need to be added to CacheConfig if SSL support is required
-                logger.warning(
-                    "SSL is enabled but SSL parameters not fully configured. "
-                    "SSL connection may fail. Add ssl_cert_reqs, ssl_ca_certs to CacheConfig for full SSL support.",
-                    component="Cache",
-                    subcomponent="RedisProvider",
-                )
-
-            self._connection_pool = redis.ConnectionPool(**connection_kwargs)
-
-            # Create Redis client
-            self.redis_client = redis.Redis(connection_pool=self._connection_pool)
-
-            # Verify connection with PING
-            await self.redis_client.ping()
-
-            logger.info(
-                "Successfully connected to Redis server",
-                component="Cache",
-                subcomponent="RedisProvider",
-                host=self.config.host,
-                port=self.config.port,
-            )
-
-        except RedisAuthenticationError as e:
-            error_msg = f"Redis authentication failed: {e}"
-            logger.error(
-                error_msg,
-                component="Cache",
-                subcomponent="RedisProvider",
-                exc_info=True,
-            )
-            raise CacheAuthenticationError(error_msg)
-
-        except (RedisConnectionError, RedisTimeoutError) as e:
-            error_msg = f"Failed to connect to Redis: {e}"
-            logger.error(
-                error_msg,
-                component="Cache",
-                subcomponent="RedisProvider",
-                exc_info=True,
-            )
-            raise CacheConnectionError(error_msg)
-
-        except Exception as e:
-            error_msg = f"Unexpected error connecting to Redis: {e}"
-            logger.error(
-                error_msg,
-                component="Cache",
-                subcomponent="RedisProvider",
-                exc_info=True,
-            )
-            raise CacheConnectionError(error_msg)
+        except CacheAuthenticationError:
+            raise
+        except CacheConnectionError:
+            raise
+        except CacheOperationError as exc:
+            raise CacheConnectionError(str(exc)) from exc
+        except Exception as exc:
+            raise CacheConnectionError(
+                f"Circuit breaker is OPEN ({exc}). Redis connection not attempted."
+            ) from exc
 
     async def disconnect(self) -> None:
         """
@@ -202,7 +238,7 @@ class RedisProvider(CacheProvider):
         """
         try:
             if self.redis_client:
-                await self.redis_client.close()
+                await self._require_client().close()
                 logger.info(
                     "Closed Redis client connection",
                     component="Cache",
@@ -236,7 +272,7 @@ class RedisProvider(CacheProvider):
             if not self.redis_client:
                 return False
 
-            response = await self.redis_client.ping()
+            response = await self._require_client().ping()
 
             logger.debug(
                 "Redis health check successful",
@@ -257,7 +293,7 @@ class RedisProvider(CacheProvider):
 
     # ==================== Session Management ====================
 
-    async def get_session_metadata(self, session_id: str) -> Optional[Dict[str, Any]]:
+    async def get_session_metadata(self, session_id: str) -> dict[str, Any] | None:
         """
         Retrieve session metadata from Redis
 
@@ -274,7 +310,7 @@ class RedisProvider(CacheProvider):
             key = self._build_key(CacheOperationType.SESSION, session_id)
 
             # Get hash data
-            data = await self.redis_client.hgetall(key)
+            data = await self._require_client().hgetall(key)
 
             if not data:
                 logger.debug(
@@ -309,10 +345,10 @@ class RedisProvider(CacheProvider):
                 session_id=session_id,
                 exc_info=True,
             )
-            raise CacheOperationError(error_msg)
+            raise CacheOperationError(error_msg) from e
 
     async def set_session_metadata(
-        self, session_id: str, metadata: Dict[str, Any], ttl: Optional[int] = None
+        self, session_id: str, metadata: dict[str, Any], ttl: int | None = None
     ) -> bool:
         """
         Store session metadata in Redis
@@ -337,10 +373,10 @@ class RedisProvider(CacheProvider):
             serialized_data = {k: self._serialize_value(v) for k, v in metadata.items()}
 
             # Store as hash
-            await self.redis_client.hset(key, mapping=serialized_data)
+            await self._require_client().hset(key, mapping=serialized_data)  # type: ignore[reportArgumentType]  # type: ignore[reportArgumentType]
 
             # Set TTL
-            await self.redis_client.expire(key, ttl)
+            await self._require_client().expire(key, ttl)
 
             logger.debug(
                 "Set session metadata",
@@ -362,7 +398,7 @@ class RedisProvider(CacheProvider):
                 session_id=session_id,
                 exc_info=True,
             )
-            raise CacheSerializationError(error_msg)
+            raise CacheSerializationError(error_msg) from e
 
         except Exception as e:
             error_msg = f"Failed to set session metadata: {e}"
@@ -373,7 +409,7 @@ class RedisProvider(CacheProvider):
                 session_id=session_id,
                 exc_info=True,
             )
-            raise CacheOperationError(error_msg)
+            raise CacheOperationError(error_msg) from e
 
     async def touch_session(self, session_id: str) -> bool:
         """
@@ -395,15 +431,13 @@ class RedisProvider(CacheProvider):
             patterns = [
                 self._build_key(CacheOperationType.SESSION, session_id),
                 self._build_key(CacheOperationType.RESPONSE_CHAIN, session_id),
-                self._build_key(
-                    CacheOperationType.CHAT_MAPPING, f"last_response:{session_id}"
-                ),
+                self._build_key(CacheOperationType.CHAT_MAPPING, f"last_response:{session_id}"),
             ]
 
             touched_count = 0
             for key in patterns:
-                if await self.redis_client.exists(key):
-                    await self.redis_client.expire(key, ttl)
+                if await self._require_client().exists(key):
+                    await self._require_client().expire(key, ttl)
                     touched_count += 1
 
             logger.debug(
@@ -426,7 +460,7 @@ class RedisProvider(CacheProvider):
                 session_id=session_id,
                 exc_info=True,
             )
-            raise CacheOperationError(error_msg)
+            raise CacheOperationError(error_msg) from e
 
     async def delete_session(self, session_id: str) -> bool:
         """
@@ -447,12 +481,10 @@ class RedisProvider(CacheProvider):
                 self._build_key(CacheOperationType.SESSION, session_id),
                 self._build_key(CacheOperationType.RESPONSE_CHAIN, session_id),
                 self._build_key(CacheOperationType.HISTORY, session_id),
-                self._build_key(
-                    CacheOperationType.CHAT_MAPPING, f"last_response:{session_id}"
-                ),
+                self._build_key(CacheOperationType.CHAT_MAPPING, f"last_response:{session_id}"),
             ]
 
-            deleted_count = await self.redis_client.delete(*keys_to_delete)
+            deleted_count = await self._require_client().delete(*keys_to_delete)
 
             logger.info(
                 "Deleted session data",
@@ -473,11 +505,9 @@ class RedisProvider(CacheProvider):
                 session_id=session_id,
                 exc_info=True,
             )
-            raise CacheOperationError(error_msg)
+            raise CacheOperationError(error_msg) from e
 
-    async def get_active_session_context(
-        self, session_id: str
-    ) -> Optional[ActiveSessionContext]:
+    async def get_active_session_context(self, session_id: str) -> ActiveSessionContext | None:
         """
         Retrieve comprehensive context for an active session using Redis pipeline.
 
@@ -515,7 +545,7 @@ class RedisProvider(CacheProvider):
             # CRITICAL: First check if session key exists
             # This is the gatekeeper - if the key doesn't exist or has expired,
             # the session is considered inactive
-            session_exists = await self.redis_client.exists(session_key)
+            session_exists = await self._require_client().exists(session_key)
 
             if not session_exists:
                 logger.debug(
@@ -528,7 +558,7 @@ class RedisProvider(CacheProvider):
 
             # Session is active - fetch all related data atomically using pipeline
             # This ensures data consistency even under concurrent access
-            pipeline = self.redis_client.pipeline()
+            pipeline = self._require_client().pipeline()
             pipeline.hgetall(session_key)  # Get session metadata
             pipeline.get(last_response_key)  # Get last response ID
 
@@ -595,7 +625,7 @@ class RedisProvider(CacheProvider):
                 session_id=session_id,
                 exc_info=True,
             )
-            raise CacheOperationError(error_msg)
+            raise CacheOperationError(error_msg) from e
 
     # ==================== Response Chain Management ====================
 
@@ -619,13 +649,13 @@ class RedisProvider(CacheProvider):
             key = self._build_key(CacheOperationType.RESPONSE_CHAIN, session_id)
 
             # Append to list
-            await self.redis_client.rpush(key, response_id)
+            await self._require_client().rpush(key, response_id)
 
             # Trim to max_chain_length (keep last N entries)
-            await self.redis_client.ltrim(key, -self.config.max_chain_length, -1)
+            await self._require_client().ltrim(key, -self.config.max_chain_length, -1)
 
             # Set TTL
-            await self.redis_client.expire(key, self.config.default_session_ttl)
+            await self._require_client().expire(key, self.config.default_session_ttl)
 
             logger.debug(
                 "Appended response to chain",
@@ -647,9 +677,9 @@ class RedisProvider(CacheProvider):
                 response_id=response_id,
                 exc_info=True,
             )
-            raise CacheOperationError(error_msg)
+            raise CacheOperationError(error_msg) from e
 
-    async def get_response_chain(self, session_id: str) -> List[str]:
+    async def get_response_chain(self, session_id: str) -> list[str]:
         """
         Retrieve the complete response chain for a session
 
@@ -666,7 +696,7 @@ class RedisProvider(CacheProvider):
             key = self._build_key(CacheOperationType.RESPONSE_CHAIN, session_id)
 
             # Get all items from list
-            chain = await self.redis_client.lrange(key, 0, -1)
+            chain = await self._require_client().lrange(key, 0, -1)
 
             logger.debug(
                 "Retrieved response chain",
@@ -687,9 +717,9 @@ class RedisProvider(CacheProvider):
                 session_id=session_id,
                 exc_info=True,
             )
-            raise CacheOperationError(error_msg)
+            raise CacheOperationError(error_msg) from e
 
-    async def get_last_response_id(self, session_id: str) -> Optional[str]:
+    async def get_last_response_id(self, session_id: str) -> str | None:
         """
         Get the most recent response ID for a session
 
@@ -703,11 +733,9 @@ class RedisProvider(CacheProvider):
             CacheOperationError: If retrieval fails
         """
         try:
-            key = self._build_key(
-                CacheOperationType.CHAT_MAPPING, f"last_response:{session_id}"
-            )
+            key = self._build_key(CacheOperationType.CHAT_MAPPING, f"last_response:{session_id}")
 
-            response_id = await self.redis_client.get(key)
+            response_id = await self._require_client().get(key)
 
             logger.debug(
                 "Retrieved last response ID",
@@ -729,10 +757,10 @@ class RedisProvider(CacheProvider):
                 session_id=session_id,
                 exc_info=True,
             )
-            raise CacheOperationError(error_msg)
+            raise CacheOperationError(error_msg) from e
 
     async def set_last_response_id(
-        self, session_id: str, response_id: str, ttl: Optional[int] = None
+        self, session_id: str, response_id: str, ttl: int | None = None
     ) -> bool:
         """
         Set the last response ID for quick access
@@ -749,12 +777,10 @@ class RedisProvider(CacheProvider):
             CacheOperationError: If operation fails
         """
         try:
-            key = self._build_key(
-                CacheOperationType.CHAT_MAPPING, f"last_response:{session_id}"
-            )
+            key = self._build_key(CacheOperationType.CHAT_MAPPING, f"last_response:{session_id}")
             ttl = ttl or self.config.default_session_ttl
 
-            await self.redis_client.setex(key, ttl, response_id)
+            await self._require_client().setex(key, ttl, response_id)
 
             logger.debug(
                 "Set last response ID",
@@ -777,12 +803,12 @@ class RedisProvider(CacheProvider):
                 response_id=response_id,
                 exc_info=True,
             )
-            raise CacheOperationError(error_msg)
+            raise CacheOperationError(error_msg) from e
 
     # ==================== History Caching ====================
 
     async def cache_history(
-        self, session_id: str, history: List[Dict[str, Any]], ttl: Optional[int] = None
+        self, session_id: str, history: list[dict[str, Any]], ttl: int | None = None
     ) -> bool:
         """
         Cache conversation history as JSON
@@ -807,7 +833,7 @@ class RedisProvider(CacheProvider):
             history_json = json.dumps(history)
 
             # Store with TTL
-            await self.redis_client.setex(key, ttl, history_json)
+            await self._require_client().setex(key, ttl, history_json)
 
             logger.debug(
                 "Cached conversation history",
@@ -829,7 +855,7 @@ class RedisProvider(CacheProvider):
                 session_id=session_id,
                 exc_info=True,
             )
-            raise CacheSerializationError(error_msg)
+            raise CacheSerializationError(error_msg) from e
 
         except Exception as e:
             error_msg = f"Failed to cache history: {e}"
@@ -840,11 +866,9 @@ class RedisProvider(CacheProvider):
                 session_id=session_id,
                 exc_info=True,
             )
-            raise CacheOperationError(error_msg)
+            raise CacheOperationError(error_msg) from e
 
-    async def get_cached_history(
-        self, session_id: str
-    ) -> Optional[List[Dict[str, Any]]]:
+    async def get_cached_history(self, session_id: str) -> list[dict[str, Any]] | None:
         """
         Retrieve cached conversation history
 
@@ -861,7 +885,7 @@ class RedisProvider(CacheProvider):
         try:
             key = self._build_key(CacheOperationType.HISTORY, session_id)
 
-            history_json = await self.redis_client.get(key)
+            history_json = await self._require_client().get(key)
 
             if not history_json:
                 logger.debug(
@@ -896,7 +920,7 @@ class RedisProvider(CacheProvider):
                 session_id=session_id,
                 exc_info=True,
             )
-            raise CacheSerializationError(error_msg)
+            raise CacheSerializationError(error_msg) from e
 
         except Exception as e:
             error_msg = f"Failed to get cached history: {e}"
@@ -907,7 +931,7 @@ class RedisProvider(CacheProvider):
                 session_id=session_id,
                 exc_info=True,
             )
-            raise CacheOperationError(error_msg)
+            raise CacheOperationError(error_msg) from e
 
     async def invalidate_history(self, session_id: str) -> bool:
         """
@@ -925,7 +949,7 @@ class RedisProvider(CacheProvider):
         try:
             key = self._build_key(CacheOperationType.HISTORY, session_id)
 
-            deleted = await self.redis_client.delete(key)
+            deleted = await self._require_client().delete(key)
 
             logger.debug(
                 "Invalidated history cache",
@@ -946,13 +970,13 @@ class RedisProvider(CacheProvider):
                 session_id=session_id,
                 exc_info=True,
             )
-            raise CacheOperationError(error_msg)
+            raise CacheOperationError(error_msg) from e
 
     async def add_message(
         self,
         session_id: str,
-        message: Dict[str, Any],
-        max_messages: Optional[int] = None,
+        message: dict[str, Any],
+        max_messages: int | None = None,
     ) -> bool:
         """
         Add a message to the session's message history list AND update message_count.
@@ -976,8 +1000,6 @@ class RedisProvider(CacheProvider):
             CacheSerializationError: If message serialization fails
         """
         try:
-            import json
-
             max_messages = max_messages or self.config.max_chain_length
 
             # Build message list key
@@ -988,7 +1010,7 @@ class RedisProvider(CacheProvider):
             message_json = json.dumps(message)
 
             # Use pipeline for atomic operations
-            pipeline = self.redis_client.pipeline()
+            pipeline = self._require_client().pipeline()
 
             # 1. Append message to list (LPUSH adds to the left/head)
             pipeline.lpush(messages_key, message_json)
@@ -1008,7 +1030,7 @@ class RedisProvider(CacheProvider):
             # 5. Update message_count in session metadata HASH atomically
             message_count = results[2]  # Result from llen
 
-            pipeline2 = self.redis_client.pipeline()
+            pipeline2 = self._require_client().pipeline()
             pipeline2.hset(session_key, "message_count", str(message_count))
             pipeline2.expire(session_key, self.config.default_session_ttl)
             await pipeline2.execute()
@@ -1025,9 +1047,7 @@ class RedisProvider(CacheProvider):
             return True
 
         except (TypeError, ValueError) as e:
-            if isinstance(e, json.JSONDecodeError) or str(e).startswith(
-                "Object of type"
-            ):
+            if isinstance(e, json.JSONDecodeError) or str(e).startswith("Object of type"):
                 error_msg = f"Failed to serialize message: {e}"
                 logger.error(
                     error_msg,
@@ -1036,7 +1056,7 @@ class RedisProvider(CacheProvider):
                     session_id=session_id,
                     exc_info=True,
                 )
-                raise CacheSerializationError(error_msg)
+                raise CacheSerializationError(error_msg) from e
             raise
 
         except Exception as e:
@@ -1048,11 +1068,9 @@ class RedisProvider(CacheProvider):
                 session_id=session_id,
                 exc_info=True,
             )
-            raise CacheOperationError(error_msg)
+            raise CacheOperationError(error_msg) from e
 
-    async def get_messages(
-        self, session_id: str, limit: Optional[int] = None
-    ) -> List[Dict[str, Any]]:
+    async def get_messages(self, session_id: str, limit: int | None = None) -> list[dict[str, Any]]:
         """
         Retrieve messages from session history.
 
@@ -1069,18 +1087,14 @@ class RedisProvider(CacheProvider):
             CacheSerializationError: If deserialization fails
         """
         try:
-            import json
-
             messages_key = f"session:{session_id}:messages"
 
             if limit is None:
                 # Get all messages
-                raw_messages = await self.redis_client.lrange(messages_key, 0, -1)
+                raw_messages = await self._require_client().lrange(messages_key, 0, -1)
             else:
                 # Get most recent 'limit' messages
-                raw_messages = await self.redis_client.lrange(
-                    messages_key, 0, limit - 1
-                )
+                raw_messages = await self._require_client().lrange(messages_key, 0, limit - 1)
 
             messages = []
             for raw_msg in raw_messages:
@@ -1115,7 +1129,7 @@ class RedisProvider(CacheProvider):
                 session_id=session_id,
                 exc_info=True,
             )
-            raise CacheOperationError(error_msg)
+            raise CacheOperationError(error_msg) from e
 
     # ==================== Tool Execution State ====================
 
@@ -1123,8 +1137,8 @@ class RedisProvider(CacheProvider):
         self,
         session_id: str,
         request_id: str,
-        state: Dict[str, Any],
-        ttl: Optional[int] = None,
+        state: dict[str, Any],
+        ttl: int | None = None,
     ) -> bool:
         """
         Store tool execution state as hash
@@ -1143,19 +1157,17 @@ class RedisProvider(CacheProvider):
             CacheSerializationError: If state serialization fails
         """
         try:
-            key = self._build_key(
-                CacheOperationType.TOOL_EXECUTION, session_id, request_id
-            )
+            key = self._build_key(CacheOperationType.TOOL_EXECUTION, session_id, request_id)
             ttl = ttl or self.config.default_tool_execution_ttl
 
             # Serialize state values
             serialized_state = {k: self._serialize_value(v) for k, v in state.items()}
 
             # Store as hash
-            await self.redis_client.hset(key, mapping=serialized_state)
+            await self._require_client().hset(key, mapping=serialized_state)  # type: ignore[reportArgumentType]
 
             # Set TTL
-            await self.redis_client.expire(key, ttl)
+            await self._require_client().expire(key, ttl)
 
             logger.debug(
                 "Set tool execution state",
@@ -1178,7 +1190,7 @@ class RedisProvider(CacheProvider):
                 request_id=request_id,
                 exc_info=True,
             )
-            raise CacheSerializationError(error_msg)
+            raise CacheSerializationError(error_msg) from e
 
         except Exception as e:
             error_msg = f"Failed to set tool execution state: {e}"
@@ -1190,11 +1202,11 @@ class RedisProvider(CacheProvider):
                 request_id=request_id,
                 exc_info=True,
             )
-            raise CacheOperationError(error_msg)
+            raise CacheOperationError(error_msg) from e
 
     async def get_tool_execution_state(
         self, session_id: str, request_id: str
-    ) -> Optional[Dict[str, Any]]:
+    ) -> dict[str, Any] | None:
         """
         Retrieve tool execution state
 
@@ -1210,11 +1222,9 @@ class RedisProvider(CacheProvider):
             CacheSerializationError: If deserialization fails
         """
         try:
-            key = self._build_key(
-                CacheOperationType.TOOL_EXECUTION, session_id, request_id
-            )
+            key = self._build_key(CacheOperationType.TOOL_EXECUTION, session_id, request_id)
 
-            data = await self.redis_client.hgetall(key)
+            data = await self._require_client().hgetall(key)
 
             if not data:
                 logger.debug(
@@ -1251,11 +1261,9 @@ class RedisProvider(CacheProvider):
                 request_id=request_id,
                 exc_info=True,
             )
-            raise CacheOperationError(error_msg)
+            raise CacheOperationError(error_msg) from e
 
-    async def clear_tool_execution_state(
-        self, session_id: str, request_id: str
-    ) -> bool:
+    async def clear_tool_execution_state(self, session_id: str, request_id: str) -> bool:
         """
         Clear tool execution state
 
@@ -1270,11 +1278,9 @@ class RedisProvider(CacheProvider):
             CacheOperationError: If operation fails
         """
         try:
-            key = self._build_key(
-                CacheOperationType.TOOL_EXECUTION, session_id, request_id
-            )
+            key = self._build_key(CacheOperationType.TOOL_EXECUTION, session_id, request_id)
 
-            deleted = await self.redis_client.delete(key)
+            deleted = await self._require_client().delete(key)
 
             logger.debug(
                 "Cleared tool execution state",
@@ -1297,7 +1303,7 @@ class RedisProvider(CacheProvider):
                 request_id=request_id,
                 exc_info=True,
             )
-            raise CacheOperationError(error_msg)
+            raise CacheOperationError(error_msg) from e
 
     # ==================== Streaming State ====================
 
@@ -1305,8 +1311,8 @@ class RedisProvider(CacheProvider):
         self,
         session_id: str,
         request_id: str,
-        state: Dict[str, Any],
-        ttl: Optional[int] = None,
+        state: dict[str, Any],
+        ttl: int | None = None,
     ) -> bool:
         """
         Store streaming state as hash
@@ -1332,10 +1338,10 @@ class RedisProvider(CacheProvider):
             serialized_state = {k: self._serialize_value(v) for k, v in state.items()}
 
             # Store as hash
-            await self.redis_client.hset(key, mapping=serialized_state)
+            await self._require_client().hset(key, mapping=serialized_state)  # type: ignore[reportArgumentType]
 
             # Set TTL
-            await self.redis_client.expire(key, ttl)
+            await self._require_client().expire(key, ttl)
 
             logger.debug(
                 "Set streaming state",
@@ -1358,7 +1364,7 @@ class RedisProvider(CacheProvider):
                 request_id=request_id,
                 exc_info=True,
             )
-            raise CacheSerializationError(error_msg)
+            raise CacheSerializationError(error_msg) from e
 
         except Exception as e:
             error_msg = f"Failed to set streaming state: {e}"
@@ -1370,11 +1376,9 @@ class RedisProvider(CacheProvider):
                 request_id=request_id,
                 exc_info=True,
             )
-            raise CacheOperationError(error_msg)
+            raise CacheOperationError(error_msg) from e
 
-    async def get_streaming_state(
-        self, session_id: str, request_id: str
-    ) -> Optional[Dict[str, Any]]:
+    async def get_streaming_state(self, session_id: str, request_id: str) -> dict[str, Any] | None:
         """
         Retrieve streaming state
 
@@ -1392,7 +1396,7 @@ class RedisProvider(CacheProvider):
         try:
             key = self._build_key(CacheOperationType.STREAMING, session_id, request_id)
 
-            data = await self.redis_client.hgetall(key)
+            data = await self._require_client().hgetall(key)
 
             if not data:
                 logger.debug(
@@ -1429,7 +1433,7 @@ class RedisProvider(CacheProvider):
                 request_id=request_id,
                 exc_info=True,
             )
-            raise CacheOperationError(error_msg)
+            raise CacheOperationError(error_msg) from e
 
     async def clear_streaming_state(self, session_id: str, request_id: str) -> bool:
         """
@@ -1448,7 +1452,7 @@ class RedisProvider(CacheProvider):
         try:
             key = self._build_key(CacheOperationType.STREAMING, session_id, request_id)
 
-            deleted = await self.redis_client.delete(key)
+            deleted = await self._require_client().delete(key)
 
             logger.debug(
                 "Cleared streaming state",
@@ -1471,15 +1475,15 @@ class RedisProvider(CacheProvider):
                 request_id=request_id,
                 exc_info=True,
             )
-            raise CacheOperationError(error_msg)
+            raise CacheOperationError(error_msg) from e
 
     # ==================== Vector Store Validation ====================
 
     async def cache_vector_store_validation(
         self,
         vector_store_id: str,
-        validation_data: Dict[str, Any],
-        ttl: Optional[int] = None,
+        validation_data: dict[str, Any],
+        ttl: int | None = None,
     ) -> bool:
         """
         Cache vector store validation results as hash
@@ -1501,15 +1505,13 @@ class RedisProvider(CacheProvider):
             ttl = ttl or self.config.default_vector_store_ttl
 
             # Serialize validation data
-            serialized_data = {
-                k: self._serialize_value(v) for k, v in validation_data.items()
-            }
+            serialized_data = {k: self._serialize_value(v) for k, v in validation_data.items()}
 
             # Store as hash
-            await self.redis_client.hset(key, mapping=serialized_data)
+            await self._require_client().hset(key, mapping=serialized_data)  # type: ignore[reportArgumentType]  # type: ignore[reportArgumentType]
 
             # Set TTL
-            await self.redis_client.expire(key, ttl)
+            await self._require_client().expire(key, ttl)
 
             logger.debug(
                 "Cached vector store validation",
@@ -1530,7 +1532,7 @@ class RedisProvider(CacheProvider):
                 vector_store_id=vector_store_id,
                 exc_info=True,
             )
-            raise CacheSerializationError(error_msg)
+            raise CacheSerializationError(error_msg) from e
 
         except Exception as e:
             error_msg = f"Failed to cache vector store validation: {e}"
@@ -1541,11 +1543,9 @@ class RedisProvider(CacheProvider):
                 vector_store_id=vector_store_id,
                 exc_info=True,
             )
-            raise CacheOperationError(error_msg)
+            raise CacheOperationError(error_msg) from e
 
-    async def get_vector_store_validation(
-        self, vector_store_id: str
-    ) -> Optional[Dict[str, Any]]:
+    async def get_vector_store_validation(self, vector_store_id: str) -> dict[str, Any] | None:
         """
         Retrieve cached vector store validation results
 
@@ -1562,7 +1562,7 @@ class RedisProvider(CacheProvider):
         try:
             key = self._build_key(CacheOperationType.VECTOR_STORE, vector_store_id)
 
-            data = await self.redis_client.hgetall(key)
+            data = await self._require_client().hgetall(key)
 
             if not data:
                 logger.debug(
@@ -1596,13 +1596,11 @@ class RedisProvider(CacheProvider):
                 vector_store_id=vector_store_id,
                 exc_info=True,
             )
-            raise CacheOperationError(error_msg)
+            raise CacheOperationError(error_msg) from e
 
     # ==================== Rate Limiting ====================
 
-    async def increment_request_count(
-        self, session_id: str, window_seconds: int = 3600
-    ) -> int:
+    async def increment_request_count(self, session_id: str, window_seconds: int = 3600) -> int:
         """
         Increment request count using sorted set with timestamps
 
@@ -1624,16 +1622,16 @@ class RedisProvider(CacheProvider):
             window_start = current_time - window_seconds
 
             # Remove old entries outside the window
-            await self.redis_client.zremrangebyscore(key, 0, window_start)
+            await self._require_client().zremrangebyscore(key, 0, window_start)
 
             # Add current request with timestamp as score
-            await self.redis_client.zadd(key, {str(current_time): current_time})
+            await self._require_client().zadd(key, {str(current_time): current_time})
 
             # Set TTL
-            await self.redis_client.expire(key, window_seconds)
+            await self._require_client().expire(key, window_seconds)
 
             # Count requests in window
-            count = await self.redis_client.zcount(key, window_start, current_time)
+            count = await self._require_client().zcount(key, window_start, current_time)
 
             logger.debug(
                 "Incremented request count",
@@ -1655,11 +1653,9 @@ class RedisProvider(CacheProvider):
                 session_id=session_id,
                 exc_info=True,
             )
-            raise CacheOperationError(error_msg)
+            raise CacheOperationError(error_msg) from e
 
-    async def get_request_count(
-        self, session_id: str, window_seconds: int = 3600
-    ) -> int:
+    async def get_request_count(self, session_id: str, window_seconds: int = 3600) -> int:
         """
         Get current request count within time window
 
@@ -1679,7 +1675,7 @@ class RedisProvider(CacheProvider):
             window_start = current_time - window_seconds
 
             # Count requests in window
-            count = await self.redis_client.zcount(key, window_start, current_time)
+            count = await self._require_client().zcount(key, window_start, current_time)
 
             logger.debug(
                 "Retrieved request count",
@@ -1701,7 +1697,7 @@ class RedisProvider(CacheProvider):
                 session_id=session_id,
                 exc_info=True,
             )
-            raise CacheOperationError(error_msg)
+            raise CacheOperationError(error_msg) from e
 
     async def check_rate_limit(
         self, session_id: str, limit: int, window_seconds: int = 3600
@@ -1745,7 +1741,7 @@ class RedisProvider(CacheProvider):
                 session_id=session_id,
                 exc_info=True,
             )
-            raise CacheOperationError(error_msg)
+            raise CacheOperationError(error_msg) from e
 
     # ==================== Request Correlation ====================
 
@@ -1753,8 +1749,8 @@ class RedisProvider(CacheProvider):
         self,
         session_id: str,
         request_id: str,
-        correlation_data: Dict[str, Any],
-        ttl: Optional[int] = None,
+        correlation_data: dict[str, Any],
+        ttl: int | None = None,
     ) -> bool:
         """
         Store request correlation data as hash
@@ -1773,21 +1769,17 @@ class RedisProvider(CacheProvider):
             CacheSerializationError: If correlation data serialization fails
         """
         try:
-            key = self._build_key(
-                CacheOperationType.REQUEST_CORRELATION, session_id, request_id
-            )
+            key = self._build_key(CacheOperationType.REQUEST_CORRELATION, session_id, request_id)
             ttl = ttl or self.config.default_request_correlation_ttl
 
             # Serialize correlation data
-            serialized_data = {
-                k: self._serialize_value(v) for k, v in correlation_data.items()
-            }
+            serialized_data = {k: self._serialize_value(v) for k, v in correlation_data.items()}
 
             # Store as hash
-            await self.redis_client.hset(key, mapping=serialized_data)
+            await self._require_client().hset(key, mapping=serialized_data)  # type: ignore[reportArgumentType]  # type: ignore[reportArgumentType]
 
             # Set TTL
-            await self.redis_client.expire(key, ttl)
+            await self._require_client().expire(key, ttl)
 
             logger.debug(
                 "Set request correlation",
@@ -1810,7 +1802,7 @@ class RedisProvider(CacheProvider):
                 request_id=request_id,
                 exc_info=True,
             )
-            raise CacheSerializationError(error_msg)
+            raise CacheSerializationError(error_msg) from e
 
         except Exception as e:
             error_msg = f"Failed to set request correlation: {e}"
@@ -1822,11 +1814,11 @@ class RedisProvider(CacheProvider):
                 request_id=request_id,
                 exc_info=True,
             )
-            raise CacheOperationError(error_msg)
+            raise CacheOperationError(error_msg) from e
 
     async def get_request_correlation(
         self, session_id: str, request_id: str
-    ) -> Optional[Dict[str, Any]]:
+    ) -> dict[str, Any] | None:
         """
         Retrieve request correlation data
 
@@ -1842,11 +1834,9 @@ class RedisProvider(CacheProvider):
             CacheSerializationError: If deserialization fails
         """
         try:
-            key = self._build_key(
-                CacheOperationType.REQUEST_CORRELATION, session_id, request_id
-            )
+            key = self._build_key(CacheOperationType.REQUEST_CORRELATION, session_id, request_id)
 
-            data = await self.redis_client.hgetall(key)
+            data = await self._require_client().hgetall(key)
 
             if not data:
                 logger.debug(
@@ -1883,12 +1873,12 @@ class RedisProvider(CacheProvider):
                 request_id=request_id,
                 exc_info=True,
             )
-            raise CacheOperationError(error_msg)
+            raise CacheOperationError(error_msg) from e
 
     # ==================== Chat ID Mapping ====================
 
     async def set_chat_mapping(
-        self, chat_id: str, response_id: str, ttl: Optional[int] = None
+        self, chat_id: str, response_id: str, ttl: int | None = None
     ) -> bool:
         """
         Map chat ID to last response ID
@@ -1908,7 +1898,7 @@ class RedisProvider(CacheProvider):
             key = self._build_key(CacheOperationType.CHAT_MAPPING, chat_id)
             ttl = ttl or self.config.default_session_ttl
 
-            await self.redis_client.setex(key, ttl, response_id)
+            await self._require_client().setex(key, ttl, response_id)
 
             logger.debug(
                 "Set chat mapping",
@@ -1931,9 +1921,9 @@ class RedisProvider(CacheProvider):
                 response_id=response_id,
                 exc_info=True,
             )
-            raise CacheOperationError(error_msg)
+            raise CacheOperationError(error_msg) from e
 
-    async def get_chat_mapping(self, chat_id: str) -> Optional[str]:
+    async def get_chat_mapping(self, chat_id: str) -> str | None:
         """
         Get response ID for a chat ID
 
@@ -1949,7 +1939,7 @@ class RedisProvider(CacheProvider):
         try:
             key = self._build_key(CacheOperationType.CHAT_MAPPING, chat_id)
 
-            response_id = await self.redis_client.get(key)
+            response_id = await self._require_client().get(key)
 
             logger.debug(
                 "Retrieved chat mapping",
@@ -1971,7 +1961,7 @@ class RedisProvider(CacheProvider):
                 chat_id=chat_id,
                 exc_info=True,
             )
-            raise CacheOperationError(error_msg)
+            raise CacheOperationError(error_msg) from e
 
     # ==================== Utility Methods ====================
 
@@ -1989,7 +1979,7 @@ class RedisProvider(CacheProvider):
             CacheOperationError: If check fails
         """
         try:
-            exists = await self.redis_client.exists(key)
+            exists = await self._require_client().exists(key)
 
             logger.debug(
                 "Checked key existence",
@@ -2010,7 +2000,7 @@ class RedisProvider(CacheProvider):
                 key=key,
                 exc_info=True,
             )
-            raise CacheOperationError(error_msg)
+            raise CacheOperationError(error_msg) from e
 
     async def delete(self, key: str) -> bool:
         """
@@ -2026,7 +2016,7 @@ class RedisProvider(CacheProvider):
             CacheOperationError: If deletion fails
         """
         try:
-            deleted = await self.redis_client.delete(key)
+            deleted = await self._require_client().delete(key)
 
             logger.debug(
                 "Deleted key",
@@ -2047,7 +2037,7 @@ class RedisProvider(CacheProvider):
                 key=key,
                 exc_info=True,
             )
-            raise CacheOperationError(error_msg)
+            raise CacheOperationError(error_msg) from e
 
     async def expire(self, key: str, ttl: int) -> bool:
         """
@@ -2068,7 +2058,7 @@ class RedisProvider(CacheProvider):
             if ttl <= 0:
                 raise CacheTTLError(f"Invalid TTL value: {ttl}. Must be positive.")
 
-            set_ttl = await self.redis_client.expire(key, ttl)
+            set_ttl = await self._require_client().expire(key, ttl)
 
             logger.debug(
                 "Set key expiration",
@@ -2094,9 +2084,9 @@ class RedisProvider(CacheProvider):
                 ttl=ttl,
                 exc_info=True,
             )
-            raise CacheOperationError(error_msg)
+            raise CacheOperationError(error_msg) from e
 
-    async def get_ttl(self, key: str) -> Optional[int]:
+    async def get_ttl(self, key: str) -> int | None:
         """
         Get remaining TTL for a key
 
@@ -2110,7 +2100,7 @@ class RedisProvider(CacheProvider):
             CacheOperationError: If retrieval fails
         """
         try:
-            ttl = await self.redis_client.ttl(key)
+            ttl = await self._require_client().ttl(key)
 
             # Redis returns:
             # -2 if key doesn't exist
@@ -2143,7 +2133,7 @@ class RedisProvider(CacheProvider):
                 key=key,
                 exc_info=True,
             )
-            raise CacheOperationError(error_msg)
+            raise CacheOperationError(error_msg) from e
 
     # ==================== Private Helper Methods ====================
 
@@ -2160,7 +2150,7 @@ class RedisProvider(CacheProvider):
         Raises:
             TypeError: If value is not serializable
         """
-        if isinstance(value, (str, int, float, bool)):
+        if isinstance(value, str | int | float | bool):
             return json.dumps(value)
         elif value is None:
             return json.dumps(None)
@@ -2193,10 +2183,10 @@ class RedisProvider(CacheProvider):
 if __name__ == "__main__":
     """
     Test script for Redis Provider
-    
+
     This script tests all major functionality of the RedisProvider to ensure
     it works correctly. Run with: python -m src.providers.cache_provider.redis_provider
-    
+
     Prerequisites:
     - Redis server must be running (docker-compose up -d redis)
     - Redis password must match configuration (default: redis123)
@@ -2349,22 +2339,16 @@ if __name__ == "__main__":
             "started_at": datetime.utcnow().isoformat(),
         }
 
-        await provider.set_tool_execution_state(
-            test_session_id, test_request_id, tool_state
-        )
+        await provider.set_tool_execution_state(test_session_id, test_request_id, tool_state)
         print("✓ Tool execution state set")
 
-        retrieved_state = await provider.get_tool_execution_state(
-            test_session_id, test_request_id
-        )
+        retrieved_state = await provider.get_tool_execution_state(test_session_id, test_request_id)
         assert retrieved_state is not None, "Failed to retrieve tool execution state"
         assert retrieved_state["status"] == "in_progress", "Tool state mismatch"
         print("✓ Tool execution state retrieved")
 
         await provider.clear_tool_execution_state(test_session_id, test_request_id)
-        cleared_state = await provider.get_tool_execution_state(
-            test_session_id, test_request_id
-        )
+        cleared_state = await provider.get_tool_execution_state(test_session_id, test_request_id)
         assert cleared_state is None, "Tool state should be None after clearing"
         print("✓ Tool execution state cleared")
 
@@ -2379,14 +2363,10 @@ if __name__ == "__main__":
             "is_citation": False,
         }
 
-        await provider.set_streaming_state(
-            test_session_id, test_request_id, streaming_state
-        )
+        await provider.set_streaming_state(test_session_id, test_request_id, streaming_state)
         print("✓ Streaming state set")
 
-        retrieved_streaming = await provider.get_streaming_state(
-            test_session_id, test_request_id
-        )
+        retrieved_streaming = await provider.get_streaming_state(test_session_id, test_request_id)
         assert retrieved_streaming is not None, "Failed to retrieve streaming state"
         assert retrieved_streaming["status"] == "streaming", "Streaming state mismatch"
         print("✓ Streaming state retrieved")
@@ -2405,17 +2385,11 @@ if __name__ == "__main__":
             "expires_at": datetime.utcnow().isoformat(),
         }
 
-        await provider.cache_vector_store_validation(
-            test_vector_store_id, validation_data
-        )
+        await provider.cache_vector_store_validation(test_vector_store_id, validation_data)
         print("✓ Vector store validation cached")
 
-        cached_validation = await provider.get_vector_store_validation(
-            test_vector_store_id
-        )
-        assert (
-            cached_validation is not None
-        ), "Failed to retrieve vector store validation"
+        cached_validation = await provider.get_vector_store_validation(test_vector_store_id)
+        assert cached_validation is not None, "Failed to retrieve vector store validation"
         assert cached_validation["status"] == "completed", "Validation data mismatch"
         print("✓ Vector store validation retrieved")
 
@@ -2423,15 +2397,11 @@ if __name__ == "__main__":
         print("\n[10] Testing rate limiting...")
 
         # Increment request count
-        count1 = await provider.increment_request_count(
-            test_session_id, window_seconds=3600
-        )
+        count1 = await provider.increment_request_count(test_session_id, window_seconds=3600)
         assert count1 == 1, f"Expected count 1, got {count1}"
         print(f"✓ Request count incremented (count: {count1})")
 
-        count2 = await provider.increment_request_count(
-            test_session_id, window_seconds=3600
-        )
+        count2 = await provider.increment_request_count(test_session_id, window_seconds=3600)
         assert count2 == 2, f"Expected count 2, got {count2}"
         print(f"✓ Request count incremented again (count: {count2})")
 
@@ -2452,20 +2422,14 @@ if __name__ == "__main__":
             "created_at": datetime.utcnow().isoformat(),
         }
 
-        await provider.set_request_correlation(
-            test_session_id, test_request_id, correlation_data
-        )
+        await provider.set_request_correlation(test_session_id, test_request_id, correlation_data)
         print("✓ Request correlation set")
 
         retrieved_correlation = await provider.get_request_correlation(
             test_session_id, test_request_id
         )
-        assert (
-            retrieved_correlation is not None
-        ), "Failed to retrieve request correlation"
-        assert (
-            retrieved_correlation["response_id"] == "resp_corr_001"
-        ), "Correlation data mismatch"
+        assert retrieved_correlation is not None, "Failed to retrieve request correlation"
+        assert retrieved_correlation["response_id"] == "resp_corr_001", "Correlation data mismatch"
         print("✓ Request correlation retrieved")
 
         # Test chat ID mapping
@@ -2503,9 +2467,7 @@ if __name__ == "__main__":
         print("✓ Key expiration set")
 
         # Test delete
-        test_key = provider._build_key(
-            CacheOperationType.CHAT_MAPPING, "test_delete_key"
-        )
+        test_key = provider._build_key(CacheOperationType.CHAT_MAPPING, "test_delete_key")
         await provider.set_chat_mapping("test_delete_key", "test_value")
         deleted = await provider.delete(test_key)
         assert deleted is True, "Key should be deleted"
