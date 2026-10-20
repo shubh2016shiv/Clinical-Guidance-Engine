@@ -64,7 +64,7 @@ class ResponsesApiClient:
 
             request_params = {k: v for k, v in params.items() if k != "stream"}
             response = await self._provider._async_client.responses.create(**request_params)
-            content = getattr(response, "content", "") or str(response)
+            content = getattr(response, "output_text", "")
 
             return LLMResponse(
                 content=content,
@@ -82,7 +82,7 @@ class ResponsesApiClient:
 
     async def execute_raw(
         self,
-        input_message: str,
+        input_message: str | list[dict[str, Any]],
         instructions: str | None = None,
         previous_response_id: str | None = None,
         tools: list[dict[str, Any]] | None = None,
@@ -98,7 +98,7 @@ class ResponsesApiClient:
 
     def _build_params(
         self,
-        input_message: str,
+        input_message: str | list[dict[str, Any]],
         instructions: str | None,
         previous_response_id: str | None,
         tools: list[dict[str, Any]] | None,
@@ -116,15 +116,18 @@ class ResponsesApiClient:
             params["previous_response_id"] = previous_response_id
         if tools:
             params["tools"] = tools
+        for name in ("store", "include", "max_output_tokens", "tool_choice"):
+            if name in kwargs:
+                params[name] = kwargs[name]
         return params
 
     async def _stream(self, params: dict[str, Any]) -> AsyncIterator[str]:
         try:
             stream = await self._provider._async_client.responses.create(**params)
             async for event in stream:
-                if hasattr(event, "delta") and event.delta:
+                if event.type == "response.output_text.delta":
                     yield event.delta
-                elif hasattr(event, "content"):
-                    yield event.content
+                elif event.type in {"response.failed", "response.incomplete", "error"}:
+                    raise LLMProviderStreamingError(f"Responses API stream ended: {event.type}")
         except Exception as exc:
             raise LLMProviderStreamingError(f"Responses API stream failed: {exc}") from exc

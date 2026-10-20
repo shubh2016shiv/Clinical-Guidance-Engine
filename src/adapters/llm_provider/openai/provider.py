@@ -108,7 +108,7 @@ class OpenAIProvider(LLMProvider):
 
     async def execute_responses_api_raw(
         self,
-        input_message: str,
+        input_message: str | list[dict[str, Any]],
         instructions: str | None = None,
         previous_response_id: str | None = None,
         tools: list[dict[str, Any]] | None = None,
@@ -119,3 +119,8 @@ class OpenAIProvider(LLMProvider):
         return await self._responses_client.execute_raw(
             input_message, instructions, previous_response_id, tools, stream=stream, **kwargs
         )
+
+    async def close(self) -> None:
+        """Close SDK clients owned by this provider."""
+        await self._async_client.close()
+        self._client.close()
