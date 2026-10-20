@@ -23,7 +23,7 @@ logs/
 *_DELETE/
 
 # Chatbot conversation history
-chatbot_ui/conversations
+healthcare_assistant_ui/conversations
 .chainlit
 
 # Docker Volumes
