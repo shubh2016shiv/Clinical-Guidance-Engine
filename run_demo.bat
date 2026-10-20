@@ -10,7 +10,7 @@ if exist ".venv\Scripts\python.exe" (
     set PYTHON_CMD=python
 )
 
-%PYTHON_CMD% chatbot_ui/run_chainlit_ui.py %*
+%PYTHON_CMD% healthcare_assistant_ui/run_chainlit_ui.py %*
 
 if errorlevel 1 (
     echo.
