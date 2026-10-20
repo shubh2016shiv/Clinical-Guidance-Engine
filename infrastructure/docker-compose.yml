@@ -11,7 +11,7 @@
 #   2. Create the volume directory: mkdir -p volumes/{etcd,minio,milvus,mongodb,redis}
 #   3. Run: docker compose up -d
 #   4. Verify health: docker compose ps
-#   5. Access Attu UI: http://localhost:8000 (Milvus management)
+#   5. Access Attu UI: http://localhost:8002 (Milvus management)
 #
 # ARCHITECTURE OVERVIEW:
 #   ┌─────────────┐     ┌─────────────┐     ┌─────────────┐
@@ -19,10 +19,10 @@
 #   │ (Chat Hist) │     │   (Cache)   │     │ (Vectors)   │
 #   └─────────────┘     └─────────────┘     └──────┬──────┘
 #                                                  │
-#                    ┌─────────────┐     ┌────────┴────────┐
-#                    │    etcd     │     │     MinIO       │
-#                    │ (Metadata)  │     │ (Object Store)  │
-#                    └─────────────┘     └─────────────────┘
+#                    ┌─────────────┐      ┌────────┴────────┐
+#                    │    etcd     │      │     MinIO       │
+#                    │ (Metadata)  │      │ (Object Store)  │
+#                    └─────────────┘      └─────────────────┘
 #
 # =============================================================================
 # NAMING CONVENTION:
@@ -32,12 +32,14 @@
 name: asclepius-infrastructure
 
 # =============================================================================
-# COMPOSE FILE VERSION
+# PROFILES
 # =============================================================================
-# '3.8' is the minimum version supporting 'start_interval' in healthchecks,
-# 'profiles', and advanced deployment constraints. Use Docker Engine 19.03+.
+# Every service belongs to a profile, so 'docker compose up' alone starts
+# nothing. Pass one with --profile:
+#   infra - core backing services (etcd, MinIO, Milvus, MongoDB, Redis)
+#   ui    - Attu, the Milvus web UI
+#   all   - everything (what manage_infrastructure.py starts)
 # =============================================================================
-version: "3.8"
 
 # =============================================================================
 # SERVICES
@@ -63,7 +65,7 @@ services:
   # ---------------------------------------------------------------------------
   etcd:
     container_name: milvus-etcd
-    image: quay.io/coreos/etcd:v3.5.5
+    image: quay.io/coreos/etcd:v3.5.25
     profiles: ["infra", "all"] # 'infra' = core backing services; 'all' = everything
 
     environment:
@@ -85,7 +87,7 @@ services:
     # Command-line flags passed to etcd on startup.
     command: >
       etcd
-      -advertise-client-urls=http://127.0.0.1:2379
+      -advertise-client-urls=http://etcd:2379
       -listen-client-urls=http://0.0.0.0:2379
       --data-dir /etcd
 
@@ -160,9 +162,12 @@ services:
   #   The credentials below are defaults. In production, override via .env
   #   and rotate regularly. Never commit real secrets to Git.
   # ---------------------------------------------------------------------------
+  # IMAGE NOTE:
+  #   The upstream 'minio/minio' image is no longer published on Docker Hub, so we
+  #   use 'milvusdb/minio', the copy the Milvus project maintains for this purpose.
   minio:
     container_name: milvus-minio
-    image: minio/minio:RELEASE.2023-03-20T20-16-18Z
+    image: milvusdb/minio:RELEASE.2024-12-18T13-15-44Z
     profiles: ["infra", "all"]
 
     environment:
@@ -178,8 +183,9 @@ services:
     command: minio server /minio_data --console-address ":9001"
 
     healthcheck:
-      # MinIO exposes a dedicated health endpoint. '-f' makes curl fail on 4xx/5xx.
-      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      # 'mc ready local' is MinIO's own readiness check and is what the official
+      # Milvus compose file uses; the image does not need curl for it.
+      test: ["CMD", "mc", "ready", "local"]
       interval: 30s
       timeout: 20s
       retries: 3
@@ -235,7 +241,7 @@ services:
   # ---------------------------------------------------------------------------
   attu:
     container_name: attu
-    image: zilliz/attu:v2.2.8
+    image: zilliz/attu:v3.0.1 # Attu 3.x supports Milvus 2.6.0+ and 3.x
     profiles: ["ui", "all"] # Only starts when you run: docker compose --profile ui up -d
 
     environment:
@@ -244,9 +250,9 @@ services:
       MILVUS_URL: milvus-standalone:19530
 
     ports:
-      # Host 8000 -> Container 3000
-      # We map to 8000 to avoid conflicts with common dev servers on 3000.
-      - "8000:3000"
+      # Host 8002 -> Container 3000
+      # Not 3000 (common dev servers) and not 8000 (used by other local services).
+      - "8002:3000"
 
     # -------------------------------------------------------------------------
     # DEPENDENCY MANAGEMENT
@@ -298,9 +304,43 @@ services:
   #   2. Embeddings are inserted into Milvus collections.
   #   3. User query -> embedding -> Milvus ANN search -> top-K drug matches.
   # ---------------------------------------------------------------------------
+  # ---------------------------------------------------------------------------
+  # MILVUS VOLUME INIT — One-shot ownership fix for Milvus's data folder
+  # ---------------------------------------------------------------------------
+  # Milvus 3.x runs as a non-root user, so ./volumes/milvus must be owned by it.
+  # This container fixes that once and exits (restart "no"); 'standalone' waits
+  # for it to complete. A marker file in the volume makes later runs a no-op.
+  # It is copied from the official Milvus 3.x compose file.
+  # ---------------------------------------------------------------------------
+  milvus-volume-init:
+    image: milvusdb/milvus:v3.0.3
+    profiles: ["infra", "all"]
+    user: "0:0"
+    network_mode: none
+    read_only: true
+    restart: "no"
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -eu
+        uid="$$(id -u milvus)"
+        gid="$$(id -g milvus)"
+        marker="/var/lib/milvus/.milvus-volume-owner-$${uid}-$${gid}"
+        if [ ! -e "$${marker}" ]; then
+          echo "Preparing /var/lib/milvus for $${uid}:$${gid}"
+          chown -R "$${uid}:$${gid}" /var/lib/milvus
+          touch "$${marker}"
+          chown "$${uid}:$${gid}" "$${marker}"
+        fi
+    volumes:
+      - ${DOCKER_VOLUME_DIRECTORY:-.}/volumes/milvus:/var/lib/milvus
+    labels:
+      - "project=asclepius-healthcare-chatbot"
+      - "service=milvus-volume-init"
+
   standalone:
     container_name: milvus-standalone
-    image: milvusdb/milvus:v2.2.16
+    image: milvusdb/milvus:v3.0.3
     profiles: ["infra", "all"]
 
     command: ["milvus", "run", "standalone"]
@@ -310,6 +350,7 @@ services:
       # These hostnames resolve via Docker's embedded DNS server.
       ETCD_ENDPOINTS: etcd:2379
       MINIO_ADDRESS: minio:9000
+      MINIO_REGION: us-east-1
 
     volumes:
       - ${DOCKER_VOLUME_DIRECTORY:-.}/volumes/milvus:/var/lib/milvus
@@ -331,6 +372,8 @@ services:
       - "9091:9091"
 
     depends_on:
+      milvus-volume-init:
+        condition: service_completed_successfully
       etcd:
         condition: service_healthy
       minio:
@@ -348,7 +391,10 @@ services:
           memory: 1G
 
     restart: unless-stopped
+    # seccomp:unconfined is required by Milvus 3.x (as in the official compose
+    # file); the profile is relaxed for this one service only.
     security_opt:
+      - seccomp:unconfined
       - no-new-privileges:true
 
     # ulimits prevent "too many open files" errors during heavy indexing.
@@ -477,7 +523,9 @@ services:
 
     ports:
       # Exposed for local debugging with redis-cli or Redis Insight.
-      - "6379:6379"
+      # Host 6381 -> Container 6379. Not the usual 6379, because other projects on
+      # this machine already publish 6379 and 6380. The app reads REDIS_PORT.
+      - "6381:6379"
 
     healthcheck:
       # '-a' provides the password. Redis returns PONG if healthy.

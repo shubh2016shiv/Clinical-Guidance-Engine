@@ -17,8 +17,9 @@ This infrastructure provides the data storage and retrieval services required fo
 **Components**:
 - **milvus-standalone**: Main vector database service (port 19530)
 - **etcd**: Metadata storage and service discovery for Milvus (port 2379)
-- **minio**: Object storage for Milvus data files (ports 9000, 9001)
-- **attu**: Web-based management interface for Milvus (port 8000)
+- **minio**: Object storage for Milvus data files (ports 9000, 9001). Milvus always needs an S3-compatible object store, so this service is required.
+- **milvus-volume-init**: One-shot container that prepares the Milvus data folder, then exits
+- **attu**: Web-based management interface for Milvus (port 8002)
 
 **Data**: Pharmaceutical drug embeddings stored as float vectors (768 dimensions).
 
@@ -41,7 +42,7 @@ This infrastructure provides the data storage and retrieval services required fo
 **Why**: Reduces database load by caching query results and session data. Improves response times for repeated queries.
 
 **Components**:
-- **redis**: Cache service (port 6379)
+- **redis**: Cache service (host port 6381; 6379 inside the container)
 - Authentication: Password `redis123`
 
 **Data**: Cached query results, session tokens, temporary data.
@@ -63,6 +64,8 @@ python manage_infrastructure.py --start
 
 Starts all services in detached mode. Checks for conflicting containers from other projects and handles them automatically.
 
+Every service in `docker-compose.yml` belongs to a Compose profile, so a bare `docker compose up` starts nothing. The script uses the `all` profile. To run Compose directly, pass one: `--profile all` (everything), `--profile infra` (everything except Attu) or `--profile ui` (Attu only).
+
 ### Stop Services
 
 ```bash
@@ -79,17 +82,27 @@ python manage_infrastructure.py --restart
 
 Restarts all running services.
 
+### Show Connection Details
+
+```bash
+python manage_infrastructure.py --info
+```
+
 ## Connection Information
 
-After starting services, the management script displays connection details:
+`--start` and `--restart` print a connection report when the services are up, and `--info` prints it at any time. It is grouped by infrastructure (Milvus stack, MongoDB, Redis) and shows, for each service:
 
-| Service | Connection String | Username | Password |
-|---------|------------------|----------|----------|
-| Milvus | localhost:19530 | - | - |
-| Attu UI | http://localhost:8000 | - | - |
-| MongoDB | mongodb://localhost:27017 | admin | password123 |
-| MinIO | http://localhost:9000 | minioadmin | minioadmin |
-| Redis | redis://localhost:6379 | - | redis123 |
+- its live status (`running (healthy)`, `not created`, ...)
+- the host port and the container port it maps to, and the address other containers use (`milvus-standalone:19530`)
+- the username and password
+- the web UI URL or a ready-to-paste connection string and shell command (`mongosh`, `redis-cli`)
+- the matching values to put in the application's `.env`
+
+A short "Web UIs" table at the end lists Attu and the MinIO console with their logins.
+
+The report is generated from the resolved `docker-compose.yml`, so it always matches what Docker is running; there is no table to keep in sync. The credentials are local-development defaults. To change them, set `MONGO_ROOT_USER`, `MONGO_ROOT_PASSWORD`, `REDIS_PASSWORD`, `MINIO_ROOT_USER` or `MINIO_ROOT_PASSWORD` in `infrastructure/.env`, restart the services, and update the matching application `.env` values.
+
+**Opening Attu:** go to `http://localhost:8002` and connect to `milvus-standalone:19530`. Attu runs inside Docker, so it needs the container name, not `localhost`.
 
 ## Architecture
 
@@ -154,17 +167,22 @@ On Linux, ensure the Docker user has write permissions to the `./volumes/` direc
 
 ### Service Versions
 
-- Milvus: 2.2.16
+- Milvus: 3.0.3 (pairs with `pymilvus` 3.0.x; see `requirements.txt`)
 - MongoDB: 7.0
 - Redis: 7.2-alpine
-- etcd: 3.5.5
-- MinIO: RELEASE.2023-03-20T20-16-18Z
-- Attu: 2.2.8
+- etcd: 3.5.25
+- MinIO: `milvusdb/minio:RELEASE.2024-12-18T13-15-44Z` (the upstream `minio/minio` image is no longer published on Docker Hub, so the Milvus project's copy is used)
+- Attu: 3.0.1
+
+Milvus 3.x also starts a one-shot `milvus-volume-init` container that fixes ownership of `volumes/milvus` and then exits; it is expected not to stay running.
+
+Data written by an older Milvus version in `volumes/etcd`, `volumes/milvus` and `volumes/minio` should not be reused after a major upgrade. Delete those three folders and re-run the ingestion pipeline.
 
 ## Files
 
 - `docker-compose.yml`: Service definitions and configuration
 - `manage_infrastructure.py`: Python script for service management
+- `connection_info.py`: Builds the connection report that `manage_infrastructure.py` prints
 - `flush_redis.py`: Redis cache flush utility
 - `volumes/`: Persistent data storage (git-ignored)
 
@@ -241,7 +259,7 @@ python infrastructure/flush_redis.py --dry-run --prefix "session_data"
 | `--dry-run` | Preview operation without deleting | False |
 | `--no-confirm` | Skip confirmation prompt | False |
 | `--host HOST` | Redis server host | `localhost` |
-| `--port PORT` | Redis server port | `6379` |
+| `--port PORT` | Redis server port | `6381` |
 | `--db DB` | Redis database index | `0` |
 | `--password PASSWORD` | Redis authentication password | From env/default |
 | `--no-color` | Disable colored output | False |
@@ -260,7 +278,7 @@ Configuration is loaded in the following priority order (highest to lowest):
 
 ```bash
 REDIS_HOST=localhost          # Redis server host
-REDIS_PORT=6379              # Redis server port
+REDIS_PORT=6381              # Redis server port
 REDIS_DB=0                   # Database index
 REDIS_PASSWORD=redis123      # Authentication password
 REDIS_KEY_PREFIX=drug_reco   # Default key prefix

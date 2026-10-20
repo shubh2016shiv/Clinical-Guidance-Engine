@@ -22,10 +22,9 @@ import os
 import sys
 import time
 from dataclasses import dataclass
-from pathlib import Path
-from typing import Optional, List, Dict, Any, Tuple
 from enum import Enum
-
+from pathlib import Path
+from typing import Any
 
 # ============================================================================
 # Configuration Constants
@@ -36,7 +35,7 @@ class RedisDefaults:
     """Default Redis configuration values."""
 
     HOST = "localhost"
-    PORT = 6379
+    PORT = 6381
     DB = 0
     PASSWORD = "redis123"
     KEY_PREFIX = "drug_reco"
@@ -97,7 +96,7 @@ class FlushOperationStats:
     """Statistics for a flush operation."""
 
     strategy: FlushStrategy
-    prefix_pattern: Optional[str]
+    prefix_pattern: str | None
     total_keys_before: int
     total_keys_after: int
     keys_deleted: int
@@ -136,9 +135,7 @@ class TerminalFormatter:
     def _terminal_supports_colors() -> bool:
         """Check if terminal supports ANSI color codes."""
         if sys.platform == "win32":
-            return os.getenv("TERM") in ("xterm", "xterm-256color") or bool(
-                os.getenv("ANSICON")
-            )
+            return os.getenv("TERM") in ("xterm", "xterm-256color") or bool(os.getenv("ANSICON"))
         return hasattr(sys.stdout, "isatty") and sys.stdout.isatty()
 
     def _colorize(self, text: str, color: str = "", bold: bool = False) -> str:
@@ -179,9 +176,7 @@ class TerminalFormatter:
         """Print info message."""
         print(self._colorize(f"ℹ {message}", TerminalColors.BLUE))
 
-    def print_detail(
-        self, label: str, value: Any, color: str = TerminalColors.CYAN
-    ) -> None:
+    def print_detail(self, label: str, value: Any, color: str = TerminalColors.CYAN) -> None:
         """Print a labeled detail."""
         formatted_label = self._colorize(f"{label}:", color, bold=True)
         print(f"  {formatted_label} {value}")
@@ -205,7 +200,7 @@ class RedisConnectionManager:
         host: str,
         port: int,
         db: int,
-        password: Optional[str],
+        password: str | None,
         socket_timeout: int,
         socket_connect_timeout: int,
         formatter: TerminalFormatter,
@@ -308,7 +303,7 @@ class RedisConnectionManager:
 
         return False
 
-    def get_server_info(self) -> Dict[str, Any]:
+    def get_server_info(self) -> dict[str, Any]:
         """
         Retrieve Redis server information.
 
@@ -384,9 +379,7 @@ class RedisKeyInspector:
         """
         try:
             count = 0
-            for _ in self.client.scan_iter(
-                match=pattern, count=OperationConfig.SCAN_BATCH_SIZE
-            ):
+            for _ in self.client.scan_iter(match=pattern, count=OperationConfig.SCAN_BATCH_SIZE):
                 count += 1
             return count
         except Exception as e:
@@ -395,7 +388,7 @@ class RedisKeyInspector:
 
     def get_sample_keys(
         self, pattern: str, max_samples: int = OperationConfig.MAX_KEY_SAMPLES
-    ) -> List[str]:
+    ) -> list[str]:
         """
         Get sample keys matching a pattern.
 
@@ -408,9 +401,7 @@ class RedisKeyInspector:
         """
         try:
             samples = []
-            for key in self.client.scan_iter(
-                match=pattern, count=OperationConfig.SCAN_BATCH_SIZE
-            ):
+            for key in self.client.scan_iter(match=pattern, count=OperationConfig.SCAN_BATCH_SIZE):
                 decoded_key = key.decode("utf-8") if isinstance(key, bytes) else key
                 samples.append(decoded_key)
                 if len(samples) >= max_samples:
@@ -420,9 +411,7 @@ class RedisKeyInspector:
             self.formatter.print_warning(f"Could not retrieve key samples: {e}")
             return []
 
-    def get_all_keys_sample(
-        self, max_samples: int = OperationConfig.MAX_KEY_SAMPLES
-    ) -> List[str]:
+    def get_all_keys_sample(self, max_samples: int = OperationConfig.MAX_KEY_SAMPLES) -> list[str]:
         """
         Get a sample of all keys in the database (regardless of pattern).
 
@@ -434,7 +423,7 @@ class RedisKeyInspector:
         """
         return self.get_sample_keys("*", max_samples)
 
-    def analyze_key_patterns(self, sample_keys: List[str]) -> Dict[str, Any]:
+    def analyze_key_patterns(self, sample_keys: list[str]) -> dict[str, Any]:
         """
         Analyze patterns in sample keys.
 
@@ -512,9 +501,7 @@ class RedisFlushExecutor:
                 keys_per_second=keys_deleted / duration if duration > 0 else 0,
             )
 
-            self.formatter.print_success(
-                f"Database flushed: {keys_deleted:,} keys deleted"
-            )
+            self.formatter.print_success(f"Database flushed: {keys_deleted:,} keys deleted")
             return stats
 
         except Exception as e:
@@ -543,9 +530,7 @@ class RedisFlushExecutor:
 
         try:
             # Use SCAN to safely iterate through keys
-            for key in self.client.scan_iter(
-                match=pattern, count=OperationConfig.SCAN_BATCH_SIZE
-            ):
+            for key in self.client.scan_iter(match=pattern, count=OperationConfig.SCAN_BATCH_SIZE):
                 current_batch.append(key)
 
                 # Delete when batch is full
@@ -641,9 +626,7 @@ class ConfigurationLoader:
             self.formatter.print_warning(f"Error loading .env file: {e}")
             return False
 
-    def get_redis_config_from_environment(
-        self, cli_args: argparse.Namespace
-    ) -> Dict[str, Any]:
+    def get_redis_config_from_environment(self, cli_args: argparse.Namespace) -> dict[str, Any]:
         """
         Build Redis configuration from environment and CLI arguments.
 
@@ -657,14 +640,11 @@ class ConfigurationLoader:
             "host": cli_args.host or os.getenv("REDIS_HOST", RedisDefaults.HOST),
             "port": cli_args.port or int(os.getenv("REDIS_PORT", RedisDefaults.PORT)),
             "db": cli_args.db or int(os.getenv("REDIS_DB", RedisDefaults.DB)),
-            "password": (
-                cli_args.password or os.getenv("REDIS_PASSWORD", RedisDefaults.PASSWORD)
-            ),
+            "password": (cli_args.password or os.getenv("REDIS_PASSWORD", RedisDefaults.PASSWORD)),
             "socket_timeout": RedisDefaults.SOCKET_TIMEOUT,
             "socket_connect_timeout": RedisDefaults.SOCKET_CONNECT_TIMEOUT,
             "key_prefix": (
-                cli_args.prefix
-                or os.getenv("REDIS_KEY_PREFIX", RedisDefaults.KEY_PREFIX)
+                cli_args.prefix or os.getenv("REDIS_KEY_PREFIX", RedisDefaults.KEY_PREFIX)
             ),
         }
 
@@ -677,7 +657,7 @@ class ConfigurationLoader:
 class RedisFlushOrchestrator:
     """Orchestrates the complete Redis flush operation."""
 
-    def __init__(self, config: Dict[str, Any], formatter: TerminalFormatter):
+    def __init__(self, config: dict[str, Any], formatter: TerminalFormatter):
         """
         Initialize orchestrator.
 
@@ -694,7 +674,7 @@ class RedisFlushOrchestrator:
     def execute(
         self,
         strategy: FlushStrategy,
-        prefix: Optional[str] = None,
+        prefix: str | None = None,
         require_confirmation: bool = True,
         dry_run: bool = False,
     ) -> bool:
@@ -777,12 +757,8 @@ class RedisFlushOrchestrator:
             return False
 
         # Initialize helper components
-        self.key_inspector = RedisKeyInspector(
-            self.connection_manager.client, self.formatter
-        )
-        self.flush_executor = RedisFlushExecutor(
-            self.connection_manager.client, self.formatter
-        )
+        self.key_inspector = RedisKeyInspector(self.connection_manager.client, self.formatter)
+        self.flush_executor = RedisFlushExecutor(self.connection_manager.client, self.formatter)
 
         return True
 
@@ -802,25 +778,17 @@ class RedisFlushOrchestrator:
         server_info = self.connection_manager.get_server_info()
         if server_info:
             print()
-            self.formatter.print_detail(
-                "Redis Version", server_info.get("redis_version")
-            )
-            self.formatter.print_detail(
-                "Memory Used", server_info.get("used_memory_human")
-            )
-            self.formatter.print_detail(
-                "Connected Clients", server_info.get("connected_clients")
-            )
-            self.formatter.print_detail(
-                "Uptime (days)", server_info.get("uptime_in_days")
-            )
+            self.formatter.print_detail("Redis Version", server_info.get("redis_version"))
+            self.formatter.print_detail("Memory Used", server_info.get("used_memory_human"))
+            self.formatter.print_detail("Connected Clients", server_info.get("connected_clients"))
+            self.formatter.print_detail("Uptime (days)", server_info.get("uptime_in_days"))
 
         # Database size
         db_size = self.connection_manager.get_database_size()
         print()
         self.formatter.print_detail("Total Keys in Database", f"{db_size:,}")
 
-    def _preview_operation(self, strategy: FlushStrategy, prefix: Optional[str]) -> int:
+    def _preview_operation(self, strategy: FlushStrategy, prefix: str | None) -> int:
         """
         Preview the operation and return number of keys to be affected.
 
@@ -870,9 +838,7 @@ class RedisFlushOrchestrator:
             else:
                 # No keys matched - show all keys to help user find the right pattern
                 print()
-                self.formatter.print_warning(
-                    f"No keys found matching pattern '{pattern}'"
-                )
+                self.formatter.print_warning(f"No keys found matching pattern '{pattern}'")
                 total_keys = self.connection_manager.get_database_size()
                 if total_keys > 0:
                     print()
@@ -938,7 +904,7 @@ class RedisFlushOrchestrator:
         return response in ("yes", "y")
 
     def _execute_flush_operation(
-        self, strategy: FlushStrategy, prefix: Optional[str]
+        self, strategy: FlushStrategy, prefix: str | None
     ) -> FlushOperationStats:
         """
         Execute the flush operation.
@@ -969,9 +935,7 @@ class RedisFlushOrchestrator:
         self.formatter.print_detail(
             "Keys Before", f"{stats.total_keys_before:,}", TerminalColors.CYAN
         )
-        self.formatter.print_detail(
-            "Keys Deleted", f"{stats.keys_deleted:,}", TerminalColors.GREEN
-        )
+        self.formatter.print_detail("Keys Deleted", f"{stats.keys_deleted:,}", TerminalColors.GREEN)
         self.formatter.print_detail(
             "Keys After", f"{stats.total_keys_after:,}", TerminalColors.CYAN
         )
@@ -1115,9 +1079,7 @@ Warning:
         action="store_true",
         help="Skip confirmation prompt (use with caution!)",
     )
-    behavior_group.add_argument(
-        "--no-color", action="store_true", help="Disable colored output"
-    )
+    behavior_group.add_argument("--no-color", action="store_true", help="Disable colored output")
     behavior_group.add_argument(
         "--verbose", "-v", action="store_true", help="Enable verbose output"
     )
@@ -1125,7 +1087,7 @@ Warning:
     return parser
 
 
-def validate_arguments(args: argparse.Namespace) -> Tuple[bool, Optional[str]]:
+def validate_arguments(args: argparse.Namespace) -> tuple[bool, str | None]:
     """
     Validate command-line arguments.
 

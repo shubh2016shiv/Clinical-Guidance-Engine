@@ -17,6 +17,7 @@ Usage:
     python manage_infrastructure.py --start
     python manage_infrastructure.py --stop
     python manage_infrastructure.py --restart
+    python manage_infrastructure.py --info
 """
 
 import argparse
@@ -27,8 +28,8 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Tuple, Optional, List, Dict
-from tabulate import tabulate
+
+from connection_info import render as render_connection_info
 
 
 class InfrastructureManager:
@@ -44,11 +45,18 @@ class InfrastructureManager:
         "redis",
     ]
 
+    # Every service in docker-compose.yml belongs to a profile, so Compose selects
+    # nothing unless one is passed. "all" covers the core services plus Attu.
+    COMPOSE_PROFILE = "all"
+
+    # Seconds allowed for pulling all images (Milvus alone is over 1 GB)
+    PULL_TIMEOUT = 1800
+
     # Maximum retry attempts for operations
     MAX_RETRIES = 5
     RETRY_DELAY = 2  # seconds
 
-    def __init__(self, compose_file_path: Optional[Path] = None):
+    def __init__(self, compose_file_path: Path | None = None):
         """
         Initialize the infrastructure manager.
 
@@ -64,11 +72,9 @@ class InfrastructureManager:
         self.compose_dir = self.compose_file_path.parent
 
         if not self.compose_file_path.exists():
-            raise FileNotFoundError(
-                f"Docker Compose file not found: {self.compose_file_path}"
-            )
+            raise FileNotFoundError(f"Docker Compose file not found: {self.compose_file_path}")
 
-    def _check_docker_available(self) -> Tuple[bool, str]:
+    def _check_docker_available(self) -> tuple[bool, str]:
         """
         Check if Docker is installed and the daemon is running.
 
@@ -88,15 +94,10 @@ class InfrastructureManager:
             return False, "Docker command timed out. Docker may not be responding."
 
         try:
-            result = subprocess.run(
-                ["docker", "info"], capture_output=True, text=True, timeout=10
-            )
+            result = subprocess.run(["docker", "info"], capture_output=True, text=True, timeout=10)
             if result.returncode != 0:
                 error_msg = result.stderr.strip() or "Docker daemon is not running"
-                if (
-                    "Cannot connect" in error_msg
-                    or "Is the docker daemon running" in error_msg
-                ):
+                if "Cannot connect" in error_msg or "Is the docker daemon running" in error_msg:
                     return (
                         False,
                         "Docker daemon is not running. Please start Docker Desktop.",
@@ -110,7 +111,7 @@ class InfrastructureManager:
 
         return True, ""
 
-    def _get_compose_command(self) -> List[str]:
+    def _get_compose_command(self) -> list[str]:
         """
         Get the appropriate docker compose command.
 
@@ -159,7 +160,7 @@ class InfrastructureManager:
         try:
             import yaml
 
-            with open(self.compose_file_path, "r", encoding="utf-8") as f:
+            with open(self.compose_file_path, encoding="utf-8") as f:
                 compose_data = yaml.safe_load(f)
                 if compose_data and "name" in compose_data:
                     return compose_data["name"].lower()
@@ -169,7 +170,7 @@ class InfrastructureManager:
         project_name = self.compose_dir.name.lower().replace(" ", "-").replace("_", "-")
         return project_name
 
-    def _get_container_info(self, container_name: str) -> Optional[Dict[str, str]]:
+    def _get_container_info(self, container_name: str) -> dict[str, str] | None:
         """
         Get detailed information about a container.
 
@@ -236,9 +237,7 @@ class InfrastructureManager:
 
             # Check Docker Compose project labels
             compose_project = labels.get("com.docker.compose.project", "")
-            compose_working_dir = labels.get(
-                "com.docker.compose.project.working_dir", ""
-            )
+            compose_working_dir = labels.get("com.docker.compose.project.working_dir", "")
 
             project_name = self._get_compose_project_name()
             current_working_dir = str(self.compose_dir.resolve())
@@ -254,12 +253,10 @@ class InfrastructureManager:
 
             return False
         except Exception as e:
-            print(
-                f"  Warning: Could not check project ownership for {container_name}: {str(e)}"
-            )
+            print(f"  Warning: Could not check project ownership for {container_name}: {str(e)}")
             return False
 
-    def _force_remove_container(self, container_name: str) -> Tuple[bool, str]:
+    def _force_remove_container(self, container_name: str) -> tuple[bool, str]:
         """
         Force remove a container with retries, ensuring it's completely gone.
 
@@ -280,9 +277,7 @@ class InfrastructureManager:
 
                 # Force remove the container (preserves volumes by default)
                 remove_cmd = ["docker", "rm", "-f", container_name]
-                result = subprocess.run(
-                    remove_cmd, capture_output=True, text=True, timeout=30
-                )
+                result = subprocess.run(remove_cmd, capture_output=True, text=True, timeout=30)
 
                 if result.returncode == 0:
                     # Verify removal with a short wait
@@ -291,9 +286,7 @@ class InfrastructureManager:
                     if verify_info is None:
                         return True, f"Successfully removed container {container_name}"
                     else:
-                        print(
-                            f"  Attempt {attempt + 1}: Container still exists, retrying..."
-                        )
+                        print(f"  Attempt {attempt + 1}: Container still exists, retrying...")
                         time.sleep(self.RETRY_DELAY)
                         continue
                 else:
@@ -302,9 +295,7 @@ class InfrastructureManager:
                         return True, f"Container {container_name} already removed"
 
                     if attempt < self.MAX_RETRIES - 1:
-                        print(
-                            f"  Attempt {attempt + 1} failed: {error_msg}, retrying..."
-                        )
+                        print(f"  Attempt {attempt + 1} failed: {error_msg}, retrying...")
                         time.sleep(self.RETRY_DELAY)
                     else:
                         return False, f"Failed to remove {container_name}: {error_msg}"
@@ -330,7 +321,7 @@ class InfrastructureManager:
             f"Failed to remove {container_name} after {self.MAX_RETRIES} attempts",
         )
 
-    def _cleanup_all_conflicting_containers(self) -> Tuple[bool, str, List[str]]:
+    def _cleanup_all_conflicting_containers(self) -> tuple[bool, str, list[str]]:
         """
         Comprehensively clean up all conflicting containers.
 
@@ -364,9 +355,7 @@ class InfrastructureManager:
                         errors.append(f"{container_name}: {message}")
                         print(f"    ✗ {message}")
                 else:
-                    print(
-                        f"  Container {container_name} belongs to this project, skipping"
-                    )
+                    print(f"  Container {container_name} belongs to this project, skipping")
 
         if errors:
             return (
@@ -387,11 +376,43 @@ class InfrastructureManager:
 
         return True, "No conflicting containers found", []
 
-    def _run_compose_up_with_retry(self) -> Tuple[bool, str]:
+    def _pull_images(self, compose_cmd: list[str], project_name: str) -> tuple[bool, str]:
+        """
+        Pull every image once, showing Docker's own progress.
+
+        Pulling first means a missing or renamed image fails here, immediately and
+        visibly, instead of being retried silently by the start loop. A pull
+        error such as "pull access denied" or "manifest unknown" does not fix
+        itself, so there is no retry.
+
+        Returns:
+            Tuple of (success, message)
+        """
+        cmd = compose_cmd + [
+            "-f",
+            str(self.compose_file_path.name),
+            "-p",
+            project_name,
+            "--profile",
+            self.COMPOSE_PROFILE,
+            "pull",
+        ]
+        print("Pulling images (the first run can take several minutes)...")
+        result = subprocess.run(cmd, timeout=self.PULL_TIMEOUT)
+        if result.returncode != 0:
+            return (
+                False,
+                "Image pull failed; see the Docker output above. Check that every "
+                "image in docker-compose.yml still exists in its registry.",
+            )
+        return True, "Images pulled"
+
+    def _run_compose_up_with_retry(self) -> tuple[bool, str]:
         """
         Run docker compose up with intelligent retry logic.
 
-        Handles transient conflicts and ensures all containers start successfully.
+        Pulls images first, then handles transient conflicts and ensures all
+        containers start successfully.
 
         Returns:
             Tuple of (success, message)
@@ -404,10 +425,12 @@ class InfrastructureManager:
         try:
             os.chdir(self.compose_dir)
 
+            pulled, pull_message = self._pull_images(compose_cmd, project_name)
+            if not pulled:
+                return False, pull_message
+
             for attempt in range(self.MAX_RETRIES):
-                print(
-                    f"\nAttempt {attempt + 1}/{self.MAX_RETRIES}: Starting services..."
-                )
+                print(f"\nAttempt {attempt + 1}/{self.MAX_RETRIES}: Starting services...")
 
                 # Clean up any conflicting containers before each attempt
                 if attempt > 0:
@@ -423,6 +446,8 @@ class InfrastructureManager:
                     str(self.compose_file_path.name),
                     "-p",
                     project_name,
+                    "--profile",
+                    self.COMPOSE_PROFILE,
                     "up",
                     "-d",
                 ]
@@ -461,9 +486,7 @@ class InfrastructureManager:
 
                 # Check for container conflicts in error message
                 if "Conflict" in error_msg and "container name" in error_msg:
-                    conflict_containers = re.findall(
-                        r'container name "/([^"]+)"', error_msg
-                    )
+                    conflict_containers = re.findall(r'container name "/([^"]+)"', error_msg)
 
                     if conflict_containers:
                         print(f"  Detected conflicts: {', '.join(conflict_containers)}")
@@ -471,9 +494,7 @@ class InfrastructureManager:
                         # Force remove all conflicting containers
                         for conflict_container in conflict_containers:
                             print(f"  Removing {conflict_container}...")
-                            success, msg = self._force_remove_container(
-                                conflict_container
-                            )
+                            success, msg = self._force_remove_container(conflict_container)
                             if success:
                                 print(f"    ✓ {msg}")
                             else:
@@ -499,7 +520,7 @@ class InfrastructureManager:
         finally:
             os.chdir(original_cwd)
 
-    def start_services(self) -> Tuple[bool, str]:
+    def start_services(self) -> tuple[bool, str]:
         """
         Start all infrastructure services with robust conflict handling.
 
@@ -511,16 +532,14 @@ class InfrastructureManager:
             return False, error_msg
 
         # Initial cleanup of conflicting containers
-        cleanup_success, cleanup_msg, removed = (
-            self._cleanup_all_conflicting_containers()
-        )
+        cleanup_success, cleanup_msg, removed = self._cleanup_all_conflicting_containers()
         if removed:
             print(f"✓ {cleanup_msg}\n")
 
         # Start services with retry logic
         return self._run_compose_up_with_retry()
 
-    def stop_services(self) -> Tuple[bool, str]:
+    def stop_services(self) -> tuple[bool, str]:
         """
         Stop all infrastructure services gracefully.
 
@@ -547,6 +566,8 @@ class InfrastructureManager:
                 str(self.compose_file_path.name),
                 "-p",
                 project_name,
+                "--profile",
+                self.COMPOSE_PROFILE,
                 "down",
             ]
 
@@ -563,13 +584,9 @@ class InfrastructureManager:
                 for container_name in self.EXPECTED_CONTAINERS:
                     info = self._get_container_info(container_name)
                     if info:
-                        belongs = self._check_container_belongs_to_project(
-                            container_name
-                        )
+                        belongs = self._check_container_belongs_to_project(container_name)
                         if belongs:
-                            success, message = self._force_remove_container(
-                                container_name
-                            )
+                            success, message = self._force_remove_container(container_name)
                             if success:
                                 stopped_count += 1
                                 print(f"  ✓ Stopped {container_name}")
@@ -588,7 +605,7 @@ class InfrastructureManager:
         finally:
             os.chdir(original_cwd)
 
-    def restart_services(self) -> Tuple[bool, str]:
+    def restart_services(self) -> tuple[bool, str]:
         """
         Restart all infrastructure services.
 
@@ -608,25 +625,57 @@ class InfrastructureManager:
         print("\nStarting services...")
         return self.start_services()
 
+    def _load_resolved_compose(self) -> dict:
+        """Return the compose file with all variables and defaults resolved, or {}."""
+        import yaml
+
+        try:
+            cmd = self._get_compose_command() + [
+                "-f",
+                str(self.compose_file_path.name),
+                "-p",
+                self._get_compose_project_name(),
+                "--profile",
+                self.COMPOSE_PROFILE,
+                "config",
+            ]
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=30, cwd=self.compose_dir
+            )
+            if result.returncode == 0:
+                return yaml.safe_load(result.stdout) or {}
+            print(f"Could not read the compose configuration: {result.stderr.strip()}")
+        except (RuntimeError, subprocess.TimeoutExpired, OSError) as e:
+            print(f"Could not read the compose configuration: {e}")
+        return {}
+
+    def _service_status(self, container_name: str) -> str:
+        """Describe a container as 'running (healthy)', 'exited', 'not created', ..."""
+        info = self._get_container_info(container_name)
+        if not info:
+            return "not created"
+        if info["state"] != "running":
+            return info["state"]
+        health = re.search(r"\((healthy|unhealthy|health: starting)\)", info["status"])
+        return f"running ({health.group(1)})" if health else "running"
+
     def display_connection_info(self):
         """
-        Display connection information table for all services.
+        Display connection details for every service, grouped by infrastructure.
+
+        Ports and credentials are read from the resolved compose file, so they
+        always match what Docker is running.
         """
-        connection_data = [
-            ["Milvus", "localhost:19530", "-", "-"],
-            ["Attu UI", "http://localhost:8000", "-", "-"],
-            ["MongoDB", "mongodb://localhost:27017", "admin", "password123"],
-            ["MinIO", "http://localhost:9000", "minioadmin", "minioadmin"],
-            ["Redis", "redis://localhost:6379", "-", "redis123"],
-        ]
+        compose = self._load_resolved_compose()
+        if not compose:
+            return
 
-        headers = ["Service", "URL/Connection String", "Username", "Password"]
-
-        print("\n" + "=" * 80)
-        print("ASCLEPIUS HEALTHCARE CHATBOT - INFRASTRUCTURE CONNECTION INFORMATION")
-        print("=" * 80)
-        print(tabulate(connection_data, headers=headers, tablefmt="grid"))
-        print("=" * 80 + "\n")
+        statuses = {
+            service["container_name"]: self._service_status(service["container_name"])
+            for service in compose.get("services", {}).values()
+            if "container_name" in service
+        }
+        print(render_connection_info(compose, statuses, self._get_compose_project_name()))
 
 
 def main():
@@ -639,24 +688,26 @@ Examples:
   python manage_infrastructure.py --start     Start all services
   python manage_infrastructure.py --stop      Stop all services
   python manage_infrastructure.py --restart   Restart all services
+  python manage_infrastructure.py --info      Show ports, URLs and credentials
         """,
     )
 
-    parser.add_argument(
-        "--start", action="store_true", help="Start all infrastructure services"
-    )
-    parser.add_argument(
-        "--stop", action="store_true", help="Stop all infrastructure services"
-    )
+    parser.add_argument("--start", action="store_true", help="Start all infrastructure services")
+    parser.add_argument("--stop", action="store_true", help="Stop all infrastructure services")
     parser.add_argument(
         "--restart", action="store_true", help="Restart all infrastructure services"
+    )
+    parser.add_argument(
+        "--info",
+        action="store_true",
+        help="Show service status, ports, URLs and credentials",
     )
 
     args = parser.parse_args()
 
-    actions = [args.start, args.stop, args.restart]
+    actions = [args.start, args.stop, args.restart, args.info]
     if sum(actions) != 1:
-        parser.error("Please specify exactly one action: --start, --stop, or --restart")
+        parser.error("Please specify exactly one action: --start, --stop, --restart, or --info")
 
     try:
         manager = InfrastructureManager()
@@ -685,6 +736,9 @@ Examples:
         else:
             print(f"✗ {message}", file=sys.stderr)
             sys.exit(1)
+
+    elif args.info:
+        manager.display_connection_info()
 
     elif args.restart:
         print("Restarting infrastructure services...")
