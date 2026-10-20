@@ -36,7 +36,7 @@ Raw Data Sources (CSV/Excel)
     Standardized Drug Records
            ↓
     ┌─────────────────┐
-    │ Embedding Gen   │ ← Google Gemini AI API
+    │ Embedding Gen   │ ← OpenAI Embeddings API
     └─────────────────┘
            ↓
     Vector Embeddings
@@ -56,8 +56,8 @@ Raw Data Sources (CSV/Excel)
    - Transforms drug names, dosages, and classifications
    - Deduplicates similar records intelligently
 
-2. **Vector Database Ingestion** (`milvus_drug_ingestion_pipeline.py`)
-   - Generates AI embeddings using Google Gemini
+2. **Vector Database Ingestion** (`drug_ingestion_pipeline.py`)
+   - Generates AI embeddings using OpenAI
    - Stores data in Milvus vector database
    - Creates searchable index for semantic queries
 
@@ -77,7 +77,7 @@ Raw Data Sources (CSV/Excel)
 ### Prerequisites
 
 - **Python 3.7+** with pip
-- **Google Gemini API Key** ([Get one here](https://makersuite.google.com/app/apikey))
+- **OpenAI API Key** ([Get one here](https://platform.openai.com/api-keys))
 - **Milvus Vector Database** ([Setup instructions](#milvus-setup))
 
 ### Installation
@@ -97,7 +97,7 @@ pip install -r requirements.txt
 cp .env.example .env
 
 # Edit .env file with your API key
-# GEMINI_API_KEY=your_actual_api_key_here
+# OPENAI_API_KEY=your_actual_api_key_here
 ```
 
 3. **Configure Pipeline**
@@ -111,7 +111,7 @@ cp .env.example .env
 ```python
 from config_loader import ConfigLoader
 from drugs_etl_pipeline import PharmaceuticalETLPipeline
-from milvus_drug_ingestion_pipeline import VectorDBIngestionPipeline
+from drug_ingestion_pipeline import VectorDBIngestionPipeline
 
 # Load configuration
 config = ConfigLoader("ingestion_config.yaml").load()
@@ -137,7 +137,7 @@ print(f"Ingestion complete: {stats['records_inserted']} records processed")
 python drugs_etl_pipeline.py
 
 # Run vector ingestion only
-python milvus_drug_ingestion_pipeline.py
+python drug_ingestion_pipeline.py
 ```
 
 ---
@@ -194,14 +194,18 @@ data_sources:
 
 #### Embedding Configuration
 ```yaml
-gemini:
-  api_key: "${GEMINI_API_KEY}"  # Environment variable
-  model_name: "models/text-embedding-004"
-  task_type: "retrieval_document"
-  embedding:
-    dimensions: 768  # Options: 256, 512, 768, 1024
-    normalize: true
+openai:
+  api_key: "${OPENAI_API_KEY}"  # Environment variable
+  model_name: "text-embedding-3-small"
+  dimensions: 768  # Must match milvus.collection.embedding_dimension
+  batch_size: 100
+  retry_attempts: 3
 ```
+
+The application embeds each user query with the same model and dimensions
+(`OPENAI_EMBEDDING_MODEL` and `MILVUS_EMBEDDING_DIMENSION` in the root `.env`).
+If you change the model or dimensions here, change them there too and re-run
+ingestion, because vectors from different models cannot be compared.
 
 #### Vector Database Configuration
 ```yaml
@@ -211,31 +215,56 @@ milvus:
     port: 19530
   collection:
     name: "pharmaceutical_drugs"
-    embedding_dimension: 768  # Must match Gemini dimensions
+    embedding_dimension: 768  # Must match openai.dimensions
   index:
     type: "HNSW"    # Index type: HNSW, IVF_FLAT, etc.
     metric_type: "IP"  # Similarity metric: IP (cosine) or L2
 ```
 
 #### Search Text Generation
+
+This is the single definition of the text that gets embedded. The same string is sent
+to OpenAI, stored in the Milvus `search_text` column, and written to the standardized
+CSV, so the three can never disagree.
+
 ```yaml
 search_text:
-  template: "Drug: {drug_name} | Dosages: [{dosages}] | Form: {formulation} | Route: {route} | Class: {drug_class}"
-  include_fields:
-    drug_name: true
-    dosages: true
-    formulation: true
-    route_of_administration: true
-    drug_class: true
+  separator: " | "
+  dosage_delimiter: ", "
+  segments:
+    - "Drug: {drug_name}"
+    - "Dosages: [{dosages}]"
+    - "Form: {formulation}"
+    - "Route: {route}"
+    - "Class: {drug_class}"
+    - "Subclass: {drug_sub_class}"
+    - "Therapeutic: {therapeutic_category}"
 ```
+
+Segments render in order and are joined with `separator`. **A segment whose
+placeholders are all empty is dropped**, so a drug with no recorded dosage or route
+does not carry `Dosages: [] | Form:  | Route: ` filler into its embedding. Only about
+5% of records have every field populated, so this applies to most of the dataset:
+
+```
+Drug: stannous fluoride | Class: STOMATOLOGICAL PREPARATIONS | Subclass: Caries prophylactic agents
+```
+
+Available placeholders: `drug_name`, `dosages`, `formulation`, `route`, `drug_class`,
+`drug_sub_class`, `therapeutic_category`. An unknown placeholder is rejected when the
+config loads, before any embedding has been paid for.
+
+> **Changing anything under `search_text` changes every embedding.** Re-run ingestion
+> with `milvus.collection.drop_existing: true` afterwards, or searches will compare
+> vectors built from two different formats.
 
 ### Environment Variables
 
 Required environment variables (set in `.env` file):
 
 ```bash
-# Google Gemini API Key (required)
-GEMINI_API_KEY=your_gemini_api_key_here
+# OpenAI API Key (required)
+OPENAI_API_KEY=your_openai_api_key_here
 
 # Optional: Custom configuration
 CUSTOM_CONFIG_PATH=path/to/custom_config.yaml
@@ -311,21 +340,24 @@ print(f"After deduplication: {len(unique_records)} unique records")
 
 ### Advanced Search Text Configuration
 
+Reword a label, reorder the text, or leave a field out entirely by editing the list.
+To exclude a field, delete its segment — there is no separate on/off switch.
+
 ```yaml
-# Custom search template for pharmaceutical research
+# Emphasise classification, omit formulation
 search_text:
-  template: "Drug: {drug_name} | Strength: [{dosages}] | Route: {route} | Category: {therapeutic_category} | Class: {drug_class} | Subclass: {drug_sub_class}"
-  include_fields:
-    drug_name: true
-    dosages: true
-    route_of_administration: true
-    therapeutic_category: true
-    drug_class: true
-    drug_sub_class: true
-  dosage_delimiter: " | "
-  empty_field_placeholder: "N/A"
-  include_empty_fields: true
+  separator: " | "
+  dosage_delimiter: " / "
+  segments:
+    - "Drug: {drug_name}"
+    - "Strength: [{dosages}]"
+    - "Route: {route}"
+    - "Category: {therapeutic_category}"
+    - "Class: {drug_class}"
+    - "Subclass: {drug_sub_class}"
 ```
+
+Re-run ingestion after any change here.
 
 ---
 
@@ -379,9 +411,8 @@ milvus:
 etl:
   batch_size: 1000  # For processing large CSV files
 
-gemini:
-  batch_size: 100   # Balance speed vs API limits
-  requests_per_second: 2.0  # Respect API limits
+openai:
+  batch_size: 100   # Texts per embedding request
 
 milvus:
   insertion:
@@ -436,28 +467,27 @@ python -c "from config_loader import ConfigLoader; ConfigLoader('ingestion_confi
 
 #### 2. API Rate Limiting
 
-**Problem**: Gemini API rate limit exceeded
+**Problem**: OpenAI API rate limit exceeded
 ```python
-# Error: "Rate limit exceeded"
-# Solution: Reduce requests_per_second in config
-gemini:
-  requests_per_second: 1.0  # Reduce from 2.0 to 1.0
+# The SDK retries rate limits with backoff (openai.retry_attempts).
+# If the run still fails, raise the retry count or lower the batch size:
+openai:
+  retry_attempts: 6
+  batch_size: 50
 ```
 
 #### 3. Dimension Mismatch
 
-**Problem**: Embedding dimension mismatch between Gemini and Milvus
+**Problem**: Embedding dimension mismatch between OpenAI and Milvus
 ```
-ERROR: Embedding dimension mismatch: gemini.embedding.dimensions=768 
+ERROR: Embedding dimension mismatch: openai.dimensions=768 
        but milvus.collection.embedding_dimension=512
 ```
 
-**Solution**: Sync dimensions in configuration
+**Solution**: Set both to the same value
 ```yaml
-# Auto-sync in config_loader.py or manually set
-gemini:
-  embedding:
-    dimensions: 768
+openai:
+  dimensions: 768
 milvus:
   collection:
     embedding_dimension: 768  # Must match
@@ -542,7 +572,7 @@ class IngestionConfig(BaseModel):
     """Complete ingestion configuration"""
     data_sources: DataSourceConfig
     etl: ETLConfig
-    gemini: GeminiConfig
+    openai: OpenAIConfig
     milvus: MilvusConfig
     search_text: SearchTextConfig
     error_handling: ErrorHandlingConfig
@@ -560,7 +590,7 @@ class IngestionConfig(BaseModel):
 pip install -r requirements.txt
 
 # If using conda environment
-conda install pandas pymilvus google-generativeai
+conda install pandas pymilvus openai
 ```
 
 **Problem**: Python version mismatch
@@ -580,7 +610,7 @@ sudo apt install python3.8 python3.8-venv python3.8-dev
 ```bash
 # Solution: Check .env file exists and is loaded
 cat .env
-# Should show: GEMINI_API_KEY=your_key_here
+# Should show: OPENAI_API_KEY=your_key_here
 
 # Debug environment loading
 python -c "from config_loader import ConfigLoader; loader = ConfigLoader(); print('Env loaded:', loader._load_env_file())"
@@ -606,12 +636,13 @@ telnet localhost 19530
 docker start milvus-standalone
 ```
 
-**Problem**: Gemini API errors
+**Problem**: OpenAI API errors
 ```bash
 # Test API key validity
-curl -H "Content-Type: application/json" \
-     -d '{"contents":[{"parts":[{"text":"test"}]}]}' \
-     -X POST "https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key=YOUR_API_KEY"
+curl https://api.openai.com/v1/embeddings \
+     -H "Authorization: Bearer $OPENAI_API_KEY" \
+     -H "Content-Type: application/json" \
+     -d '{"model":"text-embedding-3-small","input":"test","dimensions":768}'
 ```
 
 ### Performance Issues
@@ -620,15 +651,10 @@ curl -H "Content-Type: application/json" \
 ```yaml
 # Solutions:
 # 1. Increase batch sizes
-gemini:
+openai:
   batch_size: 200  # Increase from 100
 
-# 2. Enable parallel processing
-etl:
-  parallel_processing: true
-  max_workers: 8
-
-# 3. Optimize index parameters
+# 2. Optimize index parameters
 milvus:
   index:
     params:
@@ -678,7 +704,7 @@ This project is licensed under the MIT License.
 ### Common Resources
 
 - [Milvus Documentation](https://milvus.io/docs)
-- [Google Gemini API](https://ai.google.dev/)
+- [OpenAI Embeddings API](https://platform.openai.com/docs/guides/embeddings)
 - [RxNav API](https://rxnav.nlm.nih.gov/)
 - [ATC Classification](https://www.whocc.no/atc_ddd_index/)
 

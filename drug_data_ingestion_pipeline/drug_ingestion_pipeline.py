@@ -5,13 +5,14 @@ Handles embedding generation and ingestion of pharmaceutical data into Milvus.
 Implements robust error handling, batch processing, and progress tracking.
 """
 
-import time
 import json
-import numpy as np
-from typing import List, Dict, Any, Optional
 import logging
-from pathlib import Path
 import sys
+import time
+from pathlib import Path
+from typing import Any
+
+import numpy as np
 
 try:
     from tqdm import tqdm
@@ -20,261 +21,67 @@ try:
 except ImportError:
     HAS_TQDM = False
 
-import google.generativeai as genai
+from config_loader import IngestionConfig, MilvusConfig, OpenAIConfig
+from drugs_etl_pipeline import StandardizedDrugRecord
+from openai import OpenAI
 from pymilvus import (
-    connections,
     Collection,
     CollectionSchema,
-    FieldSchema,
     DataType,
-    utility,
+    FieldSchema,
     MilvusException,
+    connections,
+    utility,
 )
-
-from drugs_etl_pipeline import StandardizedDrugRecord
-from config_loader import IngestionConfig, GeminiConfig, MilvusConfig
 
 logger = logging.getLogger(__name__)
 
 
-class GeminiEmbeddingGenerator:
-    """
-    Generate embeddings using Google Gemini API.
-    Handles batch processing, rate limiting, retries, and error recovery.
-    """
+class OpenAIEmbeddingGenerator:
+    """Generate unit-length document embeddings with the OpenAI Embeddings API."""
 
-    def __init__(self, config: GeminiConfig):
+    def __init__(self, config: OpenAIConfig):
         self.config = config
-        self._configure_api()
-        self._initialize_rate_limiter()
-        self._actual_dimension = None  # Will be set on first embedding generation
-        self._dimension_validated = False
-
-    def _configure_api(self):
-        """Configure Gemini API with credentials"""
-        try:
-            genai.configure(api_key=self.config.api_key)
-        except Exception as e:
-            logger.error(f"Failed to configure Gemini API: {e}")
-            raise
-
-    def _initialize_rate_limiter(self):
-        """Initialize rate limiting parameters"""
-        self.requests_interval = 1.0 / self.config.requests_per_second
-        self.last_request_time = 0.0
-
-    def _apply_rate_limit(self):
-        """Apply rate limiting between requests"""
-        current_time = time.time()
-        time_since_last_request = current_time - self.last_request_time
-
-        if time_since_last_request < self.requests_interval:
-            sleep_time = self.requests_interval - time_since_last_request
-            time.sleep(sleep_time)
-
-        self.last_request_time = time.time()
-
-    def _validate_and_set_dimension(self, embedding: np.ndarray):
-        """
-        Validate embedding dimension on first call and set actual dimension.
-        Raises error if dimension doesn't match config.
-        """
-        if self._dimension_validated:
-            return
-
-        actual_dim = embedding.shape[0]
-        expected_dim = self.config.embedding.dimensions
-
-        if actual_dim != expected_dim:
-            error_msg = (
-                f"\n{'='*70}\n"
-                f"EMBEDDING DIMENSION MISMATCH\n"
-                f"{'='*70}\n"
-                f"Expected dimension: {expected_dim} (from config)\n"
-                f"Actual dimension:   {actual_dim} (from Gemini API)\n"
-                f"\n"
-                f"The Gemini API returned embeddings with {actual_dim} dimensions,\n"
-                f"but your configuration specifies {expected_dim} dimensions.\n"
-                f"\n"
-                f"SOLUTION:\n"
-                f"Update 'gemini.embedding.dimensions' in your config file to {actual_dim}\n"
-                f"AND update 'milvus.collection.embedding_dimension' to {actual_dim}\n"
-                f"\n"
-                f"Config file: ingestion_config.yaml\n"
-                f"{'='*70}\n"
-            )
-            logger.error(error_msg)
-            raise ValueError(error_msg)
-
-        self._actual_dimension = actual_dim
-        self._dimension_validated = True
-        logger.info(f"Embedding dimension validated: {actual_dim}")
-
-    def get_actual_dimension(self) -> Optional[int]:
-        """Return the actual embedding dimension after validation."""
-        return self._actual_dimension
-
-    def generate_embedding(
-        self, text: str, retry_count: int = 0
-    ) -> Optional[np.ndarray]:
-        """
-        Generate embedding for single text.
-        """
-        if not text or not text.strip():
-            # Return zero vector with actual dimension if validated, else config dimension
-            dim = (
-                self._actual_dimension
-                if self._actual_dimension
-                else self.config.embedding.dimensions
-            )
-            return np.zeros(dim, dtype=np.float32)
-
-        try:
-            self._apply_rate_limit()
-
-            result = genai.embed_content(
-                model=self.config.model_name,
-                content=text,
-                task_type=self.config.task_type,
-                output_dimensionality=self.config.embedding.dimensions,
-            )
-
-            embedding = np.array(result["embedding"], dtype=np.float32)
-
-            # Validate dimension on first successful call
-            if not self._dimension_validated:
-                self._validate_and_set_dimension(embedding)
-
-            # Normalize if configured
-            if self.config.embedding.normalize:
-                norm = np.linalg.norm(embedding)
-                if norm > 0:  # Avoid division by zero
-                    embedding = embedding / norm
-
-            return embedding
-
-        except Exception as e:
-            # Retry logic
-            if retry_count < self.config.retry_attempts:
-                delay = self.config.retry_delay_seconds
-                if self.config.exponential_backoff:
-                    delay *= 2**retry_count
-
-                time.sleep(delay)
-                return self.generate_embedding(text, retry_count + 1)
-
-            if self.config.skip_on_error:
-                logger.warning(
-                    f"Skipping embedding for text after {retry_count} retries: {e}"
-                )
-                dim = (
-                    self._actual_dimension
-                    if self._actual_dimension
-                    else self.config.embedding.dimensions
-                )
-                return np.zeros(dim, dtype=np.float32)
-
-            raise
+        # The SDK retries rate limits and transient errors with backoff.
+        self.client = OpenAI(
+            api_key=config.api_key,
+            max_retries=config.retry_attempts,
+            timeout=config.timeout_seconds,
+        )
 
     def generate_embeddings_batch(
-        self, texts: List[str], show_progress: bool = True
-    ) -> List[np.ndarray]:
+        self, texts: list[str], show_progress: bool = True
+    ) -> list[np.ndarray]:
         """
-        Generate embeddings for multiple texts in batches.
-        Ensures exactly one embedding per input text with proper error handling.
+        Return one unit-length embedding per text, in order.
+
+        Raises ValueError for a blank text or an unexpected vector size. API errors
+        propagate once the SDK's retries are exhausted, so a failed run never
+        inserts partial or zero vectors.
         """
-        if not texts:
-            return []
+        if any(not text.strip() for text in texts):
+            raise ValueError("Cannot embed a blank search text.")
 
-        embeddings = []
+        starts = range(0, len(texts), self.config.batch_size)
+        if show_progress and HAS_TQDM:
+            starts = tqdm(starts, desc="Embedding batches")
 
-        for batch_idx in range(0, len(texts), self.config.batch_size):
-            batch_texts = texts[batch_idx : batch_idx + self.config.batch_size]
-            batch_embeddings = []
-
-            try:
-                self._apply_rate_limit()
-
-                result = genai.embed_content(
-                    model=self.config.model_name,
-                    content=batch_texts,
-                    task_type=self.config.task_type,
-                    output_dimensionality=self.config.embedding.dimensions,
-                )
-
-                batch_embeddings_raw = result["embedding"]
-
-                # Validate batch response
-                if len(batch_embeddings_raw) != len(batch_texts):
-                    logger.warning(
-                        f"Batch API returned {len(batch_embeddings_raw)} embeddings "
-                        f"for {len(batch_texts)} texts. Processing individually."
-                    )
-                    # Discard partial batch response and process all texts individually
-                    batch_embeddings = self._process_texts_individually(batch_texts)
-                else:
-                    # Convert and normalize embeddings
-                    for i, embedding in enumerate(batch_embeddings_raw):
-                        emb_array = np.array(embedding, dtype=np.float32)
-
-                        # Validate dimension on first successful embedding
-                        if not self._dimension_validated and i == 0:
-                            self._validate_and_set_dimension(emb_array)
-
-                        if self.config.embedding.normalize:
-                            norm = np.linalg.norm(emb_array)
-                            if norm > 0:
-                                emb_array = emb_array / norm
-
-                        batch_embeddings.append(emb_array)
-
-            except Exception as e:
-                logger.warning(
-                    f"Batch embedding failed at index {batch_idx}: {e}. Processing individually."
-                )
-                # Process entire batch individually
-                batch_embeddings = self._process_texts_individually(batch_texts)
-
-            # Validate we got embeddings for all texts in this batch
-            if len(batch_embeddings) != len(batch_texts):
-                raise RuntimeError(
-                    f"Critical error: Generated {len(batch_embeddings)} embeddings "
-                    f"for {len(batch_texts)} texts in batch starting at index {batch_idx}"
-                )
-
-            embeddings.extend(batch_embeddings)
-
-        # Final validation
-        if len(embeddings) != len(texts):
-            raise RuntimeError(
-                f"Embedding generation failed: generated {len(embeddings)} embeddings "
-                f"for {len(texts)} texts"
+        embeddings: list[np.ndarray] = []
+        for start in starts:
+            batch = texts[start : start + self.config.batch_size]
+            response = self.client.embeddings.create(
+                model=self.config.model_name,
+                input=batch,
+                dimensions=self.config.dimensions,
             )
-
-        return embeddings
-
-    def _process_texts_individually(self, texts: List[str]) -> List[np.ndarray]:
-        """
-        Process texts one by one with proper error handling.
-        Guarantees one embedding per text.
-        """
-        embeddings = []
-
-        for text in texts:
-            embedding = self.generate_embedding(text)
-
-            if embedding is None:
-                # generate_embedding returns None only if skip_on_error is False
-                # and all retries failed - this should raise an exception
-                logger.error(f"Failed to generate embedding for text: {text[:100]}...")
-                dim = (
-                    self._actual_dimension
-                    if self._actual_dimension
-                    else self.config.embedding.dimensions
-                )
-                embedding = np.zeros(dim, dtype=np.float32)
-
-            embeddings.append(embedding)
+            for item in sorted(response.data, key=lambda item: item.index):
+                vector = np.array(item.embedding, dtype=np.float32)
+                if vector.shape[0] != self.config.dimensions:
+                    raise ValueError(
+                        f"Expected {self.config.dimensions}-dimensional embeddings "
+                        f"from {self.config.model_name}, got {vector.shape[0]}."
+                    )
+                embeddings.append(vector / np.linalg.norm(vector))
 
         return embeddings
 
@@ -286,7 +93,7 @@ class MilvusCollectionManager:
 
     def __init__(self, config: MilvusConfig):
         self.config = config
-        self.collection: Optional[Collection] = None
+        self.collection: Collection | None = None
         self.is_connected = False
 
     def connect(self):
@@ -296,6 +103,7 @@ class MilvusCollectionManager:
                 "alias": self.config.connection.alias,
                 "host": self.config.connection.host,
                 "port": self.config.connection.port,
+                "timeout": self.config.connection.timeout,
             }
 
             if self.config.connection.user:
@@ -305,9 +113,7 @@ class MilvusCollectionManager:
             if self.config.connection.secure:
                 conn_params["secure"] = True
                 if self.config.connection.server_pem_path:
-                    conn_params["server_pem_path"] = (
-                        self.config.connection.server_pem_path
-                    )
+                    conn_params["server_pem_path"] = self.config.connection.server_pem_path
                 if self.config.connection.server_name:
                     conn_params["server_name"] = self.config.connection.server_name
 
@@ -393,7 +199,7 @@ class MilvusCollectionManager:
                 name="embedding",
                 dtype=DataType.FLOAT_VECTOR,
                 dim=self.config.collection.embedding_dimension,
-                description="Gemini embedding vector",
+                description="OpenAI embedding vector",
             ),
         ]
 
@@ -409,18 +215,19 @@ class MilvusCollectionManager:
         """Create collection with defined schema."""
         collection_name = self.config.collection.name
         should_drop = (
-            drop_if_exists
-            if drop_if_exists is not None
-            else self.config.collection.drop_existing
+            drop_if_exists if drop_if_exists is not None else self.config.collection.drop_existing
         )
 
-        # Check if collection exists
-        if utility.has_collection(collection_name):
+        # Every call below must name the alias, or it silently acts on the
+        # "default" connection instead of the one connect() opened.
+        alias = self.config.connection.alias
+
+        if utility.has_collection(collection_name, using=alias):
             if should_drop:
-                utility.drop_collection(collection_name)
+                utility.drop_collection(collection_name, using=alias)
             else:
-                # Check if existing collection has matching dimensions
-                existing_collection = Collection(collection_name)
+                # Reuse the existing collection, but warn if its vector width differs
+                existing_collection = Collection(collection_name, using=alias)
                 self.collection = existing_collection
 
                 # Validate embedding dimension matches config
@@ -477,9 +284,7 @@ class MilvusCollectionManager:
     def create_index(self):
         """Create index on embedding field for efficient similarity search"""
         if self.collection is None:
-            raise RuntimeError(
-                "Collection not initialized. Call create_collection() first."
-            )
+            raise RuntimeError("Collection not initialized. Call create_collection() first.")
 
         index_params = {
             "index_type": self.config.index.type,
@@ -488,9 +293,7 @@ class MilvusCollectionManager:
         }
 
         try:
-            self.collection.create_index(
-                field_name="embedding", index_params=index_params
-            )
+            self.collection.create_index(field_name="embedding", index_params=index_params)
 
         except MilvusException as e:
             logger.error(f"Failed to create index: {e}")
@@ -509,19 +312,23 @@ class MilvusCollectionManager:
 
     def insert_records(
         self,
-        records: List[StandardizedDrugRecord],
-        embeddings: List[np.ndarray],
-        batch_size: int = None,
+        records: list[StandardizedDrugRecord],
+        embeddings: list[np.ndarray],
+        search_texts: list[str],
+        batch_size: int | None = None,
     ) -> int:
-        """
-        Insert drug records with embeddings into collection.
+        """Insert records, their embeddings and the search text each was embedded from.
+
+        ``search_texts`` is passed in rather than regenerated so that the stored
+        search_text column is exactly the string that produced the stored vector.
         """
         if self.collection is None:
             raise RuntimeError("Collection not initialized")
 
-        if len(records) != len(embeddings):
+        if not (len(records) == len(embeddings) == len(search_texts)):
             raise ValueError(
-                f"Records ({len(records)}) and embeddings ({len(embeddings)}) count mismatch"
+                f"Counts must match: {len(records)} records, {len(embeddings)} "
+                f"embeddings, {len(search_texts)} search texts"
             )
 
         batch_size = batch_size or self.config.insertion.batch_size
@@ -541,9 +348,9 @@ class MilvusCollectionManager:
             batch_end = min(batch_start + batch_size, len(records))
             batch_records = records[batch_start:batch_end]
             batch_embeddings = embeddings[batch_start:batch_end]
+            batch_search_texts = search_texts[batch_start:batch_end]
 
-            # Prepare data in column format
-            data = self._prepare_batch_data(batch_records, batch_embeddings)
+            data = self._prepare_batch_data(batch_records, batch_embeddings, batch_search_texts)
 
             try:
                 # Insert batch
@@ -560,11 +367,14 @@ class MilvusCollectionManager:
         return total_inserted
 
     def _prepare_batch_data(
-        self, records: List[StandardizedDrugRecord], embeddings: List[np.ndarray]
-    ) -> List[List[Any]]:
+        self,
+        records: list[StandardizedDrugRecord],
+        embeddings: list[np.ndarray],
+        search_texts: list[str],
+    ) -> list[list[Any]]:
         """Prepare batch data in column format for Milvus insertion.
 
-        Column order must match schema in ingestion_config.yaml:
+        Column order must match the field order in _create_collection_schema():
         1. drug_name
         2. drug_class
         3. drug_sub_class
@@ -575,10 +385,10 @@ class MilvusCollectionManager:
         8. search_text
         9. embedding
         """
-        # Validate inputs
-        if len(records) != len(embeddings):
+        if not (len(records) == len(embeddings) == len(search_texts)):
             raise ValueError(
-                f"Cannot prepare batch data: {len(records)} records but {len(embeddings)} embeddings"
+                f"Cannot prepare batch data: {len(records)} records, "
+                f"{len(embeddings)} embeddings, {len(search_texts)} search texts"
             )
 
         # Validate all embeddings are numpy arrays with correct shape
@@ -590,9 +400,9 @@ class MilvusCollectionManager:
             # Check if there's a dimension mismatch with collection config
             if actual_dim != expected_dim:
                 error_msg = (
-                    f"\n{'='*70}\n"
+                    f"\n{'=' * 70}\n"
                     f"COLLECTION DIMENSION MISMATCH\n"
-                    f"{'='*70}\n"
+                    f"{'=' * 70}\n"
                     f"Embedding dimension: {actual_dim}\n"
                     f"Collection expects: {expected_dim}\n"
                     f"\n"
@@ -605,7 +415,7 @@ class MilvusCollectionManager:
                     f"to true to recreate the collection.\n"
                     f"\n"
                     f"Config file: ingestion_config.yaml\n"
-                    f"{'='*70}\n"
+                    f"{'=' * 70}\n"
                 )
                 logger.error(error_msg)
                 raise ValueError(error_msg)
@@ -613,9 +423,7 @@ class MilvusCollectionManager:
             # Validate each embedding
             for i, emb in enumerate(embeddings):
                 if not isinstance(emb, np.ndarray):
-                    raise TypeError(
-                        f"Embedding at index {i} is not a numpy array: {type(emb)}"
-                    )
+                    raise TypeError(f"Embedding at index {i} is not a numpy array: {type(emb)}")
                 if emb.shape[0] != actual_dim:
                     raise ValueError(
                         f"Embedding at index {i} has dimension {emb.shape[0]}, expected {actual_dim}"
@@ -629,7 +437,7 @@ class MilvusCollectionManager:
             [r.route_of_administration or "" for r in records],
             [r.formulation or "" for r in records],
             [json.dumps(r.dosages) for r in records],
-            [r.generate_search_text() for r in records],
+            list(search_texts),
             [emb.tolist() for emb in embeddings],
         ]
 
@@ -637,12 +445,12 @@ class MilvusCollectionManager:
         lengths = [len(col) for col in data]
         if len(set(lengths)) != 1:
             raise ValueError(
-                f"Column length mismatch in batch data preparation: {dict(zip(range(len(lengths)), lengths))}"
+                f"Column length mismatch in batch data preparation: {dict(zip(range(len(lengths)), lengths, strict=False))}"
             )
 
         return data
 
-    def get_collection_stats(self) -> Dict[str, Any]:
+    def get_collection_stats(self) -> dict[str, Any]:
         """Get collection statistics."""
         if self.collection is None:
             return {}
@@ -671,17 +479,14 @@ class VectorDBIngestionPipeline:
     def __init__(self, config: IngestionConfig):
         self.config = config
 
-        # Validate dimension consistency between Gemini and Milvus configs
-        if (
-            config.gemini.embedding.dimensions
-            != config.milvus.collection.embedding_dimension
-        ):
+        # Validate dimension consistency between OpenAI and Milvus configs
+        if config.openai.dimensions != config.milvus.collection.embedding_dimension:
             raise ValueError(
-                f"Dimension mismatch: Gemini embedding dimensions ({config.gemini.embedding.dimensions}) "
+                f"Dimension mismatch: OpenAI embedding dimensions ({config.openai.dimensions}) "
                 f"must match Milvus collection embedding_dimension ({config.milvus.collection.embedding_dimension})"
             )
 
-        self.embedding_generator = GeminiEmbeddingGenerator(config.gemini)
+        self.embedding_generator = OpenAIEmbeddingGenerator(config.openai)
         self.collection_manager = MilvusCollectionManager(config.milvus)
 
         # Statistics
@@ -694,10 +499,19 @@ class VectorDBIngestionPipeline:
             "end_time": None,
         }
 
-    def run(self, records: List[StandardizedDrugRecord]) -> Dict[str, Any]:
+    def run(self, records: list[StandardizedDrugRecord]) -> dict[str, Any]:
+        """Embed the records and insert them into Milvus.
+
+        Raises:
+            ValueError: If there are no records, rather than reporting a successful
+                run that ingested nothing.
         """
-        Execute complete ingestion pipeline.
-        """
+        if not records:
+            raise ValueError(
+                "No records to ingest. Run the ETL pipeline first and check "
+                "data_sources.input_files in ingestion_config.yaml."
+            )
+
         self.stats["start_time"] = time.time()
         self.stats["total_records"] = len(records)
 
@@ -714,9 +528,12 @@ class VectorDBIngestionPipeline:
             print("Step 2: Setting up collection")
             self.collection_manager.create_collection()
 
-            # Step 3: Generate embeddings
+            # Step 3: Generate embeddings. These strings are rendered once here and
+            # reused for the stored search_text column, so the two cannot diverge.
             print("Step 3: Generating embeddings")
-            search_texts = [record.generate_search_text() for record in records]
+            search_texts = [
+                record.generate_search_text(self.config.search_text) for record in records
+            ]
 
             # Generate all embeddings at once - the method handles batching internally
             embeddings = self.embedding_generator.generate_embeddings_batch(
@@ -735,7 +552,7 @@ class VectorDBIngestionPipeline:
             # Step 4: Insert into Milvus
             print("Step 4: Inserting records")
             records_inserted = self.collection_manager.insert_records(
-                records, embeddings
+                records, embeddings, search_texts
             )
             self.stats["records_inserted"] = records_inserted
 
@@ -753,9 +570,7 @@ class VectorDBIngestionPipeline:
             collection_stats = self.collection_manager.get_collection_stats()
 
             self.stats["end_time"] = time.time()
-            self.stats["duration_seconds"] = (
-                self.stats["end_time"] - self.stats["start_time"]
-            )
+            self.stats["duration_seconds"] = self.stats["end_time"] - self.stats["start_time"]
             self.stats["collection_stats"] = collection_stats
 
             self._print_final_report()
@@ -784,9 +599,7 @@ class VectorDBIngestionPipeline:
 
         if self.stats.get("collection_stats"):
             print(f"  Collection: {self.stats['collection_stats'].get('name')}")
-            print(
-                f"  Total entities: {self.stats['collection_stats'].get('num_entities')}"
-            )
+            print(f"  Total entities: {self.stats['collection_stats'].get('num_entities')}")
 
         print("=" * 60)
 
@@ -796,8 +609,8 @@ if __name__ == "__main__":
     # Add parent directory to path for imports
     sys.path.insert(0, str(Path(__file__).parent))
 
-    from drugs_etl_pipeline import PharmaceuticalETLPipeline
     from config_loader import ConfigLoader
+    from drugs_etl_pipeline import PharmaceuticalETLPipeline
 
     # Setup minimal logging - only errors
     logging.basicConfig(level=logging.ERROR, format="%(levelname)s: %(message)s")
