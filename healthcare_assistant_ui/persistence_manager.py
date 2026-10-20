@@ -8,8 +8,9 @@ for request tracking and response correlation.
 import json
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Any, List, Optional
-from chatbot_ui.config import CONVERSATION_DIR, MAX_HISTORY_MESSAGES
+from typing import Any
+
+from healthcare_assistant_ui.config import CONVERSATION_DIR, MAX_HISTORY_MESSAGES
 
 
 class ConversationPersistenceManager:
@@ -21,7 +22,7 @@ class ConversationPersistenceManager:
     and response_id from the Response API.
     """
 
-    def __init__(self, storage_dir: Optional[Path] = None):
+    def __init__(self, storage_dir: Path | None = None):
         """
         Initialize the persistence manager.
 
@@ -43,12 +44,10 @@ class ConversationPersistenceManager:
             Path to the conversation JSON file.
         """
         # Sanitize session_id to prevent directory traversal
-        safe_session_id = "".join(
-            c for c in session_id if c.isalnum() or c in ("-", "_")
-        )
+        safe_session_id = "".join(c for c in session_id if c.isalnum() or c in ("-", "_"))
         return self.storage_dir / f"{safe_session_id}.json"
 
-    def _create_new_conversation(self, session_id: str) -> Dict[str, Any]:
+    def _create_new_conversation(self, session_id: str) -> dict[str, Any]:
         """
         Create a new conversation structure.
 
@@ -65,7 +64,7 @@ class ConversationPersistenceManager:
             "messages": [],
         }
 
-    def load_conversation(self, session_id: str) -> Dict[str, Any]:
+    def load_conversation(self, session_id: str) -> dict[str, Any]:
         """
         Load a conversation from storage.
 
@@ -81,10 +80,10 @@ class ConversationPersistenceManager:
             return self._create_new_conversation(session_id)
 
         try:
-            with open(filepath, "r", encoding="utf-8") as f:
+            with open(filepath, encoding="utf-8") as f:
                 conversation = json.load(f)
             return conversation
-        except (json.JSONDecodeError, IOError) as e:
+        except (OSError, json.JSONDecodeError) as e:
             # If file is corrupted, create new conversation
             print(f"Error loading conversation {session_id}: {e}")
             return self._create_new_conversation(session_id)
@@ -96,7 +95,7 @@ class ConversationPersistenceManager:
         response_id: str,
         user_message: str,
         assistant_response: str,
-        metadata: Optional[Dict[str, Any]] = None,
+        metadata: dict[str, Any] | None = None,
     ) -> bool:
         """
         Save a conversation turn (user message + assistant response).
@@ -147,9 +146,7 @@ class ConversationPersistenceManager:
             # Enforce message limit
             if len(conversation["messages"]) > MAX_HISTORY_MESSAGES * 2:
                 # Keep most recent messages (multiply by 2 for user+assistant pairs)
-                conversation["messages"] = conversation["messages"][
-                    -(MAX_HISTORY_MESSAGES * 2) :
-                ]
+                conversation["messages"] = conversation["messages"][-(MAX_HISTORY_MESSAGES * 2) :]
 
             # Save to file
             filepath = self._get_conversation_filepath(session_id)
@@ -158,11 +155,11 @@ class ConversationPersistenceManager:
 
             return True
 
-        except (IOError, json.JSONEncodeError) as e:
+        except (OSError, json.JSONEncodeError) as e:
             print(f"Error saving conversation {session_id}: {e}")
             return False
 
-    def load_conversation_history(self, session_id: str) -> List[Dict[str, Any]]:
+    def load_conversation_history(self, session_id: str) -> list[dict[str, Any]]:
         """
         Load the message history for a conversation.
 
@@ -175,7 +172,7 @@ class ConversationPersistenceManager:
         conversation = self.load_conversation(session_id)
         return conversation.get("messages", [])
 
-    def get_conversation_summary(self, session_id: str) -> Dict[str, Any]:
+    def get_conversation_summary(self, session_id: str) -> dict[str, Any]:
         """
         Get a summary of the conversation metadata.
 
@@ -221,11 +218,11 @@ class ConversationPersistenceManager:
         try:
             filepath.unlink()
             return True
-        except IOError as e:
+        except OSError as e:
             print(f"Error deleting conversation {session_id}: {e}")
             return False
 
-    def list_conversations(self) -> List[Dict[str, Any]]:
+    def list_conversations(self) -> list[dict[str, Any]]:
         """
         List all stored conversations with summary information.
 

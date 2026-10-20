@@ -1,4 +1,4 @@
-# Quick Start Guide - Asclepius Chainlit UI
+# Quick Start Guide - Healthcare Assistant UI
 
 ## Prerequisites Check
 
@@ -26,9 +26,7 @@ Ensure your `.env` file contains:
 # OpenAI API Configuration
 OPENAI_API_KEY=your_openai_api_key_here
 OPENAI_MODEL_NAME=gpt-4o
-
-# Gemini API Configuration (for embeddings)
-GEMINI_API_KEY=your_gemini_api_key_here
+OPENAI_EMBEDDING_MODEL=text-embedding-3-small
 
 # Milvus Configuration
 MILVUS_HOST=localhost
@@ -60,17 +58,17 @@ The application requires the pharmaceutical drug database to be ingested into Mi
 
 ```bash
 cd drug_data_ingestion_pipeline
-python milvus_drug_ingestion_pipeline.py
+python drug_ingestion_pipeline.py
 ```
 
 ### 5. Launch the Chainlit UI
 
 From the project root directory:
 
-**Note**: Port 8000 is typically used by Milvus Attu UI. Use port 8080 to avoid conflicts.
+**Note**: Port 8000 is often taken by other local services (Milvus Attu now uses 8002). Use port 8080 to avoid conflicts.
 
 ```bash
-chainlit run chatbot_ui/app.py --port 8080
+chainlit run healthcare_assistant_ui/app.py --port 8080
 ```
 
 The application will start and display:
@@ -87,15 +85,15 @@ Open your web browser and navigate to:
 http://localhost:8080
 ```
 
-**Alternative**: If you want to use port 8000 (and Milvus Attu is not running):
+**Alternative**: If you want to use port 8000 (and nothing else is using it):
 
 ```bash
-chainlit run chatbot_ui/app.py
+chainlit run healthcare_assistant_ui/app.py
 # Access at http://localhost:8000
 ```
 
 You should see:
-- Welcome message from Asclepius
+- Welcome message from Healthcare Assistant
 - Starter prompts for common medical questions
 - Chat interface ready to accept questions
 
@@ -177,22 +175,22 @@ echo $ENABLE_STREAMING  # Should be 'true'
 
 ```bash
 # Recommended: Port 8080 (avoids Milvus Attu conflict)
-chainlit run chatbot_ui/app.py --port 8080
+chainlit run healthcare_assistant_ui/app.py --port 8080
 
 # Or use any other available port
-chainlit run chatbot_ui/app.py --port 3000
+chainlit run healthcare_assistant_ui/app.py --port 3000
 ```
 
 ### Development Mode (Auto-reload)
 
 ```bash
-chainlit run chatbot_ui/app.py --watch
+chainlit run healthcare_assistant_ui/app.py --watch
 ```
 
 ### Custom Host (Remote Access)
 
 ```bash
-chainlit run chatbot_ui/app.py --host 0.0.0.0 --port 8000
+chainlit run healthcare_assistant_ui/app.py --host 0.0.0.0 --port 8000
 ```
 
 ## Conversation Persistence
@@ -200,23 +198,23 @@ chainlit run chatbot_ui/app.py --host 0.0.0.0 --port 8000
 Conversations are automatically saved to:
 
 ```
-chatbot_ui/conversations/
+healthcare_assistant_ui/conversations/
 ```
 
 Each conversation is stored as a JSON file named with the session ID:
 
 ```
-chatbot_ui/conversations/<session_id>.json
+healthcare_assistant_ui/conversations/<session_id>.json
 ```
 
 ### View Conversation History
 
 ```bash
 # List all conversations
-ls -la chatbot_ui/conversations/
+ls -la healthcare_assistant_ui/conversations/
 
 # View a specific conversation
-cat chatbot_ui/conversations/<session_id>.json | python -m json.tool
+cat healthcare_assistant_ui/conversations/<session_id>.json | python -m json.tool
 ```
 
 ### Clean Up Old Conversations
@@ -225,14 +223,14 @@ You can manually delete old conversation files:
 
 ```bash
 # Delete conversations older than 30 days
-find chatbot_ui/conversations/ -name "*.json" -mtime +30 -delete
+find healthcare_assistant_ui/conversations/ -name "*.json" -mtime +30 -delete
 ```
 
 ## Configuration Customization
 
 ### Change Welcome Message
 
-Edit `chatbot_ui/config.py`:
+Edit `healthcare_assistant_ui/config.py`:
 
 ```python
 WELCOME_MESSAGE = "Your custom welcome message here"
@@ -240,7 +238,7 @@ WELCOME_MESSAGE = "Your custom welcome message here"
 
 ### Modify Starter Prompts
 
-Edit `chatbot_ui/starter_prompts.py`:
+Edit `healthcare_assistant_ui/starter_prompts.py`:
 
 ```python
 def get_starter_prompts() -> List[cl.Starter]:
@@ -256,7 +254,7 @@ def get_starter_prompts() -> List[cl.Starter]:
 
 ### Adjust Session Timeout
 
-Edit `chatbot_ui/.chainlit`:
+Edit `healthcare_assistant_ui/.chainlit`:
 
 ```toml
 [project]
@@ -295,5 +293,5 @@ For production deployment:
 
 ---
 
-**Ready to Start**: Run `chainlit run chatbot_ui/app.py --port 8080` and visit `http://localhost:8080`
+**Ready to Start**: Run `chainlit run healthcare_assistant_ui/app.py --port 8080` and visit `http://localhost:8080`
 

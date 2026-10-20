@@ -13,7 +13,7 @@
 ┌──────────────────────────────▼──────────────────────────────────────┐
 │                      Chainlit Framework                              │
 │  ┌───────────────────────────────────────────────────────────────┐  │
-│  │                    chatbot_ui/app.py                          │  │
+│  │                    healthcare_assistant_ui/app.py                          │  │
 │  │  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐          │  │
 │  │  │@cl.on_chat_ │  │@cl.on_      │  │@cl.on_chat_ │          │  │
 │  │  │start        │  │message      │  │end          │          │  │
@@ -23,7 +23,7 @@
              │                 │                 │
              │                 │                 │
 ┌────────────▼─────────────────▼─────────────────▼────────────────────┐
-│                   chatbot_ui/chat_handler.py                         │
+│                   healthcare_assistant_ui/chat_handler.py                         │
 │  ┌────────────────────────────────────────────────────────────────┐ │
 │  │  ChainlitChatHandler                                           │ │
 │  │  ├─ handle_message() → AsyncGenerator[chunk]                  │ │
@@ -267,7 +267,7 @@ User Connects
 Conversation Storage (JSON-based)
 
 ┌──────────────────────────────────────────────┐
-│  chatbot_ui/conversations/                   │
+│  healthcare_assistant_ui/conversations/                   │
 │                                              │
 │  ├─ {session_id_1}.json                     │
 │  │  {                                        │
@@ -373,7 +373,7 @@ Error Occurs
 ┌─────────────────────────────────────────────┐
 │  Environment Variables (.env)                │
 │  - OPENAI_API_KEY                           │
-│  - GEMINI_API_KEY                           │
+│  - OPENAI_EMBEDDING_MODEL                   │
 │  - MILVUS_HOST/PORT                         │
 │  - ENABLE_STREAMING                         │
 │  - ENABLE_CLEANUP                           │
@@ -389,7 +389,7 @@ Error Occurs
                │ used by
                │
 ┌──────────────▼──────────────────────────────┐
-│  chatbot_ui/config.py (UI Settings)         │
+│  healthcare_assistant_ui/config.py (UI Settings)         │
 │  - APP_TITLE                                │
 │  - SHOW_CITATION_ELEMENTS                   │
 │  - STREAM_RESPONSES                         │
@@ -398,7 +398,7 @@ Error Occurs
                │ used by
                │
 ┌──────────────▼──────────────────────────────┐
-│  chatbot_ui/.chainlit (Chainlit Config)    │
+│  healthcare_assistant_ui/.chainlit (Chainlit Config)    │
 │  - UI theme                                 │
 │  - Session timeout                          │
 │  - Feature flags                            │
@@ -490,8 +490,7 @@ Storage:
   └─ Vector Store (clinical guidelines)
 
 External Services:
-  ├─ OpenAI API (LLM)
-  ├─ Google Gemini (embeddings)
+  ├─ OpenAI API (LLM + embeddings)
   └─ Milvus (vector search)
 ```
 
@@ -522,4 +521,6 @@ External Services:
 ---
 
 This architecture provides a solid foundation for the Chainlit UI integration while maintaining flexibility for future enhancements and scalability improvements.
+
+
 

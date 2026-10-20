@@ -1,6 +1,6 @@
 # Chainlit UI for Drug Recommendation Chatbot
 
-Professional web-based user interface for the Asclepius Healthcare AI Assistant, built with the Chainlit framework.
+Web-based interface for Healthcare Assistant, built with Chainlit.
 
 ## Overview
 
@@ -17,7 +17,7 @@ This module provides a clean, intuitive chat interface that integrates seamlessl
 ### Component Structure
 
 ```
-chatbot_ui/
+healthcare_assistant_ui/
 ├── app.py                    # Main Chainlit application with lifecycle handlers
 ├── chat_handler.py           # Message processing and agent integration
 ├── persistence_manager.py    # JSON-based conversation storage
@@ -50,7 +50,6 @@ Ensure you have completed the main project setup:
 2. Configure environment variables in `.env`:
    ```env
    OPENAI_API_KEY=your_openai_api_key
-   GEMINI_API_KEY=your_gemini_api_key
    MILVUS_HOST=localhost
    MILVUS_PORT=19530
    ```
@@ -62,7 +61,7 @@ Ensure you have completed the main project setup:
 Start the Chainlit UI application:
 
 ```bash
-chainlit run chatbot_ui/app.py
+chainlit run healthcare_assistant_ui/app.py
 ```
 
 The application will be available at `http://localhost:8000` by default.
@@ -73,13 +72,13 @@ Chainlit supports various command-line options:
 
 ```bash
 # Run on a specific port
-chainlit run chatbot_ui/app.py --port 8080
+chainlit run healthcare_assistant_ui/app.py --port 8080
 
 # Run in watch mode (auto-reload on file changes)
-chainlit run chatbot_ui/app.py --watch
+chainlit run healthcare_assistant_ui/app.py --watch
 
 # Run with custom host
-chainlit run chatbot_ui/app.py --host 0.0.0.0
+chainlit run healthcare_assistant_ui/app.py --host 0.0.0.0
 ```
 
 ## Key Features
@@ -88,7 +87,7 @@ chainlit run chatbot_ui/app.py --host 0.0.0.0
 
 The UI streams responses token-by-token as the agent generates them, providing immediate feedback to users. This is powered by the agent's streaming capabilities integrated through the `ChainlitChatHandler`.
 
-**Implementation**: `chatbot_ui/app.py` - `@cl.on_message` handler
+**Implementation**: `healthcare_assistant_ui/app.py` - `@cl.on_message` handler
 
 ### 2. Citation Display
 
@@ -98,7 +97,7 @@ Citations from clinical guidelines appear in two formats:
 - **Side Elements**: Expandable citation cards with source filename and relevant excerpts
 - **References Section**: Formatted list appended to response
 
-**Implementation**: `chatbot_ui/citation_formatter.py` - `ChainlitCitationFormatter` class
+**Implementation**: `healthcare_assistant_ui/citation_formatter.py` - `ChainlitCitationFormatter` class
 
 ### 3. Conversation Persistence
 
@@ -139,7 +138,7 @@ All conversations are persisted to JSON files with correlation IDs:
 }
 ```
 
-**Implementation**: `chatbot_ui/persistence_manager.py` - `ConversationPersistenceManager` class
+**Implementation**: `healthcare_assistant_ui/persistence_manager.py` - `ConversationPersistenceManager` class
 
 ### 4. Starter Prompts
 
@@ -151,23 +150,23 @@ Users are greeted with example questions covering common medical topics:
 - Medication side effects
 - Therapeutic recommendations
 
-**Implementation**: `chatbot_ui/starter_prompts.py` - `get_starter_prompts()` function
+**Implementation**: `healthcare_assistant_ui/starter_prompts.py` - `get_starter_prompts()` function
 
 ## Configuration
 
 ### UI Settings
 
-Edit `chatbot_ui/config.py` to customize the application:
+Edit `healthcare_assistant_ui/config.py` to customize the application:
 
 ```python
 # Application Metadata
-APP_TITLE = "Asclepius Healthcare AI Assistant"
+APP_TITLE = "Healthcare Assistant"
 APP_DESCRIPTION = "Evidence-based medical guidance..."
 
 # Persistence Settings
 CHAT_HISTORY_ENABLED = True
 MAX_HISTORY_MESSAGES = 50
-CONVERSATION_DIR = Path("chatbot_ui/conversations")
+CONVERSATION_DIR = Path("healthcare_assistant_ui/conversations")
 
 # Agent Configuration
 AGENT_CHAT_HISTORY_LIMIT = 10
@@ -242,7 +241,7 @@ Manages JSON-based conversation storage:
 - `list_conversations()`: List all stored conversations
 - `cleanup_old_conversations()`: Remove old conversations
 
-**Storage Location**: `chatbot_ui/conversations/` directory
+**Storage Location**: `healthcare_assistant_ui/conversations/` directory
 
 ### Citation Formatter (`citation_formatter.py`)
 
@@ -281,7 +280,7 @@ The UI integrates seamlessly with the existing agent infrastructure:
 ### Agent Initialization
 
 ```python
-# From chatbot_ui/app.py
+# From healthcare_assistant_ui/app.py
 agent = AsclepiusHealthcareAgent(chat_history_limit=10)
 vector_store_id = await agent.initialize_knowledge_base()
 ```
@@ -289,7 +288,7 @@ vector_store_id = await agent.initialize_knowledge_base()
 ### Streaming Integration
 
 ```python
-# From chatbot_ui/chat_handler.py
+# From healthcare_assistant_ui/chat_handler.py
 result = await agent.consult(
     query=message,
     use_clinical_guidelines=True,
@@ -358,7 +357,7 @@ DEBUG_MODE=true
    - Review citation extraction in logs
 
 4. **Persistence not saving**:
-   - Ensure `chatbot_ui/conversations/` directory exists
+   - Ensure `healthcare_assistant_ui/conversations/` directory exists
    - Check file permissions
    - Review error logs in console
 
@@ -377,7 +376,7 @@ The current JSON-based persistence can be easily migrated to MongoDB:
 
 1. Create MongoDB persistence manager implementing same interface
 2. Replace `ConversationPersistenceManager` initialization in `chat_handler.py`
-3. Update `chatbot_ui/config.py` with MongoDB connection settings
+3. Update `healthcare_assistant_ui/config.py` with MongoDB connection settings
 4. No changes needed to `app.py` or other components
 
 **Planned MongoDB Schema**:
@@ -469,13 +468,13 @@ cat .env | grep ENABLE_STREAMING
 
 ```bash
 # Check conversations directory exists
-ls -la chatbot_ui/conversations/
+ls -la healthcare_assistant_ui/conversations/
 
 # Create directory if missing
-mkdir -p chatbot_ui/conversations
+mkdir -p healthcare_assistant_ui/conversations
 
 # Check permissions
-chmod 755 chatbot_ui/conversations
+chmod 755 healthcare_assistant_ui/conversations
 ```
 
 ## Support
@@ -498,4 +497,8 @@ This component follows the same license as the main project.
 - [OpenAI Responses API](https://platform.openai.com/docs/api-reference/responses) - AI response generation
 - [Milvus](https://milvus.io/) - Vector database for clinical guidelines
 - Python 3.9+ - Programming language
+
+
+
+
 

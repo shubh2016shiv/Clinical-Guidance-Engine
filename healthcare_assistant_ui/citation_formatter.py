@@ -6,7 +6,8 @@ supporting both inline markdown citations and expandable side elements.
 """
 
 import re
-from typing import List, Dict, Any, Optional
+from typing import Any
+
 import chainlit as cl
 
 
@@ -24,9 +25,7 @@ class ChainlitCitationFormatter:
         """Initialize the citation formatter."""
         self.citation_pattern = re.compile(r"\[(\d+)\]")
 
-    def format_inline_citations(
-        self, text: str, citations: List[Dict[str, Any]]
-    ) -> str:
+    def format_inline_citations(self, text: str, citations: list[dict[str, Any]]) -> str:
         """
         Format inline citations in the response text with markdown links.
 
@@ -57,9 +56,7 @@ class ChainlitCitationFormatter:
 
         return formatted_text
 
-    def create_citation_elements(
-        self, citations: List[Dict[str, Any]]
-    ) -> List[cl.Text]:
+    def create_citation_elements(self, citations: list[dict[str, Any]]) -> list[cl.Text]:
         """
         Create Chainlit Text elements for citations to display as side elements.
 
@@ -79,7 +76,7 @@ class ChainlitCitationFormatter:
 
         for idx, citation in enumerate(citations, start=1):
             filename = citation.get("filename", "Unknown Source")
-            quote = citation.get("quote", "No quote available")
+            quote = citation.get("quote", "")
             file_id = citation.get("file_id", "")
 
             # Format citation content
@@ -102,7 +99,7 @@ class ChainlitCitationFormatter:
 
         return citation_elements
 
-    def format_citation_text(self, citation: Dict[str, Any], index: int) -> str:
+    def format_citation_text(self, citation: dict[str, Any], index: int) -> str:
         """
         Format a single citation as a text string.
 
@@ -127,7 +124,7 @@ class ChainlitCitationFormatter:
 
         return citation_str
 
-    def format_citations_section(self, citations: List[Dict[str, Any]]) -> str:
+    def format_citations_section(self, citations: list[dict[str, Any]]) -> str:
         """
         Format all citations as a markdown section to append to the response.
 
@@ -151,8 +148,8 @@ class ChainlitCitationFormatter:
         return "".join(section_lines)
 
     def extract_citations_from_metadata(
-        self, metadata: Optional[Dict[str, Any]]
-    ) -> List[Dict[str, Any]]:
+        self, metadata: dict[str, Any] | None
+    ) -> list[dict[str, Any]]:
         """
         Extract citation information from response metadata.
 
@@ -175,8 +172,8 @@ class ChainlitCitationFormatter:
         return citations if isinstance(citations, list) else []
 
     def format_combined_citations(
-        self, text: str, citations: List[Dict[str, Any]]
-    ) -> tuple[str, List[cl.Text]]:
+        self, text: str, citations: list[dict[str, Any]]
+    ) -> tuple[str, list[cl.Text]]:
         """
         Format citations for both inline display and side elements.
 

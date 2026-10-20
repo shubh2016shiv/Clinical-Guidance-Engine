@@ -23,7 +23,6 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Optional, Tuple
 
 
 class ChainlitRunner:
@@ -33,13 +32,13 @@ class ChainlitRunner:
     PREFERRED_PORTS = [8080, 8081, 8082, 8888, 9000, 3000, 5000]
 
     # Ports to avoid (used by infrastructure services)
-    RESERVED_PORTS = [8000, 19530, 27017, 6379, 9001, 9091, 2379]
+    RESERVED_PORTS = [8000, 8002, 19530, 27017, 6379, 6381, 9001, 9091, 2379]
 
     # Port range limits
     MIN_PORT = 1024
     MAX_PORT = 65535
 
-    def __init__(self, app_path: Optional[Path] = None):
+    def __init__(self, app_path: Path | None = None):
         """
         Initialize the Chainlit runner.
 
@@ -72,10 +71,10 @@ class ChainlitRunner:
                 # Try to bind to the port
                 result = s.connect_ex(("127.0.0.1", port))
                 return result == 0  # Port is in use if connection succeeds
-        except socket.error:
+        except OSError:
             return True  # Assume port is in use if we can't check
 
-    def _find_process_on_port(self, port: int) -> Optional[int]:
+    def _find_process_on_port(self, port: int) -> int | None:
         """
         Find the process ID using a specific port.
 
@@ -170,7 +169,7 @@ class ChainlitRunner:
 
         return "Unknown"
 
-    def _handle_port_conflict(self, port: int) -> Tuple[bool, str]:
+    def _handle_port_conflict(self, port: int) -> tuple[bool, str]:
         """
         Handle a port conflict by trying to stop the conflicting process.
 
@@ -216,9 +215,9 @@ class ChainlitRunner:
 
     def _find_available_port(
         self,
-        preferred_port: Optional[int] = None,
-        port_range: Optional[Tuple[int, int]] = None,
-    ) -> Optional[int]:
+        preferred_port: int | None = None,
+        port_range: tuple[int, int] | None = None,
+    ) -> int | None:
         """
         Find an available port for the application.
 
@@ -276,7 +275,7 @@ class ChainlitRunner:
 
         return None
 
-    def _check_chainlit_installed(self) -> Tuple[bool, str]:
+    def _check_chainlit_installed(self) -> tuple[bool, str]:
         """
         Check if Chainlit is installed.
 
@@ -288,9 +287,7 @@ class ChainlitRunner:
             try:
                 import chainlit
 
-                version = getattr(
-                    chainlit, "__version__", "installed (version unknown)"
-                )
+                version = getattr(chainlit, "__version__", "installed (version unknown)")
                 return True, f"chainlit {version}"
             except ImportError:
                 pass  # Fall through to subprocess check
@@ -322,9 +319,7 @@ class ChainlitRunner:
                     version = result.stdout.strip()
                     return True, version
                 else:
-                    error_msg = (
-                        result.stderr.strip() if result.stderr else "Unknown error"
-                    )
+                    error_msg = result.stderr.strip() if result.stderr else "Unknown error"
                     return False, f"Chainlit command failed: {error_msg}"
         except FileNotFoundError:
             return False, "Chainlit not found. Install with: pip install chainlit"
@@ -356,10 +351,10 @@ class ChainlitRunner:
 
     def run(
         self,
-        preferred_port: Optional[int] = None,
-        port_range: Optional[Tuple[int, int]] = None,
+        preferred_port: int | None = None,
+        port_range: tuple[int, int] | None = None,
         auto_reload: bool = True,
-    ) -> Tuple[bool, str]:
+    ) -> tuple[bool, str]:
         """
         Run the Chainlit application.
 
@@ -418,7 +413,7 @@ class ChainlitRunner:
             return False, f"Error running Chainlit: {str(e)}"
 
 
-def parse_port_range(port_range_str: str) -> Tuple[int, int]:
+def parse_port_range(port_range_str: str) -> tuple[int, int]:
     """
     Parse port range string (e.g., '8080-8090').
 
@@ -447,7 +442,7 @@ def parse_port_range(port_range_str: str) -> Tuple[int, int]:
 
         return min_port, max_port
     except ValueError as e:
-        raise ValueError(f"Invalid port range '{port_range_str}': {e}")
+        raise ValueError(f"Invalid port range '{port_range_str}': {e}") from e
 
 
 def main():
@@ -463,22 +458,18 @@ Examples:
   python run_chainlit.py --no-reload        # Disable auto-reload
 
 Reserved Ports (Avoided):
-  8000  - Milvus Attu UI
+  8002  - Milvus Attu UI
   19530 - Milvus Database
   27017 - MongoDB
-  6379  - Redis
+  6381  - Redis
   9000  - MinIO
   9001  - MinIO Console
         """,
     )
 
-    parser.add_argument(
-        "--port", type=int, help="Preferred port to use (will try this first)"
-    )
+    parser.add_argument("--port", type=int, help="Preferred port to use (will try this first)")
 
-    parser.add_argument(
-        "--port-range", type=str, help="Port range to search (e.g., '8080-8090')"
-    )
+    parser.add_argument("--port-range", type=str, help="Port range to search (e.g., '8080-8090')")
 
     parser.add_argument(
         "--no-reload",
@@ -489,7 +480,7 @@ Reserved Ports (Avoided):
     parser.add_argument(
         "--app-path",
         type=Path,
-        help="Path to Chainlit app.py file (default: ./chatbot_ui/app.py)",
+        help="Path to Chainlit app.py file (default: ./healthcare_assistant_ui/app.py)",
     )
 
     args = parser.parse_args()
