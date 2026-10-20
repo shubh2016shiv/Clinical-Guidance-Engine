@@ -117,6 +117,24 @@ class MilvusProvider(VectorDBProvider):
                 f"expected {self.embedding_dimension}. Check the ingestion configuration."
             )
 
+    async def get_collection(self) -> Collection:
+        """Return the connected, loaded collection for searches this adapter does not wrap."""
+        return await asyncio.to_thread(self._ensure_collection)
+
+    async def count_entities(self) -> int:
+        """Return how many rows the collection holds."""
+        return await asyncio.to_thread(self._count_entities)
+
+    def _count_entities(self) -> int:
+        collection = self._ensure_collection()
+        try:
+            rows = collection.query(expr="", output_fields=["count(*)"])
+        except Exception as exc:
+            raise VectorDBCollectionError(
+                f"Could not count rows in '{self.collection_name}': {exc}"
+            ) from exc
+        return int(rows[0]["count(*)"])
+
     def _connect(self) -> None:
         if self._is_connected:
             return

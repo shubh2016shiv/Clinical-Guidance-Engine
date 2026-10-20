@@ -116,7 +116,12 @@ class ResponsesApiClient:
             params["previous_response_id"] = previous_response_id
         if tools:
             params["tools"] = tools
-        for name in ("store", "include", "max_output_tokens", "tool_choice"):
+        for name in (
+            "store",
+            "include",
+            "max_output_tokens",
+            "tool_choice",
+        ):
             if name in kwargs:
                 params[name] = kwargs[name]
         return params

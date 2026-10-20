@@ -1,10 +1,12 @@
-"""Coordinate startup checks and return a ready healthcare agent."""
+"""Check startup dependencies and return the services that are ready to use."""
 
 from dataclasses import dataclass, field
 
+from src.adapters.redis import CacheConfig, RedisProvider
+from src.adapters.vector_store.milvus_vector_store import MilvusProvider
+from src.clinical_guideline_agent import ClinicalGuidelineAgent
 from src.config import get_settings
 from src.logs import get_component_logger
-from src.response_api_agent.asclepius_agent import AsclepiusHealthcareAgent
 
 from .check_redis_and_milvus import check_milvus, check_redis
 from .check_settings import check_settings
@@ -13,49 +15,58 @@ from .prepare_guidelines_store import prepare_guidelines_store
 
 @dataclass
 class BootstrapResult:
-    agent: AsclepiusHealthcareAgent
-    vector_store_id: str | None = None
-    cache_ready: bool = False
-    drug_search_ready: bool = False
-    guidelines_ready: bool = False
+    cache: RedisProvider | None = None
+    drug_provider: MilvusProvider | None = None
+    guideline_agent: ClinicalGuidelineAgent | None = None
     warnings: list[str] = field(default_factory=list)
 
+    async def close(self) -> None:
+        if self.cache is not None:
+            await self.cache.disconnect()
+        if self.drug_provider is not None:
+            await self.drug_provider.disconnect()
+        if self.guideline_agent is not None:
+            await self.guideline_agent.close()
 
-async def bootstrap_agent(
+
+async def bootstrap_services(
     *,
-    chat_history_limit: int = 10,
     use_drug_database: bool = True,
     use_clinical_guidelines: bool = True,
 ) -> BootstrapResult:
-    """Construct the agent and check its optional dependencies.
+    """Connect to each service and keep only the ones that are ready.
 
-    Docker services must already be running. Failed optional services are
-    disabled and recorded as warnings, so basic chat can still work.
+    Docker services must already be running. A service that fails its check is left
+    out of the result and recorded as a warning, so basic chat can still work.
     """
+    settings = get_settings()
     check_settings(
-        get_settings(),
+        settings,
         use_drug_database=use_drug_database,
         use_clinical_guidelines=use_clinical_guidelines,
     )
     logger = get_component_logger("Bootstrap")
-    agent = AsclepiusHealthcareAgent(chat_history_limit=chat_history_limit)
-    result = BootstrapResult(agent=agent)
+    result = BootstrapResult()
 
-    result.cache_ready = await check_redis(agent)
-    if not result.cache_ready:
+    cache = RedisProvider(CacheConfig.from_settings(settings))
+    if await check_redis(cache):
+        result.cache = cache
+    else:
         result.warnings.append("Redis is unavailable; session caching is disabled")
 
     if use_drug_database:
-        result.drug_search_ready = await check_milvus(agent)
-        if not result.drug_search_ready:
+        drug_provider = MilvusProvider()
+        if await check_milvus(drug_provider):
+            result.drug_provider = drug_provider
+        else:
             result.warnings.append("Drug search is unavailable; check Milvus and run ingestion")
-    else:
-        agent.response_manager.drug_data_manager = None
 
     if use_clinical_guidelines:
-        result.vector_store_id = await prepare_guidelines_store(agent)
-        result.guidelines_ready = result.vector_store_id is not None
-        if not result.guidelines_ready:
+        guideline_agent = ClinicalGuidelineAgent()
+        if await prepare_guidelines_store(guideline_agent):
+            result.guideline_agent = guideline_agent
+        else:
+            await guideline_agent.close()
             result.warnings.append("Clinical guidelines are not ready; file search is disabled")
 
     for warning in result.warnings:
@@ -63,4 +74,4 @@ async def bootstrap_agent(
     return result
 
 
-__all__ = ["BootstrapResult", "bootstrap_agent"]
+__all__ = ["BootstrapResult", "bootstrap_services"]

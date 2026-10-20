@@ -1,31 +1,32 @@
-"""Check local services used by the healthcare agent."""
+"""Check the local services the healthcare agent depends on."""
 
+from src.adapters.redis import RedisProvider
+from src.adapters.redis.exceptions import CacheProviderError
+from src.adapters.vector_store.exceptions import VectorDBProviderError
+from src.adapters.vector_store.milvus_vector_store import MilvusProvider
+from src.drugs_agent import verify_drug_collection_ready_for_search
 from src.logs import get_component_logger
-from src.response_api_agent.asclepius_agent import AsclepiusHealthcareAgent
 
 logger = get_component_logger("LocalServices")
 
 
-async def check_redis(agent: AsclepiusHealthcareAgent) -> bool:
+async def check_redis(provider: RedisProvider) -> bool:
     """Connect to Redis and verify its PING response."""
-    ready = await agent.response_manager.connect_cache()
-    if not ready:
-        agent.cache_provider = None
-    return ready
-
-
-async def check_milvus(agent: AsclepiusHealthcareAgent) -> bool:
-    """Connect to Milvus and load the configured drug collection."""
-    manager = agent.response_manager
-    drug_data = manager.drug_data_manager
-    if drug_data is None:
-        return False
     try:
-        await drug_data.connect()
-        await drug_data.vector_db_provider.check_collection()
-        return True
-    except Exception as exc:
-        logger.warning("Milvus is not ready", error=str(exc))
-        await drug_data.disconnect()
-        manager.drug_data_manager = None
+        await provider.connect()
+    except CacheProviderError as exc:
+        logger.warning("Redis is not ready", error=str(exc))
         return False
+    return True
+
+
+async def check_milvus(provider: MilvusProvider) -> bool:
+    """Connect to Milvus and confirm the drug collection holds data."""
+    try:
+        count = await verify_drug_collection_ready_for_search(provider)
+    except VectorDBProviderError as exc:
+        logger.warning("Milvus is not ready", error=str(exc))
+        await provider.disconnect()
+        return False
+    logger.info("Drug collection is ready", rows=count)
+    return True

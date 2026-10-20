@@ -51,6 +51,7 @@ class ChatCompletionsClient:
                 "frequency_penalty",
                 "presence_penalty",
                 "stop",
+                "response_format",
             )
             for name in option_names:
                 value = kwargs.get(name, getattr(self._config, name, None))

@@ -1,345 +1,48 @@
-"""
-Healthcare AI Agent Application Entry Point
+"""Command-line demo for drug search or clinical guideline questions."""
 
-Main application module for initializing and running the healthcare AI agent.
-Handles knowledge base setup, consultation processing, and resource cleanup.
-"""
-
+import argparse
 import asyncio
-import sys
-from typing import Optional
-from src.response_api_agent.asclepius_agent import AsclepiusHealthcareAgent
-from src.config import get_settings
-from src.logs import get_component_logger
-from src.response_api_agent.managers.exceptions import ResponsesAPIError
+
+from src.adapters.llm_provider import APIType, OpenAIProvider
+from src.bootstrap import bootstrap_services
+from src.drugs_agent import DrugAgent, DrugSearcher
 
 
-class HealthcareAgentApplication:
-    """
-    Main application class for the healthcare AI agent.
-
-    Manages the complete lifecycle including initialization, consultation processing,
-    and proper cleanup of resources.
-    """
-
-    def __init__(self):
-        """Initialize the application."""
-        self.settings = get_settings()
-        self.logger = get_component_logger("Application")
-        self.agent: Optional[AsclepiusHealthcareAgent] = None
-
-    async def initialize(self) -> bool:
-        """
-        Initialize the healthcare agent and knowledge base.
-
-        Returns:
-            True if initialization successful, False otherwise.
-        """
-        try:
-            self.logger.info(
-                "Starting healthcare agent application",
-                component="Application",
-                subcomponent="Initialize",
-                app_version=self.settings.app_version,
-            )
-
-            # Initialize agent
-            self.agent = AsclepiusHealthcareAgent(chat_history_limit=10)
-
-            # Setup knowledge base with clinical guidelines
-            self.logger.info(
-                "Setting up clinical knowledge base",
-                component="Application",
-                subcomponent="Initialize",
-            )
-
-            vector_store_id = await self.agent.initialize_knowledge_base()
-
-            if vector_store_id:
-                self.logger.info(
-                    "Knowledge base initialized successfully",
-                    component="Application",
-                    subcomponent="Initialize",
-                    vector_store_id=vector_store_id,
-                )
-                return True
-            else:
-                self.logger.warning(
-                    "Knowledge base initialization incomplete, continuing without clinical guidelines",
-                    component="Application",
-                    subcomponent="Initialize",
-                )
-                return True  # Continue without knowledge base
-
-        except Exception as e:
-            self.logger.error(
-                "Failed to initialize application",
-                component="Application",
-                subcomponent="Initialize",
-                error=str(e),
-                error_type=type(e).__name__,
-            )
-            return False
-
-    async def process_consultation(
-        self, question: str, use_guidelines: bool = True
-    ) -> Optional[str]:
-        """
-        Process a healthcare consultation question.
-
-        Args:
-            question: The healthcare question to process.
-            use_guidelines: Whether to use clinical guidelines in the response.
-
-        Returns:
-            The consultation response, or None if processing failed.
-        """
-        if not self.agent:
-            self.logger.error(
-                "Agent not initialized",
-                component="Application",
-                subcomponent="ProcessConsultation",
-            )
-            return None
-
-        try:
-            self.logger.info(
-                "Processing consultation request",
-                component="Application",
-                subcomponent="ProcessConsultation",
-                question_length=len(question),
-                use_guidelines=use_guidelines,
-            )
-
-            result = await self.agent.consult(
-                query=question,
-                use_clinical_guidelines=use_guidelines,
-                streaming=self.settings.enable_streaming,
-            )
-
-            # Handle streaming response
-            if self.settings.enable_streaming and "stream_generator" in result:
-                stream_generator = result["stream_generator"]
-                response_parts = []
-                extracted_conversation_id = None
-                async for chunk_data in stream_generator:
-                    # Each chunk is a dict with "chunk" key
-                    chunk = chunk_data.get("chunk", "")
-                    response_parts.append(chunk)
-                    # Extract conversation_id from first chunk
-                    if extracted_conversation_id is None:
-                        extracted_conversation_id = chunk_data.get("conversation_id")
-                response_content = "".join(response_parts)
-                # Override conversation_id with extracted value
-                if extracted_conversation_id:
-                    conversation_id = extracted_conversation_id
-                else:
-                    conversation_id = result.get("conversation_id", "")
-            else:
-                response_content = result.get("content", "")
-                conversation_id = result.get("conversation_id", "")
-            guidelines_used = result.get("guidelines_used", False)
-
-            self.logger.info(
-                "Consultation completed successfully",
-                component="Application",
-                subcomponent="ProcessConsultation",
-                conversation_id=conversation_id,
-                guidelines_used=guidelines_used,
-                response_length=len(response_content),
-            )
-
-            # Log citations if present
-            if result.get("citations"):
-                self.logger.info(
-                    "Citations included in response",
-                    component="Application",
-                    subcomponent="ProcessConsultation",
-                    citation_count=len(result.get("citations", [])),
-                )
-
-            return response_content
-
-        except ResponsesAPIError as e:
-            self.logger.error(
-                "Consultation processing failed",
-                component="Application",
-                subcomponent="ProcessConsultation",
-                error=str(e),
-                error_type="ResponsesAPIError",
-            )
-            return None
-
-        except Exception as e:
-            self.logger.error(
-                "Unexpected error during consultation",
-                component="Application",
-                subcomponent="ProcessConsultation",
-                error=str(e),
-                error_type=type(e).__name__,
-            )
-            return None
-
-    async def shutdown(self):
-        """
-        Perform cleanup operations before application shutdown.
-        """
-        try:
-            if self.agent:
-                if self.settings.enable_cleanup:
-                    self.logger.info(
-                        "Shutting down application with cleanup",
-                        component="Application",
-                        subcomponent="Shutdown",
-                    )
-
-                    await self.agent.close_session()
-
-                    self.logger.info(
-                        "Application shutdown complete with cleanup",
-                        component="Application",
-                        subcomponent="Shutdown",
-                    )
-                else:
-                    self.logger.info(
-                        "Shutting down application without cleanup (resources will persist)",
-                        component="Application",
-                        subcomponent="Shutdown",
-                    )
-        except Exception as e:
-            self.logger.error(
-                "Error during shutdown",
-                component="Application",
-                subcomponent="Shutdown",
-                error=str(e),
-                error_type=type(e).__name__,
-            )
-
-
-async def main():
-    """
-    Main application execution function.
-    """
-    app = HealthcareAgentApplication()
-
+async def answer_question(question: str, *, source: str) -> str:
+    """Check the needed services, answer one question, and close owned clients."""
+    startup = await bootstrap_services(
+        use_drug_database=source == "drugs",
+        use_clinical_guidelines=source == "guidelines",
+    )
+    drug_llm_provider = None
     try:
-        # Initialize application
-        initialized = await app.initialize()
+        if source == "guidelines":
+            if startup.guideline_agent is None:
+                raise RuntimeError(
+                    "Clinical guidelines are unavailable. Check the startup warnings."
+                )
+            answer = await startup.guideline_agent.answer_guideline_question(question)
+            return answer.text
 
-        if not initialized:
-            print("ERROR: Application initialization failed. Check logs for details.")
-            return 1
-
-        print("\n" + "=" * 80)
-        print("Healthcare AI Agent - Consultation Test (with Cache Validation)")
-        print("=" * 80 + "\n")
-
-        # Test question for consultation
-        test_question = "What is the formulation and available dosages for metformin?"
-
-        print(f"Question 1 (New Conversation):\n{test_question}\n")
-        print("-" * 80 + "\n")
-
-        # Process first consultation (NEW conversation)
-        result1 = await app.agent.consult(
-            query=test_question,
-            use_clinical_guidelines=True,
-            streaming=app.settings.enable_streaming,
-        )
-
-        # Handle streaming response
-        if app.settings.enable_streaming and "stream_generator" in result1:
-            stream_generator = result1["stream_generator"]
-            response_parts = []
-            conversation_id = None
-            async for chunk_data in stream_generator:
-                chunk = chunk_data.get("chunk", "")
-                response_parts.append(chunk)
-                # Extract conversation_id from first chunk
-                if conversation_id is None:
-                    conversation_id = chunk_data.get("conversation_id")
-            response1 = "".join(response_parts)
-        else:
-            response1 = result1.get("content", "")
-            conversation_id = result1.get("conversation_id", "")
-
-        print(f"Response 1:\n{response1}\n")
-        print("-" * 80)
-
-        # CRITICAL: Test cache retrieval with continuation
-        if conversation_id:
-            print("\n" + "=" * 80)
-            print("Testing Cache Retrieval - Continuation Query")
-            print("=" * 80)
-            print(
-                f"\nReusing conversation_id from previous response: {conversation_id}\n"
-            )
-            print("(This SHOULD retrieve session data from Redis cache)\n")
-            print("-" * 80 + "\n")
-
-            continuation_question = "What are its common side effects?"
-            print(
-                f"Question 2 (Continuation of same conversation):\n{continuation_question}\n"
-            )
-            print("-" * 80 + "\n")
-
-            # Process continuation - this will trigger session validation and cache retrieval
-            result2 = await app.agent.consult(
-                query=continuation_question,
-                conversation_id=conversation_id,  # CRITICAL: Pass the conversation_id
-                use_clinical_guidelines=True,
-                streaming=app.settings.enable_streaming,
-            )
-
-            # Handle streaming response
-            if app.settings.enable_streaming and "stream_generator" in result2:
-                stream_generator = result2["stream_generator"]
-                response_parts = []
-                async for chunk_data in stream_generator:
-                    chunk = chunk_data.get("chunk", "")
-                    response_parts.append(chunk)
-                response2 = "".join(response_parts)
-            else:
-                response2 = result2.get("content", "")
-
-            print(f"Response 2:\n{response2}\n")
-            print("-" * 80)
-            print("\n✓ Cache retrieval test completed!")
-            print("\nCheck the logs above for evidence of Redis cache retrieval:")
-            print("  ✓ 'Retrieved active session context from Redis'")
-            print("  ✓ 'Active session context retrieved from Redis cache'")
-            print("  ✓ 'Using vector store from active session cache'")
-            print(
-                "  ✓ 'Streaming conversation continuation' with 'using_last_response_id_from_cache=True'"
-            )
-        else:
-            print("ERROR: No conversation_id in response")
-            return 1
-
-        print("\n" + "=" * 80)
-        print("Test completed successfully")
-        print("=" * 80 + "\n")
-
-        return 0
-
-    except KeyboardInterrupt:
-        print("\n\nApplication interrupted by user.")
-        return 130
-
-    except Exception as e:
-        print(f"\nERROR: Unexpected application error: {e}")
-        return 1
-
+        if startup.drug_provider is None:
+            raise RuntimeError("Drug search is unavailable. Check Milvus and run ingestion.")
+        drug_llm_provider = OpenAIProvider(api_type=APIType.CHAT_COMPLETION)
+        drug_agent = DrugAgent(DrugSearcher(startup.drug_provider), drug_llm_provider)
+        answer = await drug_agent.answer_drug_search_query(question)
+        return answer.model_dump_json(indent=2)
     finally:
-        # Ensure cleanup happens
-        await app.shutdown()
+        if drug_llm_provider is not None:
+            await drug_llm_provider.close()
+        await startup.close()
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("question", help="Question to answer")
+    parser.add_argument("--source", choices=("drugs", "guidelines"), default="guidelines")
+    args = parser.parse_args()
+    print(asyncio.run(answer_question(args.question, source=args.source)))
 
 
 if __name__ == "__main__":
-    """Application entry point."""
-    try:
-        exit_code = asyncio.run(main())
-        sys.exit(exit_code)
-    except Exception as e:
-        print(f"CRITICAL ERROR: {e}")
-        sys.exit(1)
+    main()
