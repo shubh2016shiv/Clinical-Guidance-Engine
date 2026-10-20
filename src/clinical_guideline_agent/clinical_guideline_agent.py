@@ -1,0 +1,138 @@
+"""Answer questions using clinical guideline files and Responses file search."""
+
+from collections.abc import AsyncIterator
+from pathlib import Path
+from typing import Any
+
+from src.adapters.llm_provider import APIType, OpenAIProvider
+from src.adapters.vector_store.openai_vector_store_adapter import OpenAIVectorStoreAdapter
+from src.config import PROJECT_ROOT, get_settings
+from src.prompts.clinical_guideline_system_prompt import CLINICAL_GUIDELINE_SYSTEM_PROMPT
+
+from .conversation.response_chain import ResponsesApiConversationState
+from .responses.create_response import ClinicalGuidelineResponsesApi
+from .responses.parse_response import parse_responses_api_result_into_guideline_answer
+from .responses.stream_response import stream_guideline_updates_from_responses_api_events
+from .schema import GuidelineAnswer, GuidelineStreamUpdate
+from .vector_store.guidelines_store import GuidelinesStore
+
+
+class ClinicalGuidelineAgent:
+    """Answer guideline questions with one Responses API conversation per instance."""
+
+    def __init__(
+        self,
+        *,
+        responses_api_provider: Any | None = None,
+        guidelines_vector_store_adapter: Any | None = None,
+        model_name: str | None = None,
+        guideline_instructions: str = CLINICAL_GUIDELINE_SYSTEM_PROMPT,
+        guidelines_store_id: str | None = None,
+    ) -> None:
+        application_settings = get_settings()
+        if (
+            responses_api_provider is None or guidelines_vector_store_adapter is None
+        ) and not application_settings.openai_api_key:
+            raise ValueError("OPENAI_API_KEY is required")
+        self._owns_responses_api_provider = responses_api_provider is None
+        self._owns_guidelines_vector_store_adapter = guidelines_vector_store_adapter is None
+        self.responses_api_provider = (
+            responses_api_provider
+            if responses_api_provider is not None
+            else OpenAIProvider(
+                api_type=APIType.RESPONSES,
+                model_name=model_name or application_settings.openai_model_name,
+            )
+        )
+        self.guidelines_vector_store_adapter = (
+            guidelines_vector_store_adapter
+            if guidelines_vector_store_adapter is not None
+            else OpenAIVectorStoreAdapter()
+        )
+        self.responses_api = ClinicalGuidelineResponsesApi(
+            self.responses_api_provider,
+            model=model_name or application_settings.openai_model_name,
+            instructions=guideline_instructions,
+        )
+        self.guidelines_store = GuidelinesStore(self.guidelines_vector_store_adapter)
+        self.guidelines_store_id = guidelines_store_id
+        self.responses_api_conversation_state = ResponsesApiConversationState()
+
+    async def prepare_guidelines_store(
+        self,
+        guidelines_directory: str | Path | None = None,
+        *,
+        guidelines_store_id: str | None = None,
+    ) -> str:
+        """Find or prepare the hosted store containing clinical guidelines."""
+        application_settings = get_settings()
+        guidelines_directory_path = (
+            guidelines_directory
+            or PROJECT_ROOT / application_settings.clinical_guidelines_directory
+        )
+        self.guidelines_store_id = await self.guidelines_store.ensure_ready(
+            guidelines_directory_path,
+            vector_store_id=guidelines_store_id or self.guidelines_store_id,
+        )
+        return self.guidelines_store_id
+
+    async def answer_guideline_question(
+        self,
+        guideline_question: str,
+        *,
+        previous_response_id: str | None = None,
+        max_file_search_results: int | None = None,
+    ) -> GuidelineAnswer:
+        """Return a guideline answer with its response ID and file citations."""
+        responses_api_result = await self.responses_api.create_responses_api_result(
+            guideline_question,
+            vector_store_id=self._require_guidelines_store_id(),
+            previous_response_id=(
+                previous_response_id
+                or self.responses_api_conversation_state.latest_responses_api_response_id
+            ),
+            max_results=max_file_search_results,
+        )
+        guideline_answer = parse_responses_api_result_into_guideline_answer(responses_api_result)
+        self.responses_api_conversation_state.record_completed_response_id(
+            guideline_answer.response_id
+        )
+        return guideline_answer
+
+    async def stream_guideline_answer_updates(
+        self,
+        guideline_question: str,
+        *,
+        previous_response_id: str | None = None,
+        max_file_search_results: int | None = None,
+    ) -> AsyncIterator[GuidelineStreamUpdate]:
+        """Yield text updates followed by the completed guideline answer."""
+        responses_api_events = await self.responses_api.start_responses_api_stream(
+            guideline_question,
+            vector_store_id=self._require_guidelines_store_id(),
+            previous_response_id=(
+                previous_response_id
+                or self.responses_api_conversation_state.latest_responses_api_response_id
+            ),
+            max_results=max_file_search_results,
+        )
+        async for guideline_update in stream_guideline_updates_from_responses_api_events(
+            responses_api_events
+        ):
+            if guideline_update.answer is not None:
+                self.responses_api_conversation_state.record_completed_response_id(
+                    guideline_update.answer.response_id
+                )
+            yield guideline_update
+
+    async def close(self) -> None:
+        """Close adapters created by this agent without deleting the store."""
+        if self._owns_responses_api_provider:
+            await self.responses_api_provider.close()
+        if self._owns_guidelines_vector_store_adapter:
+            await self.guidelines_vector_store_adapter.close()
+
+    def _require_guidelines_store_id(self) -> str:
+        if not self.guidelines_store_id:
+            raise RuntimeError("Call prepare_guidelines_store() before asking guideline questions")
+        return self.guidelines_store_id
