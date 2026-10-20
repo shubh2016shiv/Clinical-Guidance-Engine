@@ -19,12 +19,11 @@ classifiers = [
 dependencies = [
     "aiobreaker>=1.2.0",
     "chainlit>=2.0.0",
-    "google-generativeai>=0.8.0",
     "openai",
     "pandas[excel]==2.3.3",
     "pydantic>=2.0.0",
     "pydantic-settings",
-    "pymilvus==2.6.3",
+    "pymilvus==3.0.2",
     "python-dotenv",
     "pyyaml>=6.0.0",
     "redis>=5.0.0",
@@ -66,4 +65,4 @@ indent-style = "space"
 skip-magic-trailing-comma = false
 
 [tool.ruff.lint.isort]
-known-first-party = ["src", "chatbot_ui", "drug_data_ingestion_pipeline", "pharmaceutical_knowledge_base", "infrastructure"]
+known-first-party = ["src", "healthcare_assistant_ui", "drug_data_ingestion_pipeline", "pharmaceutical_knowledge_base", "infrastructure"]
