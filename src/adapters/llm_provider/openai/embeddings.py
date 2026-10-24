@@ -1,40 +1,61 @@
-"""OpenAI text embeddings."""
-
-import math
+"""Create OpenAI text embeddings for Milvus drug search."""
 
 from openai import AsyncOpenAI
 
 from src.config import get_settings
 
-from ..exceptions import LLMProviderError, LLMProviderExecutionError
+from ..exceptions import LLMProviderInitializationError
+from .error_mapping import map_openai_error
 
 
-class OpenAIEmbeddings:
-    """Embed text with an OpenAI embedding model into unit-length vectors.
+# OpenAITextEmbeddingClient: turns a piece of text into a list of numbers
+# (an "embedding") that represents its meaning. Needed because Milvus (the
+# vector database storing drug records) can only compare numbers, not raw
+# text, when searching for similar drugs.
+class OpenAITextEmbeddingClient:
+    """Create vectors with the model and dimensions used by the drug collection."""
 
-    ``dimensions`` asks the API for shortened vectors. It must equal the vector
-    size of the collection being searched, and the collection must have been
-    filled with the same model and dimensions.
-    """
+    def __init__(
+        self, embedding_model_name: str, dimensions: int, api_key: str | None = None
+    ) -> None:
+        # Step 1: resolve which API key to use, same pattern as provider.py.
+        openai_api_key = api_key or get_settings().openai_api_key
+        if not openai_api_key:
+            # Step 2: fail immediately and clearly if there is no key at
+            # all, instead of letting a confusing error happen on first use.
+            raise LLMProviderInitializationError("OpenAI API key is required.")
 
-    def __init__(self, model: str, dimensions: int, api_key: str | None = None) -> None:
-        api_key = api_key or get_settings().openai_api_key
-        if not api_key:
-            raise LLMProviderError("OpenAI API key is required.")
-
-        self.model = model
+        self.embedding_model_name = embedding_model_name
+        # self.embedding_model_name: which OpenAI embedding model to call.
         self.dimensions = dimensions
-        self._client = AsyncOpenAI(api_key=api_key)
+        # self.dimensions: how many numbers each embedding vector must have.
+        # This MUST match the Milvus collection's configured vector size, or
+        # searches will fail or return wrong results.
+        self._openai_client = AsyncOpenAI(api_key=openai_api_key)
+        # self._openai_client: this client's OWN connection to OpenAI,
+        # separate from the one OpenAIProvider uses, since embeddings are
+        # requested independently of chat answers.
 
-    async def embed(self, text: str) -> list[float]:
-        """Return the embedding of ``text``. Raises LLMProviderExecutionError on failure."""
+    async def create_text_embedding(self, input_text: str) -> list[float]:
+        """Return OpenAI's embedding vector for ``input_text``."""
         try:
-            response = await self._client.embeddings.create(
-                model=self.model, input=text, dimensions=self.dimensions
+            # Step 1: ask OpenAI to turn the text into a vector, using the
+            # exact model and dimension size configured above.
+            response = await self._openai_client.embeddings.create(
+                model=self.embedding_model_name, input=input_text, dimensions=self.dimensions
             )
+            # Step 2: OpenAI's response can technically hold multiple
+            # embeddings (one per input); we only sent one piece of text,
+            # so we take the first (and only) result.
+            return response.data[0].embedding
         except Exception as exc:
-            raise LLMProviderExecutionError(f"Embedding request failed: {exc}") from exc
+            # Translate any OpenAI SDK failure into our own exception
+            # hierarchy, same pattern as chat_completions.py and
+            # responses_api.py.
+            raise map_openai_error(exc, "Embedding request failed") from exc
 
-        vector = response.data[0].embedding
-        norm = math.sqrt(sum(value * value for value in vector))
-        return [value / norm for value in vector] if norm else vector
+    async def close(self) -> None:
+        """Close the SDK client when its owner shuts down."""
+        # Always call this when done (e.g. in a "finally" block) to release
+        # the network connection cleanly.
+        await self._openai_client.close()

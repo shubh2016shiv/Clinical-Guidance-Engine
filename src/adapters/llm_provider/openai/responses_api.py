@@ -1,138 +1,73 @@
-"""Responses API client for OpenAI."""
+"""Send Responses API requests and return OpenAI's result unchanged."""
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING, Any
 
-from src.logs import get_logger
-
-from ..base import APIType, LLMConfig, LLMResponse
-from ..exceptions import (
-    LLMProviderError,
-    LLMProviderExecutionError,
-    LLMProviderStreamingError,
-    LLMProviderTokenLimitError,
-)
+from ..base import LLMConfig
+from .error_mapping import map_openai_error
 
 if TYPE_CHECKING:
+    # See chat_completions.py for why this import only happens for type
+    # checkers, not while the program is actually running.
     from .provider import OpenAIProvider
 
-logger = get_logger(__name__)
 
-
+# ResponsesApiClient: knows how to build a Responses API request from this
+# app's arguments, and send it. Unlike ChatCompletionsClient, it does NOT
+# reshape OpenAI's reply - it hands back OpenAI's own response object as-is,
+# because the guideline agent needs OpenAI-specific details like citations.
 class ResponsesApiClient:
-    """Call OpenAI Responses API."""
+    """Keep Responses API request fields in one place."""
 
     def __init__(self, config: LLMConfig, provider: OpenAIProvider) -> None:
         self._config = config
+        # self._config: default model name and settings for this API.
         self._provider = provider
+        # self._provider: reference back to the provider that owns the
+        # actual network connection to OpenAI.
 
-    async def execute(
+    async def create_response(
         self,
-        input_message: str,
+        input_message: str | list[dict[str, Any]],
         instructions: str | None = None,
         previous_response_id: str | None = None,
         tools: list[dict[str, Any]] | None = None,
         *,
         stream: bool = False,
-        **kwargs: Any,
-    ) -> LLMResponse | AsyncIterator[str]:
-        """Execute Responses API request with token validation.
-
-        Validates token budget, builds request, calls SDK.
-        Returns response object or text stream.
-        """
-        try:
-            full_prompt = f"{instructions or ''}\n{input_message}"
-            if not self._provider.validate_token_limit(full_prompt, kwargs.get("max_tokens")):
-                raise LLMProviderTokenLimitError("Token budget exceeded for Responses API call.")
-
-            params = self._build_params(
-                input_message, instructions, previous_response_id, tools, stream, **kwargs
-            )
-
-            if tools:
-                logger.debug(
-                    "Responses API call includes %d tool(s): %s",
-                    len(tools),
-                    [tool.get("name", "unknown") for tool in tools if isinstance(tool, dict)],
-                )
-
-            if stream:
-                return self._stream(params)
-
-            request_params = {k: v for k, v in params.items() if k != "stream"}
-            response = await self._provider._async_client.responses.create(**request_params)
-            content = getattr(response, "output_text", "")
-
-            return LLMResponse(
-                content=content,
-                model=params["model"],
-                provider_type=self._provider.provider_type,
-                api_type=APIType.RESPONSES,
-                response_id=getattr(response, "id", None),
-                metadata={"response_object": response},
-            )
-
-        except LLMProviderError:
-            raise
-        except Exception as exc:
-            raise LLMProviderExecutionError(f"Responses API call failed: {exc}") from exc
-
-    async def execute_raw(
-        self,
-        input_message: str | list[dict[str, Any]],
-        instructions: str | None = None,
-        previous_response_id: str | None = None,
-        tools: list[dict[str, Any]] | None = None,
-        stream: bool = True,
-        **kwargs: Any,
+        **request_options: Any,
     ) -> Any:
-        """Return raw SDK object without token validation or normalization."""
-        params = self._build_params(
-            input_message, instructions, previous_response_id, tools, stream, **kwargs
-        )
-        logger.debug("Raw Responses API call requested (stream=%s).", stream)
-        return await self._provider._async_client.responses.create(**params)
-
-    def _build_params(
-        self,
-        input_message: str | list[dict[str, Any]],
-        instructions: str | None,
-        previous_response_id: str | None,
-        tools: list[dict[str, Any]] | None,
-        stream: bool,
-        **kwargs: Any,
-    ) -> dict[str, Any]:
-        params: dict[str, Any] = {
-            "model": kwargs.get("model", self._config.model_name),
+        """Return the SDK response, or its event stream when streaming."""
+        # Step 1: start the request dictionary with the fields every
+        # Responses API call needs. "request_options.pop("model", default)"
+        # lets a caller override the model for just this one call, while
+        # removing "model" from request_options so it is not duplicated
+        # when the rest of request_options is merged in below. Any other
+        # options the caller passed (like "store=True") get merged straight
+        # into the request dictionary via "**request_options".
+        request = {
+            "model": request_options.pop("model", self._config.model_name),
             "input": input_message,
             "stream": stream,
+            **request_options,
         }
-        if instructions:
-            params["instructions"] = instructions
-        if previous_response_id:
-            params["previous_response_id"] = previous_response_id
-        if tools:
-            params["tools"] = tools
-        for name in (
-            "store",
-            "include",
-            "max_output_tokens",
-            "tool_choice",
-        ):
-            if name in kwargs:
-                params[name] = kwargs[name]
-        return params
+        # Step 2: only add these fields if they were actually provided -
+        # OpenAI's API treats a missing field differently from an explicit
+        # empty one, so we avoid sending fields the caller did not ask for.
+        if instructions is not None:
+            request["instructions"] = instructions
+        if previous_response_id is not None:
+            request["previous_response_id"] = previous_response_id
+        if tools is not None:
+            request["tools"] = tools
 
-    async def _stream(self, params: dict[str, Any]) -> AsyncIterator[str]:
         try:
-            stream = await self._provider._async_client.responses.create(**params)
-            async for event in stream:
-                if event.type == "response.output_text.delta":
-                    yield event.delta
-                elif event.type in {"response.failed", "response.incomplete", "error"}:
-                    raise LLMProviderStreamingError(f"Responses API stream ended: {event.type}")
+            # Step 3: send the request. When "stream=True", the SDK returns
+            # an object you loop over for events instead of one finished
+            # reply - either way, we return exactly what the SDK gives us.
+            return await self._provider._async_openai_client.responses.create(**request)
         except Exception as exc:
-            raise LLMProviderStreamingError(f"Responses API stream failed: {exc}") from exc
+            # Translate any OpenAI SDK failure into our own exception
+            # hierarchy, the same way chat_completions.py does, so callers
+            # can catch "LLMProviderError" regardless of which API failed.
+            raise map_openai_error(exc, "Responses API request failed") from exc
