@@ -1,13 +1,39 @@
-"""Milvus implementation of the VectorDBProvider interface."""
+"""Connect to Milvus and search the existing drug collection.
+
+Big-picture flow:
+1. Build a Milvus-specific config from the app's settings.
+2. Connect to Milvus using its SYNCHRONOUS client library, but run every
+   call through ``asyncio.to_thread`` so it does not freeze the rest of
+   the async application while Milvus is working.
+3. Make sure the drug collection exists, is loaded into memory, and has
+   the expected vector size, before trusting it to answer searches.
+4. Offer ``search`` (by vector) and ``search_by_text`` (embeds the text
+   first, then searches) as the two ways the rest of the app can query
+   Milvus for similar drugs.
+"""
 
 from __future__ import annotations
 
 import asyncio
+
+# asyncio is Python's standard library for writing "async" code - code
+# that can pause while waiting on slow operations (network, disk, or here,
+# a blocking library call) instead of freezing the whole program.
+import threading
+
+# threading provides a Lock: a "only one thread at a time past this point"
+# gate. It is needed here (rather than an asyncio lock) because the
+# blocking Milvus calls run on background threads via asyncio.to_thread,
+# so the code that must be protected is not running in the event loop.
 from typing import Any
 
-from pymilvus import Collection, DataType, MilvusException, connections, utility
+from pymilvus import DataType, MilvusClient
 
-from src.adapters.llm_provider.openai import OpenAIEmbeddings
+# pymilvus is Milvus's official Python client library. Unlike the OpenAI
+# SDK used elsewhere in this project, MilvusClient is SYNCHRONOUS (it
+# blocks the calling thread until it gets a reply) - this file wraps it so
+# the rest of the app can still treat it like an async operation.
+from src.adapters.llm_provider.openai import OpenAITextEmbeddingClient
 from src.adapters.vector_store.base import (
     SearchResult,
     VectorDBCollectionConfig,
@@ -28,8 +54,15 @@ from src.logs import get_logger
 logger = get_logger(__name__)
 
 DEFAULT_SEARCH_EF = 64
+# DEFAULT_SEARCH_EF: how hard the HNSW index searches when nothing else is
+# configured. Milvus requires "ef" to be at least as large as the number of
+# results asked for, so _search below raises it to match a bigger limit.
 
 
+# _config_from_settings: builds a VectorDBConfig (the generic config shape
+# from base.py) out of this app's Milvus-specific settings. Needed so
+# MilvusProvider can be created with no arguments at all in normal use,
+# while still allowing a custom config to be passed in for tests.
 def _config_from_settings(settings: Any) -> VectorDBConfig:
     collection = VectorDBCollectionConfig(
         name=settings.milvus_collection_name,
@@ -41,7 +74,6 @@ def _config_from_settings(settings: Any) -> VectorDBConfig:
         connection=VectorDBConnectionConfig(
             host=settings.milvus_host,
             port=settings.milvus_port,
-            alias=settings.milvus_alias,
             timeout=settings.milvus_timeout,
             user=settings.milvus_user,
             password=settings.milvus_password,
@@ -58,152 +90,304 @@ def _config_from_settings(settings: Any) -> VectorDBConfig:
     )
 
 
+# MilvusProvider: the concrete vector-database implementation the rest of
+# the app actually uses for drug search. It builds on VectorDBProvider
+# (the shared contract from base.py) by adding Milvus's own connection,
+# collection-loading, and search logic.
 class MilvusProvider(VectorDBProvider):
-    """Vector search over a Milvus collection.
-
-    Blocking pymilvus calls run in a worker thread so the public methods stay async.
-    Settings come from ``config`` or, if omitted, from the application settings.
-    ``embeddings`` defaults to the configured OpenAI embedding model, whose vectors
-    must match the ones the collection was ingested with.
-    """
+    """Use MilvusClient for searches without blocking the async application."""
 
     def __init__(
         self,
         config: VectorDBConfig | None = None,
         *,
-        embeddings: OpenAIEmbeddings | None = None,
+        embeddings: OpenAITextEmbeddingClient | None = None,
     ) -> None:
+        # The "*" makes "embeddings" keyword-only.
         settings = get_settings()
         config = config or _config_from_settings(settings)
+        # Step 1: use the given config, or build one from app settings if
+        # none was provided - this lets MilvusProvider() work with zero
+        # arguments in normal use.
         dimension = config.collection.embedding_dimension
-
+        self._owns_embeddings = embeddings is None
+        # self._owns_embeddings: remembers whether THIS object created its
+        # own embedding client (True) or was handed an existing one to
+        # reuse (False) - used by disconnect() below to decide whether it
+        # is this object's job to close it.
         if embeddings is None:
-            embeddings = OpenAIEmbeddings(settings.openai_embedding_model, dimension)
+            # Step 2a: no embedding client was given - build one sized to
+            # match this collection's expected dimension.
+            embeddings = OpenAITextEmbeddingClient(settings.openai_embedding_model, dimension)
         elif embeddings.dimensions != dimension:
+            # Step 2b: an embedding client WAS given, but if its vector
+            # size does not match the collection's, every search using it
+            # would be broken - catch that mismatch immediately instead of
+            # letting it fail confusingly deep inside a Milvus call later.
             raise VectorDBDimensionMismatchError(
                 f"Embedding dimension ({embeddings.dimensions}) "
                 f"does not match collection dimension ({dimension})."
             )
-
         super().__init__(config, embeddings=embeddings)
-        self._collection: Collection | None = None
-        self._is_connected = False
-
-    # ==================== Connection ====================
+        # Step 3: let the parent class validate the config, store it, and
+        # log the "initialized" message.
+        self._client: MilvusClient | None = None
+        # self._client: the actual Milvus connection, created later by
+        # connect(). Starts as None because no connection exists yet.
+        self._collection_description: dict[str, Any] | None = None
+        # self._collection_description: a cached copy of the collection's
+        # schema (field names/types), fetched once and reused.
+        self._collection_loaded = False
+        # self._collection_loaded: whether the collection has already been
+        # loaded into Milvus's memory for fast search, so it is not
+        # reloaded unnecessarily on every call.
+        self._closed = False
+        # self._closed: set once disconnect() has closed an embedding client
+        # this provider owns. That client cannot be reopened, so the
+        # provider refuses further work with a clear message instead of
+        # failing later with a confusing "Connection error".
+        self._state_lock = threading.RLock()
+        # self._state_lock: guards connecting and collection loading, which
+        # several background threads can reach at the same time. It is an
+        # RLock ("reentrant") because _connect holds it while calling
+        # _load_collection, and the same thread must be allowed back in.
 
     async def connect(self) -> None:
         await asyncio.to_thread(self._connect)
+        # "asyncio.to_thread(fn)" runs the ordinary, BLOCKING function "fn"
+        # on a separate background thread and lets the async program keep
+        # going while it waits - this is how a synchronous library like
+        # MilvusClient gets used safely from async code, without freezing
+        # everything else the app is doing at the same time.
+
+    def _raise_if_closed(self) -> None:
+        """Refuse work once disconnect() has closed an owned embedding client."""
+        if self._closed:
+            raise VectorDBConnectionError(
+                "This MilvusProvider was closed by disconnect() and cannot be reused. "
+                "Create a new MilvusProvider instead."
+            )
+
+    def _connect(self) -> None:
+        # This is a plain, synchronous method - it is only ever run inside
+        # a background thread via asyncio.to_thread above, never awaited
+        # directly.
+        self._raise_if_closed()
+        if self._client is not None:
+            # Step 1: already connected - do nothing (connect() is meant
+            # to be safe to call repeatedly). Checking here, before taking
+            # the lock below, keeps the common "already connected" case
+            # free of any locking cost.
+            return
+        with self._state_lock:
+            # Step 2: only one thread may build the connection. Without
+            # this, several threads calling connect() at the same time
+            # would each create their own MilvusClient, and every one but
+            # the last would be silently dropped while still holding an
+            # open network connection.
+            if self._client is not None:
+                # Another thread finished connecting while this one waited
+                # for the lock, so there is nothing left to do. This second
+                # check is what makes the cheap check above safe.
+                return
+            self._connect_locked()
+
+    def _connect_locked(self) -> None:
+        # Runs with self._state_lock already held by the calling thread.
+        connection = self.config.connection
+        scheme = "https" if connection.secure else "http"
+        # scheme: "https" for an encrypted connection, "http" otherwise -
+        # this is a conditional expression, a compact "if/else" that
+        # produces a value instead of running a statement.
+        options: dict[str, Any] = {
+            "uri": f"{scheme}://{connection.host}:{connection.port}",
+            "user": connection.user,
+            "password": connection.password,
+            "timeout": connection.timeout,
+        }
+        # options: the keyword arguments that will be passed to
+        # MilvusClient(...) below, built up step by step.
+        if connection.server_pem_path:
+            options["server_pem_path"] = connection.server_pem_path
+        if connection.server_name:
+            options["server_name"] = connection.server_name
+        # Step 1: only add the TLS-specific options if they were actually
+        # configured, since most local setups do not need them.
+        client = None
+        try:
+            # Step 2: actually create the client AND immediately check
+            # that it truly works, by listing collections - creating the
+            # object alone does not prove Milvus is reachable.
+            client = MilvusClient(**options)
+            client.list_collections()
+        except Exception as exc:
+            # Step 3: if anything above failed, make sure we do not leak a
+            # half-open connection, then report a clear, specific error.
+            if client is not None:
+                client.close()
+            raise VectorDBConnectionError(
+                f"Could not connect to Milvus at {connection.host}:{connection.port}: {exc}"
+            ) from exc
+        # Step 4: only keep the connection once it is confirmed working.
+        self._client = client
+        if self.config.collection.load_on_startup:
+            # Step 5: optionally load the collection into memory right
+            # away, so the first real search is not slowed down by a
+            # one-time loading step.
+            self._load_collection()
 
     async def disconnect(self) -> None:
-        await asyncio.to_thread(self._disconnect)
+        try:
+            await asyncio.to_thread(self._disconnect)
+        finally:
+            # "finally" runs whether or not the try block raised, so the
+            # embedding client is always closed if this provider owns it,
+            # even if closing the Milvus connection itself failed.
+            if self._owns_embeddings and not self._closed:
+                await self.embeddings.close()
+                # Closing an owned embedding client cannot be undone, so
+                # the provider is now permanently spent. Recording that
+                # lets later calls fail with a clear explanation rather
+                # than a confusing network error from the closed client.
+                # A provider given someone else's embedding client is left
+                # reusable, because nothing of its own was destroyed.
+                self._closed = True
+
+    def _disconnect(self) -> None:
+        client = self._client
+        self._client = None
+        self._collection_description = None
+        self._collection_loaded = False
+        # Step 1: clear all cached state FIRST, so this object is in a
+        # clean "not connected" state even if closing the client below
+        # raises an error.
+        if client is not None:
+            try:
+                client.close()
+            except Exception as exc:
+                raise VectorDBConnectionError(f"Milvus disconnect error: {exc}") from exc
+
+    def _ensure_client(self) -> MilvusClient:
+        if self._client is None:
+            self._connect()
+        assert self._client is not None
+        # "assert" is a sanity check for the programmer, not normal error
+        # handling: it tells a type checker "trust me, this is not None
+        # here" after we just connected above, and would raise
+        # AssertionError only if that assumption were somehow wrong (a bug).
+        return self._client
+
+    def _load_collection(self) -> dict[str, Any]:
+        if self._collection_loaded and self._collection_description is not None:
+            # Step 1: if the collection was already loaded and described,
+            # reuse the cached description instead of asking Milvus again.
+            # This check sits outside the lock below so that ordinary
+            # searches, which always take this path, never wait on it.
+            return self._collection_description
+        with self._state_lock:
+            # Step 2: only one thread may do the first load, so concurrent
+            # first searches cannot each issue their own describe/load
+            # round trip to Milvus.
+            if self._collection_loaded and self._collection_description is not None:
+                return self._collection_description
+            return self._load_collection_locked()
+
+    def _load_collection_locked(self) -> dict[str, Any]:
+        # Runs with self._state_lock already held by the calling thread.
+        client = self._ensure_client()
+        try:
+            if not client.has_collection(collection_name=self.collection_name):
+                # Step 1: if the collection does not exist at all, this is
+                # almost always because the data-ingestion pipeline has
+                # not been run yet - say so directly instead of letting a
+                # generic Milvus error surface.
+                raise VectorDBCollectionError(
+                    f"Collection '{self.collection_name}' does not exist in Milvus. "
+                    "Run the ingestion pipeline first."
+                )
+            description = client.describe_collection(collection_name=self.collection_name)
+            # description: the collection's schema (its field names/types).
+            if not self._collection_loaded:
+                # Step 2: load the collection into memory only once - this
+                # makes later searches fast, and does not need repeating.
+                client.load_collection(collection_name=self.collection_name)
+                self._collection_loaded = True
+                logger.info("Loaded collection into memory", collection=self.collection_name)
+        except VectorDBCollectionError:
+            # Let our OWN already-specific error pass through unchanged.
+            raise
+        except Exception as exc:
+            # Anything else unexpected gets wrapped into our own exception
+            # type, so callers never need to catch raw Milvus exceptions.
+            raise VectorDBCollectionError(
+                f"Failed to load collection '{self.collection_name}': {exc}"
+            ) from exc
+        self._collection_description = description
+        return description
 
     async def check_collection(self) -> None:
-        """Confirm the collection can load and its vector dimension matches settings."""
+        """Check that the collection can load and has the right vector size."""
         await asyncio.to_thread(self._check_collection)
 
     def _check_collection(self) -> None:
-        collection = self._ensure_collection()
+        description = self._load_collection()
         vector_fields = [
-            field for field in collection.schema.fields if field.dtype == DataType.FLOAT_VECTOR
+            field
+            for field in description["fields"]
+            if field["name"] == "embedding" and field["type"] == DataType.FLOAT_VECTOR
         ]
+        # vector_fields: every field in the collection's schema that is
+        # specifically the "embedding" float-vector column - normally
+        # exactly one, found here with a list comprehension (a compact way
+        # to build a filtered list in one line instead of a manual loop).
         if not vector_fields:
+            # Step 1: if the collection has no vector field at all, it was
+            # set up incorrectly - fail clearly.
             raise VectorDBCollectionError(
                 f"Collection '{self.collection_name}' has no float vector field"
             )
-        actual_dimension = int(vector_fields[0].params["dim"])
+        actual_dimension = int(vector_fields[0]["params"]["dim"])
+        # actual_dimension: the REAL vector size Milvus has stored,
+        # straight from its own schema - this is compared against what
+        # this app expects, below.
         if actual_dimension != self.embedding_dimension:
+            # Step 2: catch a mismatch between what this app's config
+            # expects and what Milvus actually has, with a message that
+            # points directly at the likely cause (ingestion configuration).
             raise VectorDBDimensionMismatchError(
                 f"Collection '{self.collection_name}' has dimension {actual_dimension}; "
                 f"expected {self.embedding_dimension}. Check the ingestion configuration."
             )
 
-    async def get_collection(self) -> Collection:
-        """Return the connected, loaded collection for searches this adapter does not wrap."""
-        return await asyncio.to_thread(self._ensure_collection)
+    async def get_client(self) -> MilvusClient:
+        """Return the connected client for drug-name hybrid searches."""
+        return await asyncio.to_thread(self._get_loaded_client)
+
+    def _get_loaded_client(self) -> MilvusClient:
+        self._load_collection()
+        return self._ensure_client()
+
+    async def describe_collection(self) -> dict[str, Any]:
+        """Return the collection schema, including its BM25 functions."""
+        return await asyncio.to_thread(self._load_collection)
 
     async def count_entities(self) -> int:
-        """Return how many rows the collection holds."""
+        """Return the current row count from Milvus."""
         return await asyncio.to_thread(self._count_entities)
 
     def _count_entities(self) -> int:
-        collection = self._ensure_collection()
+        client = self._get_loaded_client()
         try:
-            rows = collection.query(expr="", output_fields=["count(*)"])
+            rows = client.query(
+                collection_name=self.collection_name, filter="", output_fields=["count(*)"]
+            )
+            # An empty filter ("") matches every row, so this effectively
+            # counts the whole collection using Milvus's own count function.
+            return int(rows[0]["count(*)"])
         except Exception as exc:
             raise VectorDBCollectionError(
                 f"Could not count rows in '{self.collection_name}': {exc}"
             ) from exc
-        return int(rows[0]["count(*)"])
-
-    def _connect(self) -> None:
-        if self._is_connected:
-            return
-
-        conn = self.config.connection
-        params: dict[str, Any] = {"alias": conn.alias, "host": conn.host, "port": conn.port}
-        if conn.user:
-            params.update(user=conn.user, password=conn.password)
-        if conn.secure:
-            params["secure"] = True
-            if conn.server_pem_path:
-                params["server_pem_path"] = conn.server_pem_path
-            if conn.server_name:
-                params["server_name"] = conn.server_name
-
-        try:
-            connections.connect(**params)
-            utility.list_collections(using=conn.alias)  # fails if the server is unreachable
-            self._is_connected = True
-            if self.config.collection.load_on_startup:
-                self._load_collection()
-        except VectorDBCollectionError:
-            raise  # connected, but the collection is missing or cannot be loaded
-        except Exception as exc:
-            self._is_connected = False
-            logger.error(f"Milvus connection failed: {exc}", exc_info=True)
-            raise VectorDBConnectionError(
-                f"Could not connect to Milvus at {conn.host}:{conn.port}: {exc}"
-            ) from exc
-
-    def _disconnect(self) -> None:
-        if not self._is_connected:
-            return
-        try:
-            self._collection = None
-            connections.disconnect(alias=self.config.connection.alias)
-            self._is_connected = False
-        except MilvusException as exc:
-            raise VectorDBConnectionError(f"Milvus disconnect error: {exc}") from exc
-
-    def _load_collection(self) -> Collection:
-        alias = self.config.connection.alias
-        try:
-            if not utility.has_collection(self.collection_name, using=alias):
-                raise VectorDBCollectionError(
-                    f"Collection '{self.collection_name}' does not exist in Milvus. "
-                    "Run the ingestion pipeline first."
-                )
-            collection = Collection(name=self.collection_name, using=alias)
-            collection.load()
-        except VectorDBCollectionError:
-            raise
-        except Exception as exc:
-            raise VectorDBCollectionError(
-                f"Failed to load collection '{self.collection_name}': {exc}"
-            ) from exc
-
-        self._collection = collection
-        logger.info("Loaded collection into memory", collection=self.collection_name)
-        return collection
-
-    def _ensure_collection(self) -> Collection:
-        if not self._is_connected:
-            self._connect()
-        if self._collection is None:
-            return self._load_collection()
-        return self._collection
-
-    # ==================== Search ====================
 
     async def search(
         self,
@@ -216,6 +400,10 @@ class MilvusProvider(VectorDBProvider):
         return await asyncio.to_thread(
             self._search, query_vector, limit, filter_expression, output_fields, **kwargs
         )
+        # "asyncio.to_thread(fn, *args, **kwargs)" also accepts arguments
+        # to pass straight through to "fn" when it runs on the background
+        # thread, which is how this async wrapper hands everything off to
+        # the synchronous _search below.
 
     def _search(
         self,
@@ -226,34 +414,87 @@ class MilvusProvider(VectorDBProvider):
         **kwargs: Any,
     ) -> list[SearchResult]:
         if not self.validate_query_vector(query_vector):
+            # Step 1: reject an obviously wrong vector (empty, or wrong
+            # size) before spending a network round trip sending it to
+            # Milvus - validate_query_vector is the shared check from
+            # base.py.
             raise VectorDBDimensionMismatchError(
                 f"Query vector dimension {len(query_vector)} does not match "
                 f"collection dimension {self.embedding_dimension}."
             )
-
-        collection = self._ensure_collection()
+        client = self._get_loaded_client()
+        assert self._collection_description is not None
+        # Sanity check for the programmer: _get_loaded_client() above
+        # guarantees the collection has been described by this point.
         requested = output_fields if output_fields is not None else self.config.search.output_fields
-        output_fields = self._valid_output_fields(collection, requested)
-        search_params = {
-            "ef": DEFAULT_SEARCH_EF,
-            **self.config.search.search_params,
-            **kwargs.get("search_params", {}),
-        }
-
+        # requested: use the fields the CALLER asked for, or fall back to
+        # the configured defaults if the caller did not specify any.
+        selected_fields = self._valid_output_fields(self._collection_description, requested)
+        # Step 2: drop any requested field names that do not actually
+        # exist in this collection's schema (see _valid_output_fields below).
+        resolved_limit = limit if limit is not None else self.config.search.top_k
+        # resolved_limit: how many results this search will ask for - the
+        # caller's limit, or the configured default. Worked out once here
+        # because the "ef" rule below depends on it as well.
+        search_params = {"ef": DEFAULT_SEARCH_EF, **self.config.search.search_params}
+        search_params.update(kwargs.get("search_params", {}))
+        # Step 3: build the final search tuning parameters - start from a
+        # built-in default, let the configured defaults override it, then
+        # let any "search_params" passed into THIS specific call override
+        # that again. "{**a, **b}" merges two dicts, with "b" winning on
+        # shared keys; ".update(...)" then merges a third source in the
+        # same "later wins" way.
+        configured_ef = search_params.get("ef")
+        if configured_ef is not None and configured_ef < resolved_limit:
+            # Step 4: Milvus rejects an HNSW search outright when "ef" is
+            # smaller than the number of results requested, so asking for
+            # more results than "ef" would fail the whole query rather
+            # than simply returning fewer rows. Raising "ef" to the limit
+            # keeps the request valid. Only an existing "ef" is adjusted,
+            # so index types that tune with other parameters are untouched.
+            search_params["ef"] = resolved_limit
+            logger.debug(
+                "Raised HNSW ef to match the requested limit",
+                requested_limit=resolved_limit,
+                configured_ef=configured_ef,
+            )
         try:
-            raw_results = collection.search(
+            raw_results = client.search(
+                collection_name=self.collection_name,
                 data=[query_vector],
                 anns_field="embedding",
-                param=search_params,
-                limit=limit if limit is not None else self.config.search.top_k,
-                expr=filter_expression,
-                output_fields=output_fields,
+                search_params=search_params,
+                limit=resolved_limit,
+                filter=filter_expression or "",
+                output_fields=selected_fields,
             )
+            # "anns_field" tells Milvus which schema field holds the
+            # vectors to compare against ("embedding" in this collection).
+            # Milvus accepts a BATCH of query vectors at once, which is why
+            # "data" here is a list containing just our one query_vector.
         except Exception as exc:
             logger.error(f"Milvus search failed: {exc}", exc_info=True)
             raise VectorDBSearchError(f"Milvus search failed: {exc}") from exc
-
-        return self._to_search_results(raw_results, output_fields)
+        hits = raw_results[0] if raw_results else []
+        # hits: the results for OUR one query vector - since Milvus
+        # returns one list of results PER query vector sent, and we only
+        # sent one, we take the first (and only) list of matches.
+        results = [
+            SearchResult(
+                id=hit["id"],
+                score=float(hit["distance"]),
+                fields={name: hit["entity"].get(name) for name in selected_fields or []},
+                metadata={"distance": float(hit["distance"]), "collection": self.collection_name},
+            )
+            for hit in hits
+        ]
+        # results: Milvus's raw hit dictionaries translated into this
+        # app's own SearchResult shape, one per match, using a list
+        # comprehension. The "fields={...}" part is itself a DICT
+        # comprehension, building {field_name: value} for every requested
+        # output field on each hit.
+        logger.info("Search completed", result_count=len(results))
+        return results
 
     async def search_by_text(
         self,
@@ -263,56 +504,51 @@ class MilvusProvider(VectorDBProvider):
         output_fields: list[str] | None = None,
         **kwargs: Any,
     ) -> list[SearchResult]:
-        """Embed ``query_text`` and search with it.
-
-        Raises:
-            VectorDBSearchError: If embedding the query fails.
-        """
+        """Embed the text, then search the existing collection."""
+        # This path uses the embedding client before touching Milvus, so it
+        # needs its own closed check: without it, a provider already shut
+        # down by disconnect() would fail inside the closed embedding
+        # client with an unhelpful "Connection error".
+        self._raise_if_closed()
         try:
-            query_vector = await self.embeddings.embed(query_text)
+            # Step 1: turn the search text into a vector first, using the
+            # same embedding model/dimension this provider was configured with.
+            query_vector = await self.embeddings.create_text_embedding(query_text)
         except Exception as exc:
-            logger.error(f"Query embedding failed: {exc}", exc_info=True)
             raise VectorDBSearchError(f"Text-based search failed: {exc}") from exc
-
+        # Step 2: once we have a vector, this is just a normal vector search.
         return await self.search(query_vector, limit, filter_expression, output_fields, **kwargs)
-
-    # ==================== Helpers ====================
 
     @staticmethod
     def _valid_output_fields(
-        collection: Collection, requested: list[str] | None
+        description: dict[str, Any], requested: list[str] | None
     ) -> list[str] | None:
-        """Keep the requested fields that exist in the schema, excluding the key and vector.
-
-        Returns None if none remain, because Milvus rejects an empty list.
-        """
+        # "@staticmethod" means this method does not need "self" - it only
+        # works with the arguments it is given, so it can be called
+        # without a specific MilvusProvider instance if ever needed.
         if not requested:
+            # Step 1: nothing was requested - nothing to validate.
             return None
-
-        schema_fields = {field.name for field in collection.schema.fields}
+        schema_fields = {field["name"] for field in description["fields"]}
+        # schema_fields: every real field name in this collection's
+        # schema, built as a SET (not a list) using a set comprehension,
+        # so membership checks below ("in schema_fields") are fast.
         valid = [name for name in requested if name in schema_fields - {"id", "embedding"}]
-
+        # valid: only the requested names that both (a) actually exist in
+        # the schema, and (b) are not the internal "id"/"embedding"
+        # columns, which are not meant to be returned as regular output.
+        # "schema_fields - {"id", "embedding"}" is SET subtraction: "every
+        # schema field EXCEPT these two."
         if len(valid) < len(requested):
+            # Step 2: if some requested names were dropped, warn about it
+            # (likely a typo in configuration) rather than failing silently
+            # or crashing the whole search over it.
             logger.warning(
                 "Dropped invalid output_fields",
                 dropped=sorted(set(requested) - set(valid)),
                 kept=valid,
             )
         return valid or None
-
-    def _to_search_results(
-        self, raw_results: Any, output_fields: list[str] | None
-    ) -> list[SearchResult]:
-        """Convert pymilvus hits for the single query vector into SearchResult objects."""
-        hits = raw_results[0] if raw_results else []
-        results = [
-            SearchResult(
-                id=hit.id,
-                score=float(hit.distance),
-                fields={name: hit.entity.get(name) for name in output_fields or []},
-                metadata={"distance": float(hit.distance), "collection": self.collection_name},
-            )
-            for hit in hits
-        ]
-        logger.info("Search completed", result_count=len(results))
-        return results
+        # "valid or None" means: return the list if it has anything in it,
+        # or None if it ended up empty - callers treat None as "no specific
+        # fields requested."
