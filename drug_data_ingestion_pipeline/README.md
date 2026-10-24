@@ -173,7 +173,14 @@ fields:
   - name: "dosage_strengths" # VARCHAR(2000) - JSON array of dosages
   - name: "search_text"  # VARCHAR(2000) - Searchable text
   - name: "embedding"    # FLOAT_VECTOR(768) - AI embedding vector
+  - name: "drug_name_sparse" # SPARSE_FLOAT_VECTOR - BM25 vector Milvus builds from drug_name
 ```
+
+`drug_name_sparse` is never inserted. A BM25 function on `drug_name` fills it, and it has its
+own `SPARSE_INVERTED_INDEX`. The drug agent (`src/drugs_agent`) fuses a BM25 search on it with
+the vector search using Reciprocal Rank Fusion, so exact drug-name matches rank first. A
+collection built before this field existed is rejected at startup with a message to re-ingest:
+set `milvus.collection.drop_existing: true` and run `python drug_ingestion_pipeline.py` again.
 
 ---
 

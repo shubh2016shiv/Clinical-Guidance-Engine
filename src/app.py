@@ -5,7 +5,7 @@ import asyncio
 
 from src.adapters.llm_provider import APIType, OpenAIProvider
 from src.bootstrap import bootstrap_services
-from src.drugs_agent import DrugAgent, DrugSearcher
+from src.drugs_agent import DrugAgent, DrugSearcher, format_drug_answer_as_markdown_table
 
 
 async def answer_question(question: str, *, source: str) -> str:
@@ -29,7 +29,7 @@ async def answer_question(question: str, *, source: str) -> str:
         drug_llm_provider = OpenAIProvider(api_type=APIType.CHAT_COMPLETION)
         drug_agent = DrugAgent(DrugSearcher(startup.drug_provider), drug_llm_provider)
         answer = await drug_agent.answer_drug_search_query(question)
-        return answer.model_dump_json(indent=2)
+        return format_drug_answer_as_markdown_table(answer)
     finally:
         if drug_llm_provider is not None:
             await drug_llm_provider.close()
