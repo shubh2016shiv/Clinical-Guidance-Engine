@@ -5,16 +5,17 @@ This module provides structured logging with component naming and execution timi
 It supports both JSON output for file logs and colored output for console logs.
 """
 
+import asyncio
+import contextlib
+import functools
 import logging
-import structlog
-import warnings
 import os
 import time
-import functools
-import contextlib
-import asyncio
-from logging.handlers import RotatingFileHandler
+import warnings
 from datetime import datetime
+from logging.handlers import RotatingFileHandler
+
+import structlog
 
 # Suppress specific warnings
 warnings.simplefilter("ignore", UserWarning)
@@ -23,9 +24,7 @@ warnings.filterwarnings("ignore", category=UserWarning, module="dotenv")
 warnings.filterwarnings("ignore", category=SyntaxWarning, module="dotenv")
 
 # Ensure logs directory exists
-logs_dir = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "logs"
-)
+logs_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "logs")
 os.makedirs(logs_dir, exist_ok=True)
 
 # Create log file name with timestamp
@@ -59,9 +58,7 @@ def add_component_context(_, __, event_dict):
     based on component and subcomponent fields.
     """
     if "component" in event_dict and "subcomponent" in event_dict:
-        event_dict["component_path"] = (
-            f"[{event_dict['component']} > {event_dict['subcomponent']}]"
-        )
+        event_dict["component_path"] = f"[{event_dict['component']} > {event_dict['subcomponent']}]"
     elif "component" in event_dict:
         event_dict["component_path"] = f"[{event_dict['component']}]"
     return event_dict
@@ -101,9 +98,7 @@ def colorize_console_output(_, __, event_dict):
     # Add execution time with color if available
     if "execution_time" in event_data:
         execution_time = event_data["execution_time"]
-        output_parts.append(
-            f"{COLORS['magenta']}(took {execution_time}){COLORS['reset']}"
-        )
+        output_parts.append(f"{COLORS['magenta']}(took {execution_time}){COLORS['reset']}")
 
     # Process remaining fields with appropriate colors
     # Skip standard fields we've already processed
@@ -127,9 +122,7 @@ def colorize_console_output(_, __, event_dict):
                 f"{key}={COLORS['green']}{ICONS['success']} {value}{COLORS['reset']}"
             )
         elif key == "status" and (value == "failed" or value == "error"):
-            output_parts.append(
-                f"{key}={COLORS['red']}{ICONS['fail']} {value}{COLORS['reset']}"
-            )
+            output_parts.append(f"{key}={COLORS['red']}{ICONS['fail']} {value}{COLORS['reset']}")
         elif key == "status" and value == "warning":
             output_parts.append(
                 f"{key}={COLORS['yellow']}{ICONS['warning']} {value}{COLORS['reset']}"
@@ -244,9 +237,9 @@ def _configure_logging_once():
     logging.getLogger("uvicorn.watcher").setLevel(logging.WARNING)
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
-    logging.getLogger(
-        "azure.response_api_agent.pipeline.policies.http_logging_policy"
-    ).setLevel(logging.WARNING)
+    logging.getLogger("azure.response_api_agent.pipeline.policies.http_logging_policy").setLevel(
+        logging.WARNING
+    )
     logging.getLogger("azure.identity").setLevel(logging.WARNING)
     logging.getLogger("azure.keyvault").setLevel(logging.WARNING)
     logging.getLogger("azure.appconfiguration").setLevel(logging.WARNING)
