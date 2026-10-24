@@ -13,6 +13,11 @@ from openai import OpenAIError
 # OpenAIError is the base class for every error the OpenAI SDK can raise
 # (bad request, network failure, rate limit, etc.). Catching it here means
 # "any kind of OpenAI-side failure", without needing to list each one.
+from src.adapters.vector_store.exceptions import VectorDBProviderError
+
+# VectorDBProviderError covers every failure the vector-store adapters
+# report, including an unreadable guideline file or a rejected API key
+# while preparing the hosted store.
 from src.clinical_guideline_agent import ClinicalGuidelineAgent
 from src.logs import get_component_logger
 
@@ -35,11 +40,13 @@ async def prepare_guidelines_store(agent: ClinicalGuidelineAgent) -> str | None:
         # Step 1: ask the agent to do the actual work - checking for an
         # existing store, or creating and populating a new one.
         return await agent.prepare_guidelines_store()
-    except (ValueError, RuntimeError, OpenAIError) as exc:
+    except (ValueError, RuntimeError, OpenAIError, VectorDBProviderError) as exc:
         # Step 2: catch several DIFFERENT kinds of expected failure at once
         # by listing them in a tuple - a bad guidelines folder (ValueError),
-        # an internal processing problem (RuntimeError), or an OpenAI-side
-        # failure (OpenAIError). Any other, unexpected exception type is
-        # deliberately NOT caught here, so it still surfaces as a real bug.
+        # an internal processing problem (RuntimeError), an OpenAI-side
+        # failure (OpenAIError), or a vector-store adapter failure such as
+        # an unreadable guideline file (VectorDBProviderError). Any other,
+        # unexpected exception type is deliberately NOT caught here, so it
+        # still surfaces as a real bug.
         logger.warning("Clinical guidelines are not ready", error=str(exc))
         return None

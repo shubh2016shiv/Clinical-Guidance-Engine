@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 # @dataclass is a shortcut that writes the boring parts of a class (like
 # __init__) for us, just from the fields listed below. "field" lets us give
 # a field a safer default than writing "= []" directly (see the note below).
-from src.adapters.redis import CacheConfig, RedisProvider
+from src.adapters.redis import RedisCacheConfig, RedisProvider
 from src.adapters.vector_store.milvus_vector_store import MilvusProvider
 from src.clinical_guideline_agent import ClinicalGuidelineAgent
 from src.config import get_settings
@@ -38,8 +38,8 @@ from .prepare_guidelines_store import prepare_guidelines_store
 # needing to know HOW each service was started or why one might be missing.
 @dataclass
 class BootstrapResult:
-    cache: RedisProvider | None = None
-    # cache: the connected Redis client, or None if Redis was unavailable.
+    redis_cache: RedisProvider | None = None
+    # redis_cache: the connected Redis provider, or None if Redis was unavailable.
     drug_provider: MilvusProvider | None = None
     # drug_provider: the connected Milvus client, or None if drug search
     # could not be started.
@@ -57,8 +57,8 @@ class BootstrapResult:
         # connections are released cleanly when the app stops. Each check
         # below only closes a service if it was actually set up, since any
         # of them may be None.
-        if self.cache is not None:
-            await self.cache.disconnect()
+        if self.redis_cache is not None:
+            await self.redis_cache.disconnect()
         if self.drug_provider is not None:
             await self.drug_provider.disconnect()
         if self.guideline_agent is not None:
@@ -98,9 +98,9 @@ async def bootstrap_services(
 
     # Step 2: Redis is always attempted (it backs session caching), but a
     # failure here does not stop the app - it just disables caching.
-    cache = RedisProvider(CacheConfig.from_settings(settings))
-    if await check_redis(cache):
-        result.cache = cache
+    redis_cache = RedisProvider(RedisCacheConfig.from_settings(settings))
+    if await check_redis(redis_cache):
+        result.redis_cache = redis_cache
     else:
         result.warnings.append("Redis is unavailable; session caching is disabled")
 

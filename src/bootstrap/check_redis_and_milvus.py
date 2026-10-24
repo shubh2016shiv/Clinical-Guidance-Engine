@@ -25,7 +25,7 @@ logger = get_component_logger("LocalServices")
 # relies on it. Needed because Redis is optional at startup - if it is
 # down, the app should still be able to answer questions, just without
 # cached chat history.
-async def check_redis(provider: RedisProvider) -> bool:
+async def check_redis(redis_provider: RedisProvider) -> bool:
     """Connect to Redis and verify its PING response."""
     # "async def" means this function does network I/O and must be awaited;
     # it can pause here while waiting for Redis to respond.
@@ -33,7 +33,7 @@ async def check_redis(provider: RedisProvider) -> bool:
         # Step 1: try to open the connection (this also sends a PING under
         # the hood to make sure Redis is actually responding, not just that
         # the network path exists).
-        await provider.connect()
+        await redis_provider.connect()
     except CacheProviderError as exc:
         # Step 2: if Redis refuses the connection or the PING fails, this is
         # a KNOWN, expected kind of failure (not a bug) - log it clearly and
