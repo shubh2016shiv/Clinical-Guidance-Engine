@@ -71,7 +71,7 @@ class MilvusSettings(BaseModel):
 
     # Vector search
     milvus_search_top_k: int = Field(
-        default=10,
+        default=50,
         ge=1,
         description="Default number of nearest-neighbour results to return.",
     )
