@@ -108,6 +108,8 @@ class RedisCacheConfig:
             password=settings.redis_password,
             max_connections=settings.redis_max_connections,
             socket_timeout=settings.redis_socket_timeout,
+            socket_connect_timeout=settings.redis_socket_connect_timeout,
+            ssl=settings.redis_ssl,
             key_prefix=settings.redis_key_prefix,
             default_session_ttl=settings.redis_default_session_ttl,
             default_history_ttl=settings.redis_default_history_ttl,

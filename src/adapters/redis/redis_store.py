@@ -65,6 +65,7 @@ from .exceptions import (
     CacheOperationError,
     CacheProviderError,
     CacheSerializationError,
+    CacheTTLError,
 )
 from .schema import ActiveSessionContext, CacheKeyNamespace, RedisCacheConfig
 
@@ -108,8 +109,15 @@ class RedisProvider(RedisCacheBase):
 
     def __init__(self, config: RedisCacheConfig):
         super().__init__(config)
-        # Step 1: let the parent class store the config and log its
-        # "initialized" message.
+        # Reject invalid defaults before opening any connection or writing data.
+        for name in (
+            "default_session_ttl",
+            "default_history_ttl",
+            "default_streaming_ttl",
+            "default_vector_store_ttl",
+        ):
+            self._positive_ttl(getattr(config, name))
+        # Step 1: load the retry and circuit-breaker settings.
         settings = get_settings()
         self.redis_client: aioredis.Redis | None = None
         # self.redis_client: the Redis client and its connection pool, created
@@ -140,6 +148,16 @@ class RedisProvider(RedisCacheBase):
         # unhealthy, so it should not trip the breaker.
 
     # ==================== Helpers ====================
+
+    @staticmethod
+    def _positive_ttl(ttl: int) -> int:
+        """Reject expiry values that would delete data or leave it without an expiry."""
+        if isinstance(ttl, bool) or not isinstance(ttl, int) or ttl <= 0:
+            raise CacheTTLError("Redis TTL must be a positive integer number of seconds")
+        return ttl
+
+    def _effective_ttl(self, ttl: int | None, default_ttl: int) -> int:
+        return self._positive_ttl(default_ttl if ttl is None else ttl)
 
     def _connected_redis_client(self) -> aioredis.Redis:
         if self.redis_client is None:
@@ -201,8 +219,12 @@ class RedisProvider(RedisCacheBase):
             mapping = {name: json.dumps(value) for name, value in values.items()}
             # mapping: every value turned into JSON text, since a Redis
             # "hash" can only store strings.
-            await client.hset(key, mapping=mapping)
-            await client.expire(key, ttl)
+            # Queue both commands together so a dropped connection cannot
+            # leave a newly written hash without an expiry.
+            async with client.pipeline(transaction=True) as pipe:
+                pipe.hset(key, mapping=mapping)
+                pipe.expire(key, ttl)
+                await pipe.execute()
 
         await self._run_cache_operation(operation, write, **context)
 
@@ -258,6 +280,11 @@ class RedisProvider(RedisCacheBase):
             # (network down, wrong host/port, breaker already open, etc.).
             await client.aclose()
             raise CacheConnectionError(f"Could not connect to Redis: {exc}") from exc
+        except Exception:
+            # Even an unexpected setup error must release the new client.
+            # Keep the original error so the cause remains visible.
+            await client.aclose()
+            raise
         # Step 5: only keep the connection around once it is confirmed working.
         self.redis_client = client
         logger.info("Connected to Redis", host=self.config.host, port=self.config.port)
@@ -299,10 +326,7 @@ class RedisProvider(RedisCacheBase):
         self, session_id: str, metadata: dict[str, Any], ttl: int | None = None
     ) -> bool:
         key = self._build_key(CacheKeyNamespace.SESSION, session_id)
-        ttl = ttl or self.config.default_session_ttl
-        # "ttl or self.config.default_session_ttl" means: use the TTL the
-        # caller passed in, or fall back to the configured default if the
-        # caller gave None or 0 (both are "falsy").
+        ttl = self._effective_ttl(ttl, self.config.default_session_ttl)
         await self._store_hash("set session metadata", key, metadata, ttl, session_id=session_id)
         return True
 
@@ -337,12 +361,24 @@ class RedisProvider(RedisCacheBase):
             self._build_key(CacheKeyNamespace.HISTORY, session_id, "messages"),
             self._latest_responses_api_response_id_key(session_id),
         ]
-        # keys: every piece of Redis data that belongs to this session,
-        # deleted together so nothing is left behind.
+        # Streaming keys also belong to this session, but each request has
+        # its own ID, so find them before issuing the delete command.
         client = self._connected_redis_client()
-        deleted = await self._run_cache_operation(
-            "delete session", lambda: client.delete(*keys), session_id=session_id
-        )
+
+        async def delete() -> int:
+            streaming_prefix = self._build_key(CacheKeyNamespace.STREAMING, session_id) + ":"
+            streaming_pattern = self._build_key(CacheKeyNamespace.STREAMING, "*")
+            async for streaming_key in client.scan_iter(match=streaming_pattern):
+                # Check the full prefix because a session ID may contain
+                # Redis glob characters such as '*' or '['.
+                key_text = (
+                    streaming_key.decode() if isinstance(streaming_key, bytes) else streaming_key
+                )
+                if key_text.startswith(streaming_prefix):
+                    keys.append(streaming_key)
+            return await client.delete(*keys)
+
+        deleted = await self._run_cache_operation("delete session", delete, session_id=session_id)
         # "client.delete(*keys)" unpacks the keys list into separate
         # arguments, so Redis deletes all of them in a single command
         # instead of one call per key.
@@ -414,7 +450,7 @@ class RedisProvider(RedisCacheBase):
         self, session_id: str, responses_api_response_id: str, ttl: int | None = None
     ) -> bool:
         key = self._latest_responses_api_response_id_key(session_id)
-        ttl = ttl or self.config.default_session_ttl
+        ttl = self._effective_ttl(ttl, self.config.default_session_ttl)
         client = self._connected_redis_client()
         await self._run_cache_operation(
             "set latest Responses API response ID",
@@ -430,7 +466,7 @@ class RedisProvider(RedisCacheBase):
         self, session_id: str, history: list[dict[str, Any]], ttl: int | None = None
     ) -> bool:
         key = self._build_key(CacheKeyNamespace.HISTORY, session_id)
-        ttl = ttl or self.config.default_history_ttl
+        ttl = self._effective_ttl(ttl, self.config.default_history_ttl)
         client = self._connected_redis_client()
 
         async def write() -> None:
@@ -506,7 +542,7 @@ class RedisProvider(RedisCacheBase):
         ttl: int | None = None,
     ) -> bool:
         key = self._build_key(CacheKeyNamespace.STREAMING, session_id, request_id)
-        ttl = ttl or self.config.default_streaming_ttl
+        ttl = self._effective_ttl(ttl, self.config.default_streaming_ttl)
         await self._store_hash("set streaming state", key, state, ttl, session_id=session_id)
         return True
 
@@ -522,7 +558,7 @@ class RedisProvider(RedisCacheBase):
         ttl: int | None = None,
     ) -> bool:
         key = self._build_key(CacheKeyNamespace.VECTOR_STORE, vector_store_id)
-        ttl = ttl or self.config.default_vector_store_ttl
+        ttl = self._effective_ttl(ttl, self.config.default_vector_store_ttl)
         await self._store_hash("cache vector store validation", key, validation_data, ttl)
         return True
 
