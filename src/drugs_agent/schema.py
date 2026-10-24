@@ -20,3 +20,11 @@ class DrugAnswer(BaseModel):
 
     found: bool
     matches: list[DrugMatch]
+
+
+class DrugClassification(BaseModel):
+    """A drug class inferred from the query for use as a search hint."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    drug_class: str | None

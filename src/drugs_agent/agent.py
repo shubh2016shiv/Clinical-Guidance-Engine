@@ -4,14 +4,17 @@ import json
 from typing import Any
 
 from src.config import get_settings
+from src.logs import get_component_logger
 from src.prompts.drug_system_prompt import DRUG_SYSTEM_PROMPT
 
+from .drug_classification import DrugClassifier
 from .milvus_drug_search import DrugSearcher
 from .schema import DrugAnswer, DrugMatch
 
 # Low sampling values encourage the model to copy retrieved records.
 DRUG_ANSWER_TEMPERATURE = 0.01
 DRUG_ANSWER_TOP_P = 0.99
+logger = get_component_logger("DrugAgent")
 
 
 def _remove_empty_fields_from_drug_record(drug_record: dict[str, Any]) -> dict[str, Any]:
@@ -35,6 +38,7 @@ class DrugAgent:
         drug_answer_system_prompt: str = DRUG_SYSTEM_PROMPT,
         chat_completion_temperature: float = DRUG_ANSWER_TEMPERATURE,
         chat_completion_top_p: float = DRUG_ANSWER_TOP_P,
+        drug_classifier: DrugClassifier | None = None,
     ) -> None:
         self.drug_searcher = drug_searcher
         self.chat_completions_provider = chat_completions_provider
@@ -44,14 +48,36 @@ class DrugAgent:
         self.drug_answer_system_prompt = drug_answer_system_prompt
         self.chat_completion_temperature = chat_completion_temperature
         self.chat_completion_top_p = chat_completion_top_p
+        self.drug_classifier = drug_classifier or DrugClassifier(
+            chat_completions_provider,
+            chat_completion_model_name=self.chat_completion_model_name,
+        )
 
     async def answer_drug_search_query(
         self, drug_search_query: str, *, max_retrieved_drug_records: int | None = None
     ) -> DrugAnswer:
         """Return drug matches backed by records found for the search query."""
+        identified_drug_class = await self.drug_classifier.identify_drug_class(drug_search_query)
+        logger.info("Drug classification completed", drug_class=identified_drug_class)
         drug_search_results = await self.drug_searcher.search_drug_records(
-            drug_name=drug_search_query, max_drug_results=max_retrieved_drug_records
+            drug_name=drug_search_query,
+            drug_class=identified_drug_class,
+            max_drug_results=max_retrieved_drug_records,
         )
+        return await self._structure_drug_search_results(drug_search_query, drug_search_results)
+
+    async def answer_drug_class_query(
+        self, drug_class: str, *, max_retrieved_drug_records: int | None = None
+    ) -> DrugAnswer:
+        """Return catalog drugs in ``drug_class``, searched by meaning without name matching."""
+        drug_search_results = await self.drug_searcher.search_drug_records(
+            drug_class=drug_class, max_drug_results=max_retrieved_drug_records
+        )
+        return await self._structure_drug_search_results(drug_class, drug_search_results)
+
+    async def _structure_drug_search_results(
+        self, drug_search_query: str, drug_search_results: list[Any]
+    ) -> DrugAnswer:
         retrieved_drug_records = [
             _remove_empty_fields_from_drug_record(search_result.fields)
             for search_result in drug_search_results
