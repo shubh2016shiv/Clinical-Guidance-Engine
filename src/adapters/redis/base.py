@@ -1,143 +1,47 @@
-"""Abstract cache provider interface.
+"""Shared Redis configuration and key naming.
 
-Every method raises CacheOperationError on a backend failure and
-CacheSerializationError when a payload cannot be encoded or decoded.
-TTL arguments are in seconds; ``None`` selects the matching default in CacheConfig.
+Big-picture flow:
+1. Store the Redis settings (RedisCacheConfig) a provider was created with.
+2. Log once, at creation time, which cache server this provider talks to.
+3. Build Redis keys in one consistent format, so every method that stores
+   or reads data uses the same naming rules.
 """
-
-from abc import ABC, abstractmethod
-from typing import Any
 
 from src.logs import get_logger
 
-from .schema import ActiveSessionContext, CacheConfig, CacheOperationType
+from .schema import CacheKeyNamespace, RedisCacheConfig
 
 logger = get_logger(__name__)
+# A logger lets this file record what is happening (like "connected to
+# this cache") without using plain print() statements.
 
 
-class CacheProvider(ABC):
-    """Contract that every cache backend implements."""
+# RedisCacheBase: shared Redis settings and key construction for the provider.
+# This class provides common code; it does not define an abstract interface.
+class RedisCacheBase:
+    """Hold cache settings and build consistently prefixed keys."""
 
-    def __init__(self, config: CacheConfig):
+    def __init__(self, config: RedisCacheConfig) -> None:
         self.config = config
-        self.key_prefix = config.key_prefix
-        self.provider_type = self.__class__.__name__.lower().replace("provider", "")
-
+        # self.config: the connection/TTL/key settings this provider uses.
+        provider_type = type(self).__name__.removesuffix("Provider").lower()
+        # Turns a class name like "RedisProvider" into the short label
+        # "redis", used only for this log line below.
         logger.info(
-            f"Initialized {self.provider_type} cache provider - "
-            f"Host: {config.host}:{config.port}, "
-            f"Key Prefix: {config.key_prefix}"
+            "Initialized %s cache provider - Host: %s:%s, Key Prefix: %s",
+            provider_type,
+            config.host,
+            config.port,
+            config.key_prefix,
         )
 
-    # ==================== Connection Management ====================
-
-    @abstractmethod
-    async def connect(self) -> None:
-        """Connect and verify the server. Raises CacheConnectionError on failure."""
-
-    @abstractmethod
-    async def disconnect(self) -> None:
-        """Close the connection and release resources."""
-
-    @abstractmethod
-    async def health_check(self) -> bool:
-        """Return True if the server is connected and responsive."""
-
-    # ==================== Session Management ====================
-
-    @abstractmethod
-    async def get_session_metadata(self, session_id: str) -> dict[str, Any] | None:
-        """Return the session metadata, or None if the session does not exist."""
-
-    @abstractmethod
-    async def set_session_metadata(
-        self, session_id: str, metadata: dict[str, Any], ttl: int | None = None
-    ) -> bool:
-        """Store session metadata with a TTL. Returns True when stored."""
-
-    @abstractmethod
-    async def touch_session(self, session_id: str) -> bool:
-        """Extend the TTL of the session's keys. Returns True if any key was extended."""
-
-    @abstractmethod
-    async def delete_session(self, session_id: str) -> bool:
-        """Delete all of the session's keys. Returns True if any key was deleted."""
-
-    @abstractmethod
-    async def get_active_session_context(self, session_id: str) -> ActiveSessionContext | None:
-        """Return the session's context only if the session exists and has not expired."""
-
-    # ==================== Response Chain Management ====================
-
-    @abstractmethod
-    async def append_response(self, session_id: str, response_id: str) -> bool:
-        """Append to the response chain, trimmed to config.max_chain_length."""
-
-    @abstractmethod
-    async def set_last_response_id(
-        self, session_id: str, response_id: str, ttl: int | None = None
-    ) -> bool:
-        """Store the most recent response ID. Defaults to default_session_ttl."""
-
-    # ==================== History Caching ====================
-
-    @abstractmethod
-    async def cache_history(
-        self, session_id: str, history: list[dict[str, Any]], ttl: int | None = None
-    ) -> bool:
-        """Cache the conversation history as JSON. Defaults to default_history_ttl."""
-
-    @abstractmethod
-    async def get_cached_history(self, session_id: str) -> list[dict[str, Any]] | None:
-        """Return the cached history, or None if it is not cached."""
-
-    @abstractmethod
-    async def invalidate_history(self, session_id: str) -> bool:
-        """Delete the cached history. Returns True if it existed."""
-
-    @abstractmethod
-    async def add_message(
-        self,
-        session_id: str,
-        message: dict[str, Any],
-        max_messages: int | None = None,
-    ) -> bool:
-        """Add a message, keeping at most max_messages (default config.max_chain_length).
-
-        Updates ``message_count`` in the session metadata when the session exists.
-        """
-
-    # ==================== Streaming State ====================
-
-    @abstractmethod
-    async def set_streaming_state(
-        self,
-        session_id: str,
-        request_id: str,
-        state: dict[str, Any],
-        ttl: int | None = None,
-    ) -> bool:
-        """Store streaming state. Defaults to default_streaming_ttl."""
-
-    @abstractmethod
-    async def clear_streaming_state(self, session_id: str, request_id: str) -> bool:
-        """Delete the streaming state. Returns True if it existed."""
-
-    # ==================== Vector Store Validation ====================
-
-    @abstractmethod
-    async def cache_vector_store_validation(
-        self,
-        vector_store_id: str,
-        validation_data: dict[str, Any],
-        ttl: int | None = None,
-    ) -> bool:
-        """Cache a vector store validation result. Defaults to default_vector_store_ttl."""
-
-    @abstractmethod
-    async def get_vector_store_validation(self, vector_store_id: str) -> dict[str, Any] | None:
-        """Return the cached validation result, or None."""
-
-    def _build_key(self, operation_type: CacheOperationType, *identifiers: str) -> str:
-        """Return ``{key_prefix}:{operation_type}:{identifier}:...``."""
-        return ":".join([self.key_prefix, operation_type.value, *identifiers])
+    def _build_key(self, key_namespace: CacheKeyNamespace, *identifiers: str) -> str:
+        """Build a Redis key from the prefix, namespace, and identifiers."""
+        # "*identifiers" collects any number of extra string arguments the
+        # caller passes (like a session_id, or a session_id plus
+        # "messages") into one tuple, so this method works whether a key
+        # needs one identifier or several.
+        # Joins everything with ":" as a separator, e.g.
+        # "Asclepius_Conversations:session:abc123" - a common Redis
+        # convention for namespacing keys.
+        return ":".join((self.config.key_prefix, key_namespace.value, *identifiers))
