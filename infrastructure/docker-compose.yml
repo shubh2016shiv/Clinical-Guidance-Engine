@@ -1,42 +1,30 @@
 # =============================================================================
-# ASCLEPIUS HEALTHCARE CHATBOT — INFRASTRUCTURE SERVICES
+# HEALTHCARE CHATBOT — INFRASTRUCTURE SERVICES
 # =============================================================================
 # PURPOSE:
-#   This file defines the backing infrastructure for a healthcare AI chatbot.
-#   It provisions vector storage (Milvus), document storage (MongoDB), and
-#   caching (Redis) in a reproducible, version-controlled manner.
+#   Run Milvus with its etcd and MinIO dependencies, Redis, and optional Attu.
+#   MongoDB is retained below as commented configuration; the application does
+#   not connect to it.
 #
-# QUICK START FOR NEW DEVELOPERS:
-#   1. Copy `.env.example` to `.env` and fill in secrets (NEVER commit .env).
-#   2. Create the volume directory: mkdir -p volumes/{etcd,minio,milvus,mongodb,redis}
-#   3. Run: docker compose up -d
-#   4. Verify health: docker compose ps
-#   5. Access Attu UI: http://localhost:8002 (Milvus management)
-#
-# ARCHITECTURE OVERVIEW:
-#   ┌─────────────┐     ┌─────────────┐     ┌─────────────┐
-#   │   MongoDB   │     │    Redis    │     │   Milvus    │
-#   │ (Chat Hist) │     │   (Cache)   │     │ (Vectors)   │
-#   └─────────────┘     └─────────────┘     └──────┬──────┘
-#                                                  │
-#                    ┌─────────────┐      ┌────────┴────────┐
-#                    │    etcd     │      │     MinIO       │
-#                    │ (Metadata)  │      │ (Object Store)  │
-#                    └─────────────┘      └─────────────────┘
+# QUICK START:
+#   1. Configure infrastructure/.env if changing local default credentials.
+#   2. Run: docker compose --profile all up -d
+#   3. Verify: docker compose --profile all ps
+#   4. Open Attu at http://localhost:8002 if needed.
 #
 # =============================================================================
 # NAMING CONVENTION:
 #   We use 'name:' at the top level to namespace all resources. This prevents
 #   collisions when multiple projects run on the same Docker host.
 # =============================================================================
-name: asclepius-infrastructure
+name: healthcare-chatbot-infrastructure
 
 # =============================================================================
 # PROFILES
 # =============================================================================
 # Every service belongs to a profile, so 'docker compose up' alone starts
 # nothing. Pass one with --profile:
-#   infra - core backing services (etcd, MinIO, Milvus, MongoDB, Redis)
+#   infra - core backing services (etcd, MinIO, Milvus, Redis)
 #   ui    - Attu, the Milvus web UI
 #   all   - everything (what manage_infrastructure.py starts)
 # =============================================================================
@@ -146,9 +134,9 @@ services:
       - milvus
 
     labels:
-      - "project=asclepius-healthcare-chatbot"
+      - "project=healthcare-chatbot"
       - "service=etcd"
-      - "description=Asclepius Healthcare Chatbot - etcd metadata store for Milvus"
+      - "description=Healthcare Chatbot - etcd metadata store for Milvus"
 
   # ---------------------------------------------------------------------------
   # MINIO — S3-Compatible Object Storage for Milvus
@@ -219,9 +207,9 @@ services:
       - milvus
 
     labels:
-      - "project=asclepius-healthcare-chatbot"
+      - "project=healthcare-chatbot"
       - "service=minio"
-      - "description=Asclepius Healthcare Chatbot - MinIO object storage for Milvus"
+      - "description=Healthcare Chatbot - MinIO object storage for Milvus"
 
   # ---------------------------------------------------------------------------
   # ATTU — Milvus Management UI (Optional / Development Aid)
@@ -281,9 +269,9 @@ services:
       - milvus
 
     labels:
-      - "project=asclepius-healthcare-chatbot"
+      - "project=healthcare-chatbot"
       - "service=attu"
-      - "description=Asclepius Healthcare Chatbot - Attu UI for Milvus management"
+      - "description=Healthcare Chatbot - Attu UI for Milvus management"
 
   # ---------------------------------------------------------------------------
   # MILVUS STANDALONE — Vector Database for Drug Embeddings
@@ -335,7 +323,7 @@ services:
     volumes:
       - ${DOCKER_VOLUME_DIRECTORY:-.}/volumes/milvus:/var/lib/milvus
     labels:
-      - "project=asclepius-healthcare-chatbot"
+      - "project=healthcare-chatbot"
       - "service=milvus-volume-init"
 
   standalone:
@@ -351,6 +339,8 @@ services:
       ETCD_ENDPOINTS: etcd:2379
       MINIO_ADDRESS: minio:9000
       MINIO_REGION: us-east-1
+      MINIO_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin}
 
     volumes:
       - ${DOCKER_VOLUME_DIRECTORY:-.}/volumes/milvus:/var/lib/milvus
@@ -407,13 +397,15 @@ services:
       - milvus
 
     labels:
-      - "project=asclepius-healthcare-chatbot"
+      - "project=healthcare-chatbot"
       - "service=milvus-standalone"
-      - "description=Asclepius Healthcare Chatbot - Milvus vector database"
+      - "description=Healthcare Chatbot - Milvus vector database"
 
   # ---------------------------------------------------------------------------
   # MONGODB — Document Database for Conversation Storage
   # ---------------------------------------------------------------------------
+  # Disabled: the current application writes conversations to JSON files and
+  # does not connect to MongoDB. Uncomment the service only if it is wired in.
   # WHAT IT DOES:
   #   MongoDB stores structured JSON documents: chat messages, user sessions,
   #   audit logs, and application configuration. Its flexible schema is ideal
@@ -428,81 +420,71 @@ services:
   #   Data is written to ./volumes/mongodb on the host. Deleting this folder
   #   wipes all conversation history — be careful!
   # ---------------------------------------------------------------------------
-  mongodb:
-    container_name: mongodb
-    image: mongo:7.0
-    profiles: ["infra", "all"]
+  # mongodb:
+  #   container_name: mongodb
+  #   image: mongo:7.0
+  #   profiles: ["infra", "all"]
 
-    environment:
-      # These credentials are used for the initial 'admin' database setup.
-      # NEW DEV: Change these in your .env file before first launch.
-      # After first launch, changing these env vars has NO EFFECT — credentials
-      # are persisted in the volume. To reset: docker compose down -v (DELETES DATA).
-      MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USER:-admin}
-      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:-password123}
+  #   environment:
+  #     # These credentials are used for the initial 'admin' database setup.
+  #     # NEW DEV: Change these in your .env file before first launch.
+  #     # After first launch, changing these env vars has NO EFFECT — credentials
+  #     # are persisted in the volume. To reset: docker compose down -v (DELETES DATA).
+  #     MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USER:-admin}
+  #     MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:-password123}
 
-    volumes:
-      - ${DOCKER_VOLUME_DIRECTORY:-.}/volumes/mongodb:/data/db
+  #   volumes:
+  #     - ${DOCKER_VOLUME_DIRECTORY:-.}/volumes/mongodb:/data/db
 
-    ports:
-      # Exposed for local development tools (MongoDB Compass, mongosh).
-      # In production, remove this and access via application network only.
-      - "27017:27017"
+  #   ports:
+  #     # Exposed for local development tools (MongoDB Compass, mongosh).
+  #     # In production, remove this and access via application network only.
+  #     - "27017:27017"
 
-    healthcheck:
-      # 'mongosh' is the modern MongoDB shell (replaces legacy 'mongo' CLI).
-      # We ping the admin database to verify authentication + connectivity.
-      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 40s # MongoDB needs time to initialize WiredTiger engine
+  #   healthcheck:
+  #     # 'mongosh' is the modern MongoDB shell (replaces legacy 'mongo' CLI).
+  #     # We ping the admin database to verify authentication + connectivity.
+  #     test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+  #     interval: 30s
+  #     timeout: 10s
+  #     retries: 3
+  #     start_period: 40s # MongoDB needs time to initialize WiredTiger engine
 
-    deploy:
-      resources:
-        limits:
-          cpus: "1.50"
-          memory: 2G
-        reservations:
-          cpus: "0.25"
-          memory: 512M
+  #   deploy:
+  #     resources:
+  #       limits:
+  #         cpus: "1.50"
+  #         memory: 2G
+  #       reservations:
+  #         cpus: "0.25"
+  #         memory: 512M
 
-    restart: unless-stopped
-    security_opt:
-      - no-new-privileges:true
+  #   restart: unless-stopped
+  #   security_opt:
+  #     - no-new-privileges:true
 
-    # MongoDB benefits from higher file descriptor limits under load.
-    ulimits:
-      nofile:
-        soft: 64000
-        hard: 64000
+  #   # MongoDB benefits from higher file descriptor limits under load.
+  #   ulimits:
+  #     nofile:
+  #       soft: 64000
+  #       hard: 64000
 
-    networks:
-      - milvus
+  #   networks:
+  #     - milvus
 
-    labels:
-      - "project=asclepius-healthcare-chatbot"
-      - "service=mongodb"
-      - "description=Asclepius Healthcare Chatbot - MongoDB document database"
+  #   labels:
+  #     - "project=asclepius-healthcare-chatbot"
+  #     - "service=mongodb"
+  #     - "description=Asclepius Healthcare Chatbot - MongoDB document database"
 
   # ---------------------------------------------------------------------------
   # REDIS — In-Memory Cache & Message Broker
   # ---------------------------------------------------------------------------
   # WHAT IT DOES:
-  #   Redis serves two purposes here:
-  #     1. CACHE: Stores frequently accessed data (user sessions, rate-limit
-  #        counters) to reduce database load.
-  #     2. MESSAGE BROKER: Can be used as a pub/sub backend for real-time
-  #        chat features or Celery task queues.
-  #
-  # WHY REDIS OVER OTHER CACHES:
-  #   - Persistence options (RDB snapshots, AOF logs) prevent total data loss.
-  #   - Rich data structures (hashes, sorted sets) beyond simple key-value.
-  #   - Excellent Python support (redis-py, aioredis).
+  #   Redis stores application cache and session data.
   #
   # PERSISTENCE NOTE:
-  #   By default, this config uses Redis's default RDB snapshotting.
-  #   For stronger durability, enable AOF in a custom redis.conf.
+  #   This config enables AOF and stores it in the bind-mounted /data directory.
   # ---------------------------------------------------------------------------
   redis:
     container_name: redis
@@ -552,28 +534,28 @@ services:
       - milvus
 
     labels:
-      - "project=asclepius-healthcare-chatbot"
+      - "project=healthcare-chatbot"
       - "service=redis"
-      - "description=Asclepius Healthcare Chatbot - Redis cache service"
+      - "description=Healthcare Chatbot - Redis cache service"
 
 # =============================================================================
 # NETWORKS
 # =============================================================================
 # We define a custom bridge network for three reasons:
 #   1. ISOLATION: Services can only communicate if on the same network.
-#   2. DNS DISCOVERY: Containers are reachable by service name (e.g., 'mongodb').
+#   2. DNS DISCOVERY: Containers are reachable by service name (e.g., 'redis').
 #   3. SECURITY: No external access except explicitly mapped ports.
 #
 # NEW DEV: If you add a new service (e.g., your Python FastAPI app), add
-# 'networks: - milvus' so it can reach MongoDB and Redis by hostname.
+# 'networks: - milvus' so it can reach Milvus and Redis by hostname.
 # =============================================================================
 networks:
   milvus:
-    name: asclepius-network
+    name: healthcare-chatbot-network
     driver: bridge
     labels:
-      - "project=asclepius-healthcare-chatbot"
-      - "description=Asclepius Healthcare Chatbot Infrastructure Network"
+      - "project=healthcare-chatbot"
+      - "description=Healthcare Chatbot Infrastructure Network"
 
 # =============================================================================
 # VOLUMES (Implicit)
@@ -581,12 +563,12 @@ networks:
 # We use BIND MOUNTS (host directory -> container path) rather than named
 # volumes for one critical reason: BACKUP SIMPLICITY.
 #
-#   Named volume:  docker volume inspect asclepius-infrastructure_milvus_data
+#   Named volume:  docker volume inspect healthcare-chatbot_milvus_data
 #   Bind mount:    ./volumes/milvus/  (visible in your project folder)
 #
 # Bind mounts let you:
 #   - Zip the ./volumes/ folder for offline backups.
-#   - Wipe and recreate with: rm -rf ./volumes/ && docker compose up -d
+#   - Back up or inspect individual service directories before changing them.
 #   - Inspect files directly with standard OS tools.
 #
 # NEW DEV: The ./volumes/ directory is in .gitignore. Never commit database
@@ -602,10 +584,6 @@ networks:
 # # --- MinIO Object Storage ---
 # MINIO_ROOT_USER=minioadmin
 # MINIO_ROOT_PASSWORD=ChangeMeToASecurePassword123!
-#
-# # --- MongoDB Authentication ---
-# MONGO_ROOT_USER=admin
-# MONGO_ROOT_PASSWORD=ChangeMeToASecurePassword456!
 #
 # # --- Redis Authentication ---
 # REDIS_PASSWORD=ChangeMeToASecurePassword789!

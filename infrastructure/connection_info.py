@@ -1,7 +1,7 @@
 """Connection details for the local infrastructure, read from the resolved compose file.
 
-Ports and credentials come from `docker compose config`, so what is printed is
-what Docker actually runs. Only the layout is defined here.
+Configured ports and credentials come from `docker compose config`. Container
+status is queried separately; changed settings require container recreation.
 """
 
 from __future__ import annotations
@@ -222,8 +222,8 @@ def render(compose: dict[str, Any], statuses: dict[str, str], project: str) -> s
         lines.append("  WEB UIs\n")
         lines.append(tabulate(uis, headers=["UI", "URL", "Login"], tablefmt=table_format) + "\n")
     lines.append(
-        "  These are local-development defaults. To change them, set MONGO_ROOT_USER,\n"
-        "  MONGO_ROOT_PASSWORD, REDIS_PASSWORD, MINIO_ROOT_USER or MINIO_ROOT_PASSWORD in\n"
+        "  These are local-development defaults. To change them, set REDIS_PASSWORD,\n"
+        "  MINIO_ROOT_USER or MINIO_ROOT_PASSWORD in\n"
         "  infrastructure/.env, restart the services, and update the matching app .env values."
     )
     lines.append(rule + "\n")

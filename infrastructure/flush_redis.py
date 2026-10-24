@@ -1,13 +1,8 @@
 """
-Redis Cache Flush Utility - Production Grade
+Redis key deletion utility
 
-A comprehensive utility to safely flush Redis cache data with advanced features:
-- Multiple flush strategies (full DB, prefix-based, pattern matching)
-- Robust connection handling with retry logic
-- Detailed operation statistics and progress tracking
-- Safe confirmation prompts with preview
-- Production-grade error handling and logging
-- Environment configuration support
+Preview and delete keys by literal prefix, or flush one Redis database.
+Deletion requires confirmation unless --no-confirm is passed.
 
 Usage:
     python infrastructure/flush_redis.py                    # Flush keys with default prefix
@@ -336,8 +331,7 @@ class RedisConnectionManager:
         try:
             return self.client.dbsize()
         except Exception as e:
-            self.formatter.print_error(f"Failed to get database size: {e}")
-            return 0
+            raise RuntimeError(f"Failed to get database size: {e}") from e
 
     def close(self) -> None:
         """Close Redis connection."""
@@ -383,8 +377,7 @@ class RedisKeyInspector:
                 count += 1
             return count
         except Exception as e:
-            self.formatter.print_error(f"Error counting keys: {e}")
-            return 0
+            raise RuntimeError(f"Error counting keys: {e}") from e
 
     def get_sample_keys(
         self, pattern: str, max_samples: int = OperationConfig.MAX_KEY_SAMPLES
@@ -637,14 +630,26 @@ class ConfigurationLoader:
             Dictionary with Redis configuration
         """
         return {
-            "host": cli_args.host or os.getenv("REDIS_HOST", RedisDefaults.HOST),
-            "port": cli_args.port or int(os.getenv("REDIS_PORT", RedisDefaults.PORT)),
-            "db": cli_args.db or int(os.getenv("REDIS_DB", RedisDefaults.DB)),
-            "password": (cli_args.password or os.getenv("REDIS_PASSWORD", RedisDefaults.PASSWORD)),
+            "host": cli_args.host
+            if cli_args.host is not None
+            else os.getenv("REDIS_HOST", RedisDefaults.HOST),
+            "port": cli_args.port
+            if cli_args.port is not None
+            else int(os.getenv("REDIS_PORT", RedisDefaults.PORT)),
+            "db": cli_args.db
+            if cli_args.db is not None
+            else int(os.getenv("REDIS_DB", RedisDefaults.DB)),
+            "password": (
+                cli_args.password
+                if cli_args.password is not None
+                else os.getenv("REDIS_PASSWORD", RedisDefaults.PASSWORD)
+            ),
             "socket_timeout": RedisDefaults.SOCKET_TIMEOUT,
             "socket_connect_timeout": RedisDefaults.SOCKET_CONNECT_TIMEOUT,
             "key_prefix": (
-                cli_args.prefix or os.getenv("REDIS_KEY_PREFIX", RedisDefaults.KEY_PREFIX)
+                cli_args.prefix
+                if cli_args.prefix is not None
+                else os.getenv("REDIS_KEY_PREFIX", RedisDefaults.KEY_PREFIX)
             ),
         }
 
@@ -975,7 +980,7 @@ def create_argument_parser() -> argparse.ArgumentParser:
         Configured argument parser
     """
     parser = argparse.ArgumentParser(
-        description="Redis Cache Flush Utility - Production Grade",
+        description="Preview and delete Redis keys",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -1101,6 +1106,12 @@ def validate_arguments(args: argparse.Namespace) -> tuple[bool, str | None]:
     if args.full and args.prefix:
         return False, "Cannot use both --full and --prefix options"
 
+    if args.prefix is not None and (not args.prefix or any(c in args.prefix for c in "*?[]\\")):
+        return (
+            False,
+            "Prefix must be nonempty and cannot contain Redis glob characters (* ? [ ] \\)",
+        )
+
     # Port validation
     if args.port is not None and (args.port < 1 or args.port > 65535):
         return False, f"Invalid port number: {args.port} (must be 1-65535)"
@@ -1139,6 +1150,13 @@ def main() -> int:
         config_loader.load_environment_file()
 
         redis_config = config_loader.get_redis_config_from_environment(args)
+        if not args.full:
+            prefix = redis_config["key_prefix"]
+            if not prefix or any(c in prefix for c in "*?[]\\"):
+                formatter.print_error(
+                    "REDIS_KEY_PREFIX must be nonempty and contain no Redis glob characters"
+                )
+                return 1
 
         # Determine flush strategy
         if args.full:
