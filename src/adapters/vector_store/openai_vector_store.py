@@ -180,8 +180,19 @@ class OpenAIVectorStoreClient:
             lambda: self.openai_client.vector_stores.create(name=vector_store_name),
         )
 
-    async def upload_files_and_wait(self, vector_store_id: str, file_paths: list[Path]) -> Any:
-        """Upload several files as one batch and wait for indexing, logging progress."""
+    async def upload_files_and_wait(
+        self,
+        vector_store_id: str,
+        file_paths: list[Path],
+        *,
+        display_names: dict[Path, str] | None = None,
+    ) -> Any:
+        """Upload several files as one batch and wait for indexing, logging progress.
+
+        OpenAI records each file under the name it is uploaded with, and citations
+        show that name. ``display_names`` maps a path to the name a user would
+        recognise, for files stored on disk under a generated name.
+        """
         # OpenAI's own file_batches.upload_and_poll() does this same thing but
         # silently, with no visibility into progress until it is all done. This
         # unrolls that same sequence - upload concurrently, then poll the batch -
@@ -196,8 +207,11 @@ class OpenAIVectorStoreClient:
                 # an unreadable file becomes an adapter error too, rather than
                 # a bare OSError escaping to the caller.
                 with file_path.open("rb") as file_content:
+                    # A (name, content) pair sets the name OpenAI records. A bare
+                    # file object would be named after its path on disk instead.
+                    file_name = (display_names or {}).get(file_path, file_path.name)
                     return await self.openai_client.files.create(
-                        file=file_content, purpose="assistants"
+                        file=(file_name, file_content), purpose="assistants"
                     )
 
         async def upload_and_index() -> Any:
