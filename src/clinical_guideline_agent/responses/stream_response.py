@@ -32,12 +32,20 @@ async def stream_guideline_updates_from_responses_api_events(
                 answer=guideline_answer,
             )
             return
-        elif responses_api_event_type in {"response.failed", "response.incomplete", "error"}:
-            responses_api_error_details = getattr(responses_api_event, "message", None) or getattr(
-                responses_api_event, "error", None
-            )
+        elif responses_api_event_type == "error":
+            # The standalone "error" event is a transport-level stream failure;
+            # the SDK puts its message directly on the event.
+            raise RuntimeError(f"Guideline response stream error: {responses_api_event.message}")
+        elif responses_api_event_type == "response.failed":
+            # response.failed carries the full failed Response; the reason is
+            # nested under response.error, not on the event itself.
+            response_error = responses_api_event.response.error
             raise RuntimeError(
-                f"Guideline response failed ({responses_api_event_type}): "
-                f"{responses_api_error_details}"
+                f"Guideline response failed ({response_error.code}): {response_error.message}"
             )
+        elif responses_api_event_type == "response.incomplete":
+            # response.incomplete carries the full Response; the reason is
+            # nested under response.incomplete_details.reason.
+            incomplete_reason = responses_api_event.response.incomplete_details.reason
+            raise RuntimeError(f"Guideline response is incomplete: {incomplete_reason}")
     raise RuntimeError("Responses API stream ended without response.completed")

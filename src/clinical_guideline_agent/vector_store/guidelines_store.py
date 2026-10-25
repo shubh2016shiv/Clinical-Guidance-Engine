@@ -7,31 +7,37 @@ from typing import Any
 class GuidelinesStore:
     """Manage only stores used by this component; never delete shared stores."""
 
-    def __init__(self, adapter: Any, *, name: str = "clinical_guidelines") -> None:
-        self.adapter = adapter
-        self.name = name
+    def __init__(
+        self, openai_vector_store_client: Any, *, store_name: str = "clinical_guidelines"
+    ) -> None:
+        self.openai_vector_store_client = openai_vector_store_client
+        self.store_name = store_name
 
     async def check_ready(self, vector_store_id: str) -> None:
         """Require a completed store with at least one completed file."""
-        store = await self.adapter.retrieve_store(vector_store_id)
-        if store.status != "completed":
-            raise ValueError(f"Vector store {vector_store_id} is {store.status}")
+        vector_store = await self.openai_vector_store_client.retrieve_vector_store(vector_store_id)
+        if vector_store.status != "completed":
+            raise ValueError(f"Vector store {vector_store_id} is {vector_store.status}")
 
-        files = await self.adapter.list_files(vector_store_id)
-        for file in files:
-            if file.status != "completed":
-                raise ValueError(f"Guideline file {file.id} is {file.status}")
-        if not files:
+        vector_store_files = await self.openai_vector_store_client.list_vector_store_files(
+            vector_store_id
+        )
+        for vector_store_file in vector_store_files:
+            if vector_store_file.status != "completed":
+                raise ValueError(
+                    f"Guideline file {vector_store_file.id} is {vector_store_file.status}"
+                )
+        if not vector_store_files:
             raise ValueError(f"Vector store {vector_store_id} has no guideline files")
 
     async def find_ready_store(self) -> str | None:
         """Reuse a ready store with this name when no ID was supplied."""
-        for store in await self.adapter.list_stores():
-            if store.name != self.name:
+        for vector_store in await self.openai_vector_store_client.list_vector_stores():
+            if vector_store.name != self.store_name:
                 continue
             try:
-                await self.check_ready(store.id)
-                return store.id
+                await self.check_ready(vector_store.id)
+                return vector_store.id
             except ValueError:
                 continue
         return None
@@ -44,25 +50,30 @@ class GuidelinesStore:
             await self.check_ready(vector_store_id)
             return vector_store_id
 
-        existing_id = await self.find_ready_store()
-        if existing_id:
-            return existing_id
+        existing_vector_store_id = await self.find_ready_store()
+        if existing_vector_store_id:
+            return existing_vector_store_id
 
-        path = Path(directory)
-        if not path.is_dir():
-            raise ValueError(f"Guideline directory does not exist: {path}")
-        files = sorted(
-            file
-            for file in path.iterdir()
-            if file.is_file() and file.suffix.lower() in {".pdf", ".md"}
+        guidelines_directory = Path(directory)
+        if not guidelines_directory.is_dir():
+            raise ValueError(f"Guideline directory does not exist: {guidelines_directory}")
+        guideline_files = sorted(
+            guideline_file_path
+            for guideline_file_path in guidelines_directory.iterdir()
+            if guideline_file_path.is_file()
+            and guideline_file_path.suffix.lower() in {".pdf", ".md"}
         )
-        if not files:
-            raise ValueError(f"No PDF or Markdown guidelines found in {path}")
+        if not guideline_files:
+            raise ValueError(f"No PDF or Markdown guidelines found in {guidelines_directory}")
 
-        store = await self.adapter.create_store(self.name)
-        for file in files:
-            uploaded = await self.adapter.upload_and_poll(store.id, file)
-            if uploaded.status != "completed":
-                raise RuntimeError(f"Guideline upload failed for {file.name}: {uploaded.status}")
-        await self.check_ready(store.id)
-        return store.id
+        vector_store = await self.openai_vector_store_client.create_vector_store(self.store_name)
+        file_batch = await self.openai_vector_store_client.upload_files_and_wait(
+            vector_store.id, guideline_files
+        )
+        if file_batch.file_counts.failed:
+            raise RuntimeError(
+                f"{file_batch.file_counts.failed} of {file_batch.file_counts.total} "
+                f"guideline uploads failed for vector store {vector_store.id}"
+            )
+        await self.check_ready(vector_store.id)
+        return vector_store.id

@@ -2,7 +2,7 @@
 
 from typing import Any
 
-from ..citations.file_citations import file_citations
+from ..citations.file_citations import extract_responses_api_file_citations
 from ..schema import GuidelineAnswer
 
 
@@ -14,6 +14,14 @@ def parse_responses_api_result_into_guideline_answer(
     if not response_id:
         raise ValueError("Response is missing its ID")
     responses_api_status = getattr(responses_api_result, "status", "completed")
+    if responses_api_status == "failed":
+        response_error = responses_api_result.error
+        raise RuntimeError(
+            f"Response {response_id} failed ({response_error.code}): {response_error.message}"
+        )
+    if responses_api_status == "incomplete":
+        incomplete_reason = responses_api_result.incomplete_details.reason
+        raise RuntimeError(f"Response {response_id} is incomplete: {incomplete_reason}")
     if responses_api_status != "completed":
         raise RuntimeError(f"Response {response_id} ended with status {responses_api_status}")
     answer_text = getattr(responses_api_result, "output_text", None)
@@ -29,5 +37,5 @@ def parse_responses_api_result_into_guideline_answer(
     return GuidelineAnswer(
         response_id=response_id,
         text=answer_text,
-        citations=file_citations(responses_api_result),
+        citations=extract_responses_api_file_citations(responses_api_result),
     )

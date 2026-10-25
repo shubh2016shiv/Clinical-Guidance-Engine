@@ -5,7 +5,8 @@ Big-picture flow:
    already has, or creating a fresh one from an API key.
 2. Offer small, focused methods for the OpenAI vector-store operations the
    clinical guideline agent needs: list stores, retrieve one, list its
-   files, create a new store, upload a file into it, and delete a store.
+   files, create a new store, upload a batch of files into it with
+   progress logging, and delete a store.
 3. Translate every OpenAI SDK failure into this adapter's own error types
    (see exceptions.py), so callers can catch ``VectorDBProviderError`` and
    never need to know OpenAI-specific exception classes.
@@ -14,6 +15,7 @@ Big-picture flow:
    out from under them.
 """
 
+import asyncio
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any, TypeVar
@@ -22,6 +24,7 @@ import openai
 from openai import AsyncOpenAI
 
 from src.config import get_settings
+from src.logs import get_logger
 
 from .exceptions import (
     VectorDBAuthenticationError,
@@ -31,6 +34,8 @@ from .exceptions import (
     VectorDBProviderError,
     VectorDBRateLimitError,
 )
+
+logger = get_logger(__name__)
 
 T = TypeVar("T")
 # T: a placeholder type so _run below can wrap an operation returning
@@ -175,25 +180,63 @@ class OpenAIVectorStoreClient:
             lambda: self.openai_client.vector_stores.create(name=vector_store_name),
         )
 
-    async def upload_file_and_wait(self, vector_store_id: str, file_path: Path) -> Any:
-        """Upload a file and return its OpenAI SDK record after processing."""
+    async def upload_files_and_wait(self, vector_store_id: str, file_paths: list[Path]) -> Any:
+        """Upload several files as one batch and wait for indexing, logging progress."""
+        # OpenAI's own file_batches.upload_and_poll() does this same thing but
+        # silently, with no visibility into progress until it is all done. This
+        # unrolls that same sequence - upload concurrently, then poll the batch -
+        # so each step can be logged as it happens.
 
-        async def upload() -> Any:
-            with file_path.open("rb") as file_content:
+        async def upload_one(file_path: Path, semaphore: asyncio.Semaphore) -> Any:
+            async with semaphore:
                 # "with ... as ...:" is a context manager: it opens the file,
                 # guarantees it gets closed automatically afterward (even if an
                 # error happens), and "rb" means "read as raw bytes," which is
                 # what the upload API expects. Opening happens inside _run so
                 # an unreadable file becomes an adapter error too, rather than
                 # a bare OSError escaping to the caller.
-                return await self.openai_client.vector_stores.files.upload_and_poll(
-                    vector_store_id=vector_store_id, file=file_content
-                )
-                # "upload_and_poll" uploads the file AND waits ("polls") until
-                # OpenAI finishes processing it, instead of returning
-                # immediately while it is still being indexed.
+                with file_path.open("rb") as file_content:
+                    return await self.openai_client.files.create(
+                        file=file_content, purpose="assistants"
+                    )
 
-        return await self._run(f"upload {file_path.name} to vector store {vector_store_id}", upload)
+        async def upload_and_index() -> Any:
+            # Step 1: upload every file concurrently, capped at 5 at once -
+            # the same concurrency OpenAI's own upload_and_poll() uses by default.
+            semaphore = asyncio.Semaphore(5)
+            uploaded_files = await asyncio.gather(
+                *(upload_one(file_path, semaphore) for file_path in file_paths)
+            )
+            logger.info(
+                "Uploaded files, starting vector store indexing",
+                vector_store_id=vector_store_id,
+                file_count=len(uploaded_files),
+            )
+
+            # Step 2: attach the uploaded files to the store as one batch, then
+            # poll it ourselves instead of calling the SDK's own silent poll,
+            # so progress can be logged on every tick.
+            file_batch = await self.openai_client.vector_stores.file_batches.create(
+                vector_store_id=vector_store_id,
+                file_ids=[uploaded_file.id for uploaded_file in uploaded_files],
+            )
+            while file_batch.file_counts.in_progress > 0:
+                await asyncio.sleep(1)
+                file_batch = await self.openai_client.vector_stores.file_batches.retrieve(
+                    file_batch.id, vector_store_id=vector_store_id
+                )
+                logger.info(
+                    "Vector store indexing progress",
+                    vector_store_id=vector_store_id,
+                    completed=file_batch.file_counts.completed,
+                    failed=file_batch.file_counts.failed,
+                    total=file_batch.file_counts.total,
+                )
+            return file_batch
+
+        return await self._run(
+            f"upload {len(file_paths)} files to vector store {vector_store_id}", upload_and_index
+        )
 
     async def delete_vector_store(self, vector_store_id: str) -> bool:
         """Delete a hosted store, returning whether OpenAI confirmed removal."""

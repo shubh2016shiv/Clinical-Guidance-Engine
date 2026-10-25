@@ -12,7 +12,7 @@ def file_search_tool(vector_store_id: str, *, max_results: int | None = None) ->
         "vector_store_ids": [vector_store_id],
     }
     if max_results is not None:
-        if max_results < 1:
-            raise ValueError("max_results must be positive")
+        if not 1 <= max_results <= 50:
+            raise ValueError("max_results must be between 1 and 50")
         tool["max_num_results"] = max_results
     return tool

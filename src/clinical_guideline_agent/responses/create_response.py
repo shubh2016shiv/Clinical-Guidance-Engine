@@ -40,12 +40,12 @@ class ClinicalGuidelineResponsesApi:
 
     async def create_responses_api_result(self, question: str, **kwargs: Any) -> Any:
         responses_api_request = self.build_responses_api_request(question, **kwargs)
-        return await self.responses_api_provider.execute_responses_api_raw(
+        return await self.responses_api_provider.execute_responses_api(
             input_message=responses_api_request.pop("input"), **responses_api_request
         )
 
     async def start_responses_api_stream(self, question: str, **kwargs: Any) -> Any:
         responses_api_request = self.build_responses_api_request(question, stream=True, **kwargs)
-        return await self.responses_api_provider.execute_responses_api_raw(
+        return await self.responses_api_provider.execute_responses_api(
             input_message=responses_api_request.pop("input"), **responses_api_request
         )
