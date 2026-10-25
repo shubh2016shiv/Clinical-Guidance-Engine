@@ -3,7 +3,7 @@
 from .agent import DrugAgent
 from .drug_classification import DrugClassifier
 from .drug_collection_readiness import verify_drug_collection_ready_for_search
-from .drug_formatter import format_drug_answer_as_markdown_table
+from .drug_formatter import format_drug_answer_as_markdown_list
 from .milvus_drug_search import DrugSearcher
 from .schema import DrugAnswer, DrugClassification, DrugMatch
 
@@ -14,6 +14,6 @@ __all__ = [
     "DrugClassifier",
     "DrugMatch",
     "DrugSearcher",
-    "format_drug_answer_as_markdown_table",
+    "format_drug_answer_as_markdown_list",
     "verify_drug_collection_ready_for_search",
 ]

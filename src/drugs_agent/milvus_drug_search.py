@@ -52,13 +52,13 @@ class DrugSearcher:
                 drug_embedding_query_text, limit=max_drug_results
             )
 
-        drug_query_embedding = await self.milvus_provider.embeddings.embed(
+        drug_query_embedding = await self.milvus_provider.embeddings.create_text_embedding(
             drug_embedding_query_text
         )
-        drug_collection = await self.milvus_provider.get_collection()
+        milvus_client = await self.milvus_provider.get_client()
         return await asyncio.to_thread(
             self._run_dense_and_bm25_drug_search,
-            drug_collection,
+            milvus_client,
             drug_query_embedding,
             drug_name.strip(),
             max_drug_results,
@@ -66,7 +66,7 @@ class DrugSearcher:
 
     def _run_dense_and_bm25_drug_search(
         self,
-        drug_collection,
+        milvus_client,
         drug_query_embedding: list[float],
         drug_name: str,
         max_drug_results: int,
@@ -93,18 +93,19 @@ class DrugSearcher:
                 limit=candidate_count_per_search,
             ),
         ]
-        milvus_hybrid_search_results = drug_collection.hybrid_search(
-            milvus_search_requests,
-            RRFRanker(self.rrf_rank_constant),
+        milvus_hybrid_search_results = milvus_client.hybrid_search(
+            collection_name=self.milvus_provider.collection_name,
+            reqs=milvus_search_requests,
+            ranker=RRFRanker(self.rrf_rank_constant),
             limit=max_drug_results,
             output_fields=milvus_search_config.output_fields,
         )
         return [
             SearchResult(
-                id=milvus_hit.id,
-                score=float(milvus_hit.distance),
+                id=milvus_hit["id"],
+                score=float(milvus_hit["distance"]),
                 fields={
-                    output_field_name: milvus_hit.entity.get(output_field_name)
+                    output_field_name: milvus_hit["entity"].get(output_field_name)
                     for output_field_name in milvus_search_config.output_fields
                 },
                 metadata={"collection": self.milvus_provider.collection_name, "ranker": "rrf"},

@@ -23,11 +23,11 @@ async def verify_drug_collection_ready_for_search(milvus_provider: MilvusProvide
 
 
 async def _require_drug_name_bm25_function(milvus_provider: MilvusProvider) -> None:
-    drug_collection_schema = (await milvus_provider.get_collection()).schema
+    drug_collection_schema = await milvus_provider.describe_collection()
     has_drug_name_bm25_function = any(
-        collection_function.type == FunctionType.BM25
-        and DRUG_NAME_SPARSE_FIELD in collection_function.output_field_names
-        for collection_function in drug_collection_schema.functions
+        collection_function["type"] == FunctionType.BM25
+        and DRUG_NAME_SPARSE_FIELD in collection_function["output_field_names"]
+        for collection_function in drug_collection_schema["functions"]
     )
     if not has_drug_name_bm25_function:
         raise VectorDBCollectionError(
