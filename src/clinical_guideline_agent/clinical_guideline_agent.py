@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from src.adapters.llm_provider import APIType, OpenAIProvider
-from src.adapters.vector_store.openai_vector_store_adapter import OpenAIVectorStoreAdapter
+from src.adapters.vector_store.openai_vector_store import OpenAIVectorStoreClient
 from src.config import PROJECT_ROOT, get_settings
 from src.prompts.clinical_guideline_system_prompt import CLINICAL_GUIDELINE_SYSTEM_PROMPT
 
@@ -24,18 +24,18 @@ class ClinicalGuidelineAgent:
         self,
         *,
         responses_api_provider: Any | None = None,
-        guidelines_vector_store_adapter: Any | None = None,
+        openai_vector_store_client: Any | None = None,
         model_name: str | None = None,
         guideline_instructions: str = CLINICAL_GUIDELINE_SYSTEM_PROMPT,
         guidelines_store_id: str | None = None,
     ) -> None:
         application_settings = get_settings()
         if (
-            responses_api_provider is None or guidelines_vector_store_adapter is None
+            responses_api_provider is None or openai_vector_store_client is None
         ) and not application_settings.openai_api_key:
             raise ValueError("OPENAI_API_KEY is required")
         self._owns_responses_api_provider = responses_api_provider is None
-        self._owns_guidelines_vector_store_adapter = guidelines_vector_store_adapter is None
+        self._owns_openai_vector_store_client = openai_vector_store_client is None
         self.responses_api_provider = (
             responses_api_provider
             if responses_api_provider is not None
@@ -44,17 +44,17 @@ class ClinicalGuidelineAgent:
                 model_name=model_name or application_settings.openai_model_name,
             )
         )
-        self.guidelines_vector_store_adapter = (
-            guidelines_vector_store_adapter
-            if guidelines_vector_store_adapter is not None
-            else OpenAIVectorStoreAdapter()
+        self.openai_vector_store_client = (
+            openai_vector_store_client
+            if openai_vector_store_client is not None
+            else OpenAIVectorStoreClient()
         )
         self.responses_api = ClinicalGuidelineResponsesApi(
             self.responses_api_provider,
             model=model_name or application_settings.openai_model_name,
             instructions=guideline_instructions,
         )
-        self.guidelines_store = GuidelinesStore(self.guidelines_vector_store_adapter)
+        self.guidelines_store = GuidelinesStore(self.openai_vector_store_client)
         self.guidelines_store_id = guidelines_store_id
         self.responses_api_conversation_state = ResponsesApiConversationState()
 
@@ -75,6 +75,32 @@ class ClinicalGuidelineAgent:
             vector_store_id=guidelines_store_id or self.guidelines_store_id,
         )
         return self.guidelines_store_id
+
+    async def start_fresh_guidelines_store(self) -> str:
+        """Discard the previous store and start with an empty one for this run.
+
+        Used by the chat UI, where guidelines arrive as chat attachments rather
+        than from a local directory, so nothing is uploaded until a user does it.
+        """
+        self.guidelines_store_id = await self.guidelines_store.start_fresh(self.guidelines_store_id)
+        return self.guidelines_store_id
+
+    async def add_guideline_files(
+        self,
+        guideline_file_paths: list[Path],
+        *,
+        display_names: dict[Path, str] | None = None,
+    ) -> Any:
+        """Index guideline files a user attached in the chat.
+
+        ``display_names`` gives the original file name for each path, so citations
+        show it rather than the name the chat UI stored the upload under.
+        """
+        return await self.guidelines_store.add_files(
+            self._require_guidelines_store_id(),
+            guideline_file_paths,
+            display_names=display_names,
+        )
 
     async def answer_guideline_question(
         self,
@@ -126,11 +152,11 @@ class ClinicalGuidelineAgent:
             yield guideline_update
 
     async def close(self) -> None:
-        """Close adapters created by this agent without deleting the store."""
+        """Close clients created by this agent without deleting the store."""
         if self._owns_responses_api_provider:
             await self.responses_api_provider.close()
-        if self._owns_guidelines_vector_store_adapter:
-            await self.guidelines_vector_store_adapter.close()
+        if self._owns_openai_vector_store_client:
+            await self.openai_vector_store_client.close()
 
     def _require_guidelines_store_id(self) -> str:
         if not self.guidelines_store_id:

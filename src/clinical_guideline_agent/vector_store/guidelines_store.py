@@ -30,6 +30,45 @@ class GuidelinesStore:
         if not vector_store_files:
             raise ValueError(f"Vector store {vector_store_id} has no guideline files")
 
+    async def start_fresh(self, previous_vector_store_id: str | None = None) -> str:
+        """Delete the previous store and return a new empty one's ID.
+
+        The chat UI uploads guidelines itself, so each run starts with nothing
+        indexed rather than reusing whatever a previous run left behind.
+        """
+        # A known ID is deleted directly because listing is eventually
+        # consistent: a store created moments ago may not appear in the list
+        # yet, which would leak it instead of replacing it.
+        if previous_vector_store_id:
+            await self.openai_vector_store_client.delete_vector_store(previous_vector_store_id)
+        # Listing still catches stores left behind by earlier runs, whose IDs
+        # this process never saw.
+        for vector_store in await self.openai_vector_store_client.list_vector_stores():
+            if vector_store.name == self.store_name and vector_store.id != previous_vector_store_id:
+                await self.openai_vector_store_client.delete_vector_store(vector_store.id)
+        vector_store = await self.openai_vector_store_client.create_vector_store(self.store_name)
+        return vector_store.id
+
+    async def add_files(
+        self,
+        vector_store_id: str,
+        file_paths: list[Path],
+        *,
+        display_names: dict[Path, str] | None = None,
+    ) -> Any:
+        """Upload files a user attached in the chat into an existing store."""
+        if not file_paths:
+            raise ValueError("No guideline files to upload")
+        file_batch = await self.openai_vector_store_client.upload_files_and_wait(
+            vector_store_id, file_paths, display_names=display_names
+        )
+        if file_batch.file_counts.failed:
+            raise RuntimeError(
+                f"{file_batch.file_counts.failed} of {file_batch.file_counts.total} "
+                f"guideline uploads failed for vector store {vector_store_id}"
+            )
+        return file_batch
+
     async def find_ready_store(self) -> str | None:
         """Reuse a ready store with this name when no ID was supplied."""
         for vector_store in await self.openai_vector_store_client.list_vector_stores():

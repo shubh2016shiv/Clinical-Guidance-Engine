@@ -3,7 +3,7 @@
 This package uses the OpenAI Responses API and its hosted `file_search` tool to
 answer questions from clinical guideline files. OpenAI network calls go through
 `src.adapters.llm_provider.openai.OpenAIProvider` and
-`src.adapters.vector_store.openai_vector_store_adapter.OpenAIVectorStoreAdapter`.
+`src.adapters.vector_store.openai_vector_store.OpenAIVectorStoreClient`.
 It does not manage the Milvus
 drug database or Redis chat sessions. The existing `src/response_api_agent`
 package remains available while integrations are migrated.
