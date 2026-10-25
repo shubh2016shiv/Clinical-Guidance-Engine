@@ -68,8 +68,21 @@ class RedisSettings(BaseModel):
     # redis_socket_timeout: how long to wait for Redis to respond before
     # giving up on a single operation.
 
+    redis_socket_connect_timeout: int = Field(
+        default=5,
+        ge=1,
+        description="Timeout in seconds for opening a Redis connection.",
+    )
+    # redis_socket_connect_timeout: fail promptly when Redis cannot be reached.
+
+    redis_ssl: bool = Field(
+        default=False,
+        description="Use TLS when connecting to Redis.",
+    )
+    # redis_ssl: enable encrypted connections for Redis deployments that require TLS.
+
     redis_key_prefix: str = Field(
-        default="Asclepius_Conversations",
+        default="healthcare_conversations",
         description="Prefix for all Redis keys (namespace isolation).",
     )
     # redis_key_prefix: text added to the front of every key this app
@@ -78,7 +91,7 @@ class RedisSettings(BaseModel):
 
     redis_default_session_ttl: int = Field(
         default=7200,
-        ge=0,
+        ge=1,
         description="Default TTL for session data in seconds (7200 = 2 hours).",
     )
     # redis_default_session_ttl: how long a user's session stays cached
@@ -86,7 +99,7 @@ class RedisSettings(BaseModel):
 
     redis_default_history_ttl: int = Field(
         default=1800,
-        ge=0,
+        ge=1,
         description="Default TTL for chat-history cache in seconds (1800 = 30 minutes).",
     )
     # redis_default_history_ttl: how long cached chat history stays around
