@@ -3,8 +3,6 @@
 # =============================================================================
 # PURPOSE:
 #   Run Milvus with its etcd and MinIO dependencies, Redis, and optional Attu.
-#   MongoDB is retained below as commented configuration; the application does
-#   not connect to it.
 #
 # QUICK START:
 #   1. Configure infrastructure/.env if changing local default credentials.
@@ -400,82 +398,6 @@ services:
       - "project=healthcare-chatbot"
       - "service=milvus-standalone"
       - "description=Healthcare Chatbot - Milvus vector database"
-
-  # ---------------------------------------------------------------------------
-  # MONGODB — Document Database for Conversation Storage
-  # ---------------------------------------------------------------------------
-  # Disabled: the current application writes conversations to JSON files and
-  # does not connect to MongoDB. Uncomment the service only if it is wired in.
-  # WHAT IT DOES:
-  #   MongoDB stores structured JSON documents: chat messages, user sessions,
-  #   audit logs, and application configuration. Its flexible schema is ideal
-  #   for conversational data where fields vary per message type.
-  #
-  # SCHEMA DESIGN TIP FOR NEW DEVS:
-  #   Store conversations as embedded arrays for fast reads:
-  #     { session_id, user_id, messages: [{role, content, timestamp}, ...] }
-  #   Index on session_id and user_id for query performance.
-  #
-  # PERSISTENCE:
-  #   Data is written to ./volumes/mongodb on the host. Deleting this folder
-  #   wipes all conversation history — be careful!
-  # ---------------------------------------------------------------------------
-  # mongodb:
-  #   container_name: mongodb
-  #   image: mongo:7.0
-  #   profiles: ["infra", "all"]
-
-  #   environment:
-  #     # These credentials are used for the initial 'admin' database setup.
-  #     # NEW DEV: Change these in your .env file before first launch.
-  #     # After first launch, changing these env vars has NO EFFECT — credentials
-  #     # are persisted in the volume. To reset: docker compose down -v (DELETES DATA).
-  #     MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USER:-admin}
-  #     MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:-password123}
-
-  #   volumes:
-  #     - ${DOCKER_VOLUME_DIRECTORY:-.}/volumes/mongodb:/data/db
-
-  #   ports:
-  #     # Exposed for local development tools (MongoDB Compass, mongosh).
-  #     # In production, remove this and access via application network only.
-  #     - "27017:27017"
-
-  #   healthcheck:
-  #     # 'mongosh' is the modern MongoDB shell (replaces legacy 'mongo' CLI).
-  #     # We ping the admin database to verify authentication + connectivity.
-  #     test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
-  #     interval: 30s
-  #     timeout: 10s
-  #     retries: 3
-  #     start_period: 40s # MongoDB needs time to initialize WiredTiger engine
-
-  #   deploy:
-  #     resources:
-  #       limits:
-  #         cpus: "1.50"
-  #         memory: 2G
-  #       reservations:
-  #         cpus: "0.25"
-  #         memory: 512M
-
-  #   restart: unless-stopped
-  #   security_opt:
-  #     - no-new-privileges:true
-
-  #   # MongoDB benefits from higher file descriptor limits under load.
-  #   ulimits:
-  #     nofile:
-  #       soft: 64000
-  #       hard: 64000
-
-  #   networks:
-  #     - milvus
-
-  #   labels:
-  #     - "project=asclepius-healthcare-chatbot"
-  #     - "service=mongodb"
-  #     - "description=Asclepius Healthcare Chatbot - MongoDB document database"
 
   # ---------------------------------------------------------------------------
   # REDIS — In-Memory Cache & Message Broker

@@ -120,30 +120,6 @@ def _etcd(service: dict[str, Any], status: str) -> ServiceInfo:
     )
 
 
-def _mongodb(service: dict[str, Any], status: str) -> ServiceInfo:
-    ports, environment = _ports(service), _environment(service)
-    user = environment["MONGO_INITDB_ROOT_USERNAME"]
-    password = environment["MONGO_INITDB_ROOT_PASSWORD"]
-    uri = f"mongodb://{quote_plus(user)}:{quote_plus(password)}@{HOST}:{ports[27017]}/?authSource=admin"
-    return ServiceInfo(
-        "MONGODB  (document database)",
-        status,
-        [
-            ("Host port", _at(ports[27017], 27017)),
-            ("Username", user),
-            ("Password", password),
-            ("Auth database", "admin"),
-            ("Connection string", uri),
-            ("Shell", f'mongosh "{uri}"'),
-            ("Inside Docker", f"{service['container_name']}:27017"),
-            (
-                "App .env",
-                f"MONGO_PORT={ports[27017]}  MONGO_ROOT_USER={user}  MONGO_ROOT_PASSWORD={password}",
-            ),
-        ],
-    )
-
-
 def _redis(service: dict[str, Any], status: str) -> ServiceInfo:
     ports, password = _ports(service), _redis_password(service)
     return ServiceInfo(
@@ -179,10 +155,6 @@ def build_groups(compose: dict[str, Any], statuses: dict[str, str]) -> list[Grou
             milvus_stack.append(build(services[name], status_of(name)))
 
     groups = [Group("VECTOR DATABASE  -  Milvus stack", milvus_stack)]
-    if "mongodb" in services:
-        groups.append(
-            Group("DOCUMENT DATABASE", [_mongodb(services["mongodb"], status_of("mongodb"))])
-        )
     if "redis" in services:
         groups.append(Group("CACHE", [_redis(services["redis"], status_of("redis"))]))
     return [group for group in groups if group.services]

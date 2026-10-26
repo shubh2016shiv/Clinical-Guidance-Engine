@@ -2,8 +2,7 @@
 Asclepius Healthcare Chatbot - Infrastructure Management Script
 
 This script manages Docker Compose infrastructure services for the Asclepius Healthcare Chatbot,
-including Milvus (vector database) and Redis (cache). The MongoDB service is
-commented out in docker-compose.yml because the application no longer uses it.
+including Milvus (vector database) and Redis (cache).
 
 Features:
 - Starting services with health checks
@@ -42,7 +41,6 @@ class InfrastructureManager:
         "milvus-minio",
         "attu",
         "milvus-standalone",
-        # "mongodb",  # Inactive: retained alongside the commented Compose service.
         "redis",
     ]
     HEALTHCHECK_CONTAINERS = {"milvus-etcd", "milvus-minio", "milvus-standalone", "redis"}

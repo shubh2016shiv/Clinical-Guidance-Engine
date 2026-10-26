@@ -1,6 +1,6 @@
 # Local infrastructure
 
-This directory runs local services for the Asclepius healthcare chatbot. The current application uses Milvus for searchable drug embeddings and has a Redis adapter for cache and session state. The Chainlit UI writes completed conversations to JSON files under `healthcare_assistant_ui/conversations/`. MongoDB is retained as commented configuration in Compose because the current application and ingestion code do not connect to it.
+This directory runs local services for the Asclepius healthcare chatbot. The current application uses Milvus for searchable drug embeddings and has a Redis adapter for cache and session state. The Chainlit UI writes completed conversations to JSON files under `healthcare_assistant_ui/conversations/`.
 
 **Readers:** Developers setting up, inspecting, or troubleshooting the local stack. This guide covers infrastructure containers and their data. For loading drug data, see the [ingestion guide](../drug_data_ingestion_pipeline/README.md). For the user interface, see the [UI guide](../healthcare_assistant_ui/README.md).
 
@@ -49,7 +49,7 @@ Run these commands from the **repository root** in PowerShell, Bash, or another 
 
 ## Why these services exist
 
-Milvus finds drug records related to a query by comparing numeric embeddings. The bootstrap code also connects to Redis for cache and session state when Redis is available. Milvus requires etcd for metadata and MinIO for stored objects; Attu provides a browser interface for inspecting Milvus. The UI's `ConversationPersistenceManager` writes conversations to JSON files. MongoDB's Compose service is commented out because no MongoDB adapter or client is wired into the application.
+Milvus finds drug records related to a query by comparing numeric embeddings. The bootstrap code also connects to Redis for cache and session state when Redis is available. Milvus requires etcd for metadata and MinIO for stored objects; Attu provides a browser interface for inspecting Milvus. The UI's `ConversationPersistenceManager` writes conversations to JSON files.
 
 **What is connected to what?** This diagram shows storage relationships, not request order. An arrow means “connects to or uses.”
 
@@ -99,7 +99,7 @@ From the repository root, the remaining management commands are:
 | `python infrastructure/manage_infrastructure.py --stop` | Finish local work | Stops/removes this project's containers and network; keeps bind-mounted data |
 | `python infrastructure/manage_infrastructure.py --restart` | Apply a Compose setting or restart the stack | Stops then starts the stack and pulls images again |
 
-Changing a Redis or MinIO password in `infrastructure/.env` also requires updating its matching root application `.env` value where applicable. A restart applies those settings to their containers. If MongoDB was started by an earlier version of this Compose file, commenting out its service does not stop an already running container; check `docker ps` before deciding whether to stop it. Its bind-mounted data is untouched.
+Changing a Redis or MinIO password in `infrastructure/.env` also requires updating its matching root application `.env` value where applicable. A restart applies those settings to their containers.
 
 ### Inspect a failure
 
