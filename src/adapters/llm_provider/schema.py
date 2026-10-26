@@ -31,7 +31,8 @@ class ChatCompletionRequest(TypedDict):
     # NotRequired means the caller may omit these settings and use API defaults.
     temperature: NotRequired[float]
     top_p: NotRequired[float]
-    max_tokens: NotRequired[int]
+    # max_completion_tokens replaces the deprecated max_tokens; newer models reject the old name.
+    max_completion_tokens: NotRequired[int]
     frequency_penalty: NotRequired[float]
     presence_penalty: NotRequired[float]
     stop: NotRequired[str | list[str]]

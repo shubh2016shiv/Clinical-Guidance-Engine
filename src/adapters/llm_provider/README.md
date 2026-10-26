@@ -64,7 +64,7 @@ config = LLMConfig(
 | `api_type` | Chat Completions or Responses API |
 | `token_limit` | Hard ceiling for input + output |
 | `temperature` | 0–2. Lower = deterministic, higher = creative |
-| `max_tokens` | Reserved for response; subtracts from available input tokens |
+| `max_tokens` | Reserved for response; subtracts from available input tokens. Sent to OpenAI as `max_completion_tokens`, because the SDK deprecates `max_tokens` and newer models reject it |
 | `top_p` | Nucleus sampling; overrides temperature if set |
 | `frequency_penalty`, `presence_penalty` | Discourage repetition |
 | `stop` | String(s) that end generation |

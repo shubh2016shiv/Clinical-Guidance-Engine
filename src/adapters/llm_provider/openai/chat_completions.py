@@ -52,9 +52,12 @@ class ChatCompletionsClient:
             prompt_text = " ".join(message.get("content", "") for message in chat_messages)
             # prompt_text: a rough, combined version of everything being
             # sent to the model, used only for the token-size estimate.
-            if not self._openai_provider.validate_token_limit(
-                prompt_text, chat_completion_options.get("max_tokens")
-            ):
+            # The reply-length limit can be passed under either name (see the rename
+            # below), so the budget check looks for both.
+            per_call_token_limit = chat_completion_options.get(
+                "max_completion_tokens", chat_completion_options.get("max_tokens")
+            )
+            if not self._openai_provider.validate_token_limit(prompt_text, per_call_token_limit):
                 # Step 2: if the estimate is over budget, stop here with a
                 # specific error instead of letting OpenAI reject it later.
                 raise LLMProviderTokenLimitError("Token budget exceeded for chat completion.")
@@ -91,6 +94,16 @@ class ChatCompletionsClient:
                 if value is not None
             }
             # request_options: the final merged settings for this request.
+            # The OpenAI SDK deprecates "max_tokens" in favour of
+            # "max_completion_tokens", and newer models reject the old name
+            # outright. LLMConfig and callers keep calling it max_tokens; it is
+            # renamed here, at the point it goes to OpenAI. A limit the caller
+            # passed under the new name wins over the configured default, because
+            # "setdefault" only fills the key when it is not already there.
+            if "max_tokens" in request_options:
+                request_options.setdefault(
+                    "max_completion_tokens", request_options.pop("max_tokens")
+                )
             request_parameters: dict[str, Any] = {
                 **request_options,
                 "model": chat_completion_options.get("model", self._llm_config.model_name),
