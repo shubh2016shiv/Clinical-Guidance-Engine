@@ -26,9 +26,10 @@ class MilvusSettings(BaseModel):
         default="localhost",
         description="Milvus server host. Use 'milvus-standalone' inside Docker Compose network.",
     )
-    # milvus_host: where to find the Milvus server (see mongo_host in
-    # mongodb_settings.py for why this differs between local runs and
-    # Docker Compose).
+    # milvus_host: where to find the Milvus server. "localhost" when running
+    # outside Docker; the service name "milvus-standalone" when running inside
+    # the Docker Compose network, since containers address each other by
+    # service name instead of "localhost".
 
     milvus_port: int = Field(
         default=19530,

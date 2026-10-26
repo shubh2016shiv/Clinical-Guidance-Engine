@@ -2,7 +2,7 @@
 
 Big-picture flow:
 1. Combine every service-specific settings group (OpenAI, Milvus, Redis,
-   MongoDB, Guidelines, Application, Paths) into one big ``Settings`` class.
+   Guidelines, Application, Paths) into one big ``Settings`` class.
 2. Load real values from environment variables / the .env file, and
    validate them using Pydantic's rules (the "ge"/"le" checks, etc. seen in
    the other files in this folder).
@@ -35,7 +35,6 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from .application_settings import ApplicationSettings
 from .guidelines_settings import GuidelinesSettings
 from .milvus_settings import MilvusSettings
-from .mongodb_settings import MongoDBSettings
 from .openai_settings import OpenAISettings
 from .paths import ENV_FILE, PathSettings
 from .redis_settings import RedisSettings
@@ -50,7 +49,6 @@ class Settings(
     OpenAISettings,
     MilvusSettings,
     RedisSettings,
-    MongoDBSettings,
     GuidelinesSettings,
     ApplicationSettings,
     PathSettings,
@@ -92,7 +90,6 @@ class Settings(
         "openai_api_key",
         "milvus_password",
         "redis_password",
-        "mongo_root_password",
         "minio_root_password",
     }
     # _SECRET_FIELDS: the list of setting names that hold passwords/keys.

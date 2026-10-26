@@ -22,9 +22,10 @@ class RedisSettings(BaseModel):
         default="localhost",
         description="Redis server host. Use 'redis' inside Docker Compose network.",
     )
-    # redis_host: where to find the Redis server (see mongo_host in
-    # mongodb_settings.py for why this differs between local runs and
-    # Docker Compose).
+    # redis_host: where to find the Redis server. "localhost" when running
+    # outside Docker; the service name "redis" when running inside the Docker
+    # Compose network, since containers address each other by service name
+    # instead of "localhost".
 
     redis_port: int = Field(
         default=6381,
