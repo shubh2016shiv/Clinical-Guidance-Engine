@@ -19,6 +19,7 @@ from config_loader import (  # noqa: E402
     SearchTextConfig,
 )
 from drug_ingestion_pipeline import (  # noqa: E402
+    DRUG_NAME_SPARSE_FIELD,
     MilvusCollectionManager,
     VectorDBIngestionPipeline,
 )
@@ -64,12 +65,10 @@ class BatchDataTests(unittest.TestCase):
 
         self.assertEqual(len(data), 9)
         self.assertEqual({len(column) for column in data}, {2})
-        schema_names = [
-            field.name
-            for field in self.manager._create_collection_schema().fields
-            if field.name != "id"
-        ]
-        self.assertEqual(len(schema_names), len(data))
+        schema = self.manager._create_collection_schema()
+        generated = {name for function in schema.functions for name in function.output_field_names}
+        inserted = [f.name for f in schema.fields if f.name != "id" and f.name not in generated]
+        self.assertEqual(len(inserted), len(data))
 
     def test_the_stored_search_text_is_the_one_passed_in(self) -> None:
         """It must be the string that produced the vector, not a fresh render."""
@@ -90,6 +89,39 @@ class BatchDataTests(unittest.TestCase):
             self.manager._prepare_batch_data(records(), wrong, ["a", "b"])
 
         self.assertIn("DIMENSION MISMATCH", str(caught.exception))
+
+
+class Bm25SchemaTests(unittest.TestCase):
+    """Keyword search needs a BM25 vector that Milvus derives from drug_name."""
+
+    def setUp(self) -> None:
+        self.manager = MilvusCollectionManager(milvus_config())
+        self.schema = self.manager._create_collection_schema()
+
+    def test_the_schema_has_a_sparse_field_filled_by_a_bm25_function_on_drug_name(self) -> None:
+        [function] = self.schema.functions
+
+        self.assertEqual(function.input_field_names, ["drug_name"])
+        self.assertEqual(function.output_field_names, [DRUG_NAME_SPARSE_FIELD])
+        field_names = [field.name for field in self.schema.fields]
+        self.assertIn(DRUG_NAME_SPARSE_FIELD, field_names)
+
+    def test_drug_name_has_an_analyzer_so_it_can_be_tokenized(self) -> None:
+        drug_name = next(f for f in self.schema.fields if f.name == "drug_name")
+
+        self.assertTrue(drug_name.params["enable_analyzer"])
+
+    def test_create_index_builds_the_dense_and_the_bm25_index(self) -> None:
+        self.manager.collection = MagicMock()
+
+        self.manager.create_index()
+
+        indexes = {
+            call.kwargs["field_name"]: call.kwargs["index_params"]
+            for call in self.manager.collection.create_index.call_args_list
+        }
+        self.assertEqual(set(indexes), {"embedding", DRUG_NAME_SPARSE_FIELD})
+        self.assertEqual(indexes[DRUG_NAME_SPARSE_FIELD]["metric_type"], "BM25")
 
 
 class CollectionAliasTests(unittest.TestCase):

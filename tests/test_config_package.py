@@ -19,7 +19,7 @@ class ConfigPackageTests(unittest.TestCase):
                 "MILVUS_PORT": "19531",
                 "MINIO_BUCKET_NAME": "test-bucket",
                 "REDIS_PORT": "6382",
-                "MONGO_DB_NAME": "test-database",
+                "MILVUS_COLLECTION_NAME": "test-collection",
             },
         ):
             settings = Settings(_env_file=None)
@@ -28,7 +28,7 @@ class ConfigPackageTests(unittest.TestCase):
         self.assertEqual(settings.milvus_port, 19531)
         self.assertEqual(settings.minio_bucket_name, "test-bucket")
         self.assertEqual(settings.redis_port, 6382)
-        self.assertEqual(settings.mongo_db_name, "test-database")
+        self.assertEqual(settings.milvus_collection_name, "test-collection")
 
     def test_validation_and_paths_are_preserved(self) -> None:
         self.assertEqual(PROJECT_ROOT, Path(__file__).resolve().parent.parent)

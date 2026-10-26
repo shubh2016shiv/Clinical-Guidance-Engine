@@ -34,14 +34,6 @@ def sample_compose():
                 ],
             },
             "etcd": {"container_name": "milvus-etcd"},
-            "mongodb": {
-                "container_name": "mongodb",
-                "environment": [
-                    "MONGO_INITDB_ROOT_USERNAME=admin",
-                    "MONGO_INITDB_ROOT_PASSWORD=p@ss:word",
-                ],
-                "ports": ["27017:27017"],
-            },
             "redis": {
                 "container_name": "redis",
                 "command": ["redis-server", "--requirepass", "redis123", "--appendonly", "yes"],
@@ -70,16 +62,6 @@ class ConnectionInfoTests(unittest.TestCase):
         self.assertEqual(rows["Connection string"], "redis://:redis123@localhost:6381/0")
         self.assertIn("REDIS_PORT=6381", rows["App .env"])
         self.assertEqual(status, "running (healthy)")
-
-    def test_mongodb_connection_string_escapes_special_characters(self) -> None:
-        rows, _ = rows_of(connection_info.build_groups(sample_compose(), {}), "MONGODB")
-
-        self.assertEqual(rows["Username"], "admin")
-        self.assertEqual(rows["Password"], "p@ss:word")
-        self.assertEqual(
-            rows["Connection string"],
-            "mongodb://admin:p%40ss%3Aword@localhost:27017/?authSource=admin",
-        )
 
     def test_attu_tells_the_user_to_connect_by_container_name(self) -> None:
         rows, _ = rows_of(connection_info.build_groups(sample_compose(), {}), "ATTU")
@@ -112,7 +94,6 @@ class ConnectionInfoTests(unittest.TestCase):
 
         for heading in (
             "VECTOR DATABASE",
-            "DOCUMENT DATABASE",
             "CACHE",
             "WEB UIs",
             "project: demo",
@@ -120,6 +101,7 @@ class ConnectionInfoTests(unittest.TestCase):
             self.assertIn(heading, report)
         self.assertIn("http://localhost:9001", report)
         self.assertIn("root / secret", report)
+        self.assertNotIn("MONGO", report.upper())
 
     def test_ascii_table_is_used_when_the_console_cannot_print_box_characters(self) -> None:
         with patch.object(connection_info.sys, "stdout", SimpleNamespace(encoding="cp1252")):
