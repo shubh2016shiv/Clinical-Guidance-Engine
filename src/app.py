@@ -7,9 +7,8 @@ from collections.abc import AsyncIterator
 
 from src.adapters.llm_provider import APIType, OpenAIProvider
 from src.bootstrap import bootstrap_services
-from src.clinical_guideline_agent.citations.inline_citations import citation_marker
 from src.clinical_guideline_agent.schema import FileCitation
-from src.drugs_agent import DrugAgent, DrugSearcher, format_drug_answer_as_markdown_table
+from src.drugs_agent import DrugAgent, DrugSearcher, format_drug_answer_as_markdown_list
 from src.orchestrator import ClinicalDrugOrchestrator, OrchestratorUpdate
 
 
@@ -34,7 +33,7 @@ async def answer_question(question: str, *, source: str) -> str:
         drug_llm_provider = OpenAIProvider(api_type=APIType.CHAT_COMPLETION)
         drug_agent = DrugAgent(DrugSearcher(startup.drug_provider), drug_llm_provider)
         answer = await drug_agent.answer_drug_search_query(question)
-        return format_drug_answer_as_markdown_table(answer)
+        return format_drug_answer_as_markdown_list(answer)
     finally:
         if drug_llm_provider is not None:
             await drug_llm_provider.close()
@@ -75,7 +74,7 @@ def _references_block(sources: list[FileCitation]) -> str:
     if not sources:
         return ""
     numbered_sources = (
-        f"{citation_marker(source_number)} {source.filename}"
+        f"[{source_number}] {source.filename}"
         for source_number, source in enumerate(sources, start=1)
     )
     return "\n\nReferences:\n" + "\n".join(numbered_sources)
