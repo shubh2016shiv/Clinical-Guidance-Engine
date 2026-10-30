@@ -16,15 +16,21 @@ async def ask_model_for_structured_json(
     system_prompt: str,
     user_content: str,
     output_model: type[Any],
+    previous_conversation_messages: list[dict[str, str]] | None = None,
 ) -> Any:
     """Ask the model a question and force its reply into a fixed JSON shape.
 
     `output_model` describes the shape we want. We send that shape to the model,
     then parse the reply into that same class.
+
+    `previous_conversation_messages` are earlier user/assistant messages. They go
+    between the system prompt and the current question, in the order they happened,
+    so the model reads the conversation like a transcript.
     """
     result = await chat_completions_provider.execute_chat_completion(
         [
             {"role": "system", "content": system_prompt},
+            *(previous_conversation_messages or []),
             {"role": "user", "content": user_content},
         ],
         model=model_name,

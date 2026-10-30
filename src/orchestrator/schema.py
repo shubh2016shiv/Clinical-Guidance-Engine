@@ -1,8 +1,10 @@
 """Structured outputs, graph state and stream updates for the clinical-drug orchestrator."""
 
 from dataclasses import dataclass
-from typing import Literal, TypedDict
+from typing import Annotated, Literal, TypedDict
 
+from langchain_core.messages import AnyMessage
+from langgraph.graph.message import add_messages
 from pydantic import BaseModel, ConfigDict
 
 from src.clinical_guideline_agent import GuidelineAnswer
@@ -26,13 +28,22 @@ class RecommendedDrugClasses(BaseModel):
 
 
 class OrchestratorState(TypedDict, total=False):
+    # Every user question and final assistant answer of this conversation, oldest first.
+    # `add_messages` is a "reducer": when a node or caller returns new messages for this
+    # key, LangGraph APPENDS them instead of replacing the list. The checkpointer saves
+    # it between questions. See conversation_history.py for how it is read back.
+    conversation_messages: Annotated[list[AnyMessage], add_messages]
+
+    # Everything below belongs to ONE question. Because the checkpointer also saves
+    # these, the orchestrator resets them at the start of every question so that an
+    # earlier question's guideline or drug results can never leak into the next one.
     clinical_question: str
     route: QuestionRoute
-    guideline_answer: GuidelineAnswer
+    guideline_answer: GuidelineAnswer | None
     cited_guideline_text: str
     guideline_sources: list[FileCitation]
     drug_classes: list[str]
-    drug_answer: DrugAnswer
+    drug_answer: DrugAnswer | None
 
 
 @dataclass(frozen=True)

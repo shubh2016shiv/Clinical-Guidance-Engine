@@ -12,6 +12,7 @@ from langgraph.config import get_stream_writer
 from src.drugs_agent import format_drug_answer_as_markdown_list
 from src.prompts.orchestrator_system_prompts import ANSWER_CONSOLIDATION_SYSTEM_PROMPT
 
+from ..conversation_history import select_recent_previous_messages_for_chat_model
 from ..schema import OrchestratorState
 from ..structured_model_call import TEMPERATURE
 
@@ -39,6 +40,9 @@ def make_stream_combined_answer_node(chat_completions_provider: Any, model_name:
         text_stream = await chat_completions_provider.execute_chat_completion(
             [
                 {"role": "system", "content": ANSWER_CONSOLIDATION_SYSTEM_PROMPT},
+                # Earlier exchanges sit between the system prompt and the current
+                # question, so the model can keep its answer consistent with them.
+                *select_recent_previous_messages_for_chat_model(state["conversation_messages"]),
                 {"role": "user", "content": model_input},
             ],
             stream=True,

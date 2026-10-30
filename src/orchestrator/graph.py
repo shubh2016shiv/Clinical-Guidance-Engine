@@ -38,8 +38,12 @@ def build_orchestrator_graph(
     drug_agent: Any,
     chat_completions_provider: Any,
     model_name: str,
+    checkpointer: Any,
 ) -> Any:
     """Build and compile the flowchart below. (*) marks a step that streams text.
+
+    `checkpointer` saves the graph's data after each run, keyed by a conversation's
+    `thread_id`. That saved data is what lets a later question see earlier messages.
 
                                    START
                                      |
@@ -119,4 +123,4 @@ def build_orchestrator_graph(
     graph.add_edge("search_drugs", "stream_combined_answer")
     graph.add_edge("stream_combined_answer", END)
 
-    return graph.compile()
+    return graph.compile(checkpointer=checkpointer)
