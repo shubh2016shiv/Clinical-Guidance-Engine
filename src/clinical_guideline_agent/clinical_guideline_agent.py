@@ -13,7 +13,7 @@ from .conversation.response_chain import ResponsesApiConversationState
 from .responses.create_response import ClinicalGuidelineResponsesApi
 from .responses.parse_response import parse_responses_api_result_into_guideline_answer
 from .responses.stream_response import stream_guideline_updates_from_responses_api_events
-from .schema import GuidelineAnswer, GuidelineStreamUpdate
+from .schema import GuidelineAnswer, GuidelineStreamUpdate, IndexedGuidelineFile
 from .vector_store.guidelines_store import GuidelinesStore
 
 
@@ -101,6 +101,14 @@ class ClinicalGuidelineAgent:
             guideline_file_paths,
             display_names=display_names,
         )
+
+    async def list_guideline_files(self) -> list[IndexedGuidelineFile]:
+        """List the guideline files currently indexed in this agent's store."""
+        return await self.guidelines_store.list_files(self._require_guidelines_store_id())
+
+    async def remove_guideline_file(self, file_id: str) -> None:
+        """Remove one guideline file from this agent's store and delete the upload."""
+        await self.guidelines_store.remove_file(self._require_guidelines_store_id(), file_id)
 
     async def answer_guideline_question(
         self,

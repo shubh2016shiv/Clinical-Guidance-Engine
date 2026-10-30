@@ -12,6 +12,17 @@ class FileCitation:
 
 
 @dataclass(frozen=True)
+class IndexedGuidelineFile:
+    """One guideline file in the store, as shown in a file list."""
+
+    file_id: str
+    filename: str
+    # OpenAI's indexing state: "in_progress", "completed", "failed" or "cancelled".
+    status: str
+    size_bytes: int = 0
+
+
+@dataclass(frozen=True)
 class GuidelineAnswer:
     response_id: str
     text: str

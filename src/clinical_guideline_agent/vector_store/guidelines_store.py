@@ -3,6 +3,10 @@
 from pathlib import Path
 from typing import Any
 
+from src.adapters.vector_store.exceptions import VectorDBCollectionError
+
+from ..schema import IndexedGuidelineFile
+
 
 class GuidelinesStore:
     """Manage only stores used by this component; never delete shared stores."""
@@ -68,6 +72,34 @@ class GuidelinesStore:
                 f"guideline uploads failed for vector store {vector_store_id}"
             )
         return file_batch
+
+    async def list_files(self, vector_store_id: str) -> list[IndexedGuidelineFile]:
+        """List the files indexed in a store, using the names they were uploaded with."""
+        client = self.openai_vector_store_client
+        vector_store_files = await client.list_vector_store_files(vector_store_id)
+
+        indexed_files: list[IndexedGuidelineFile] = []
+        for vector_store_file in vector_store_files:
+            try:
+                file_info = await client.retrieve_file_info(vector_store_file.id)
+            except VectorDBCollectionError:
+                # A file that was just removed can still show up in the store's list
+                # for a moment, although the upload itself is already deleted. It is
+                # gone, so leave it out rather than fail the whole list.
+                continue
+            indexed_files.append(
+                IndexedGuidelineFile(
+                    file_id=vector_store_file.id,
+                    filename=file_info.filename,
+                    status=vector_store_file.status,
+                    size_bytes=file_info.size_bytes,
+                )
+            )
+        return indexed_files
+
+    async def remove_file(self, vector_store_id: str, file_id: str) -> None:
+        """Remove one file from a store, and delete the uploaded file as well."""
+        await self.openai_vector_store_client.remove_file(vector_store_id, file_id)
 
     async def find_ready_store(self) -> str | None:
         """Reuse a ready store with this name when no ID was supplied."""
