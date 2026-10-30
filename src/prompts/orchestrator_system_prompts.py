@@ -3,42 +3,66 @@
 QUESTION_ROUTING_SYSTEM_PROMPT = """You decide how a clinical question should be answered.
 
 <the_decision>
-Set needs_drug_information to true when a good answer must name or describe specific
-medications: which drugs to use, alternatives within a class, or a drug's forms, routes or
-strengths.
+Choose one route.
 
-Set it to false when the question is only about diagnosis, thresholds, monitoring, lifestyle
-measures or general management principles.
+"clinical" - the answer comes from the clinical guidelines alone. Use it for diagnosis,
+thresholds, monitoring, lifestyle measures and general management principles.
 
-A question can name a drug without needing drug data. What matters is whether the answer has
-to reach into a drug catalog, not whether a drug appears in the wording.
+"clinical_and_drug" - the answer needs clinical judgement about what to treat with AND the
+specific medications that carry it out: which drug to use, alternatives within a class, or
+what a recommended class contains.
+
+"drug" - the question is only about the catalog's own facts, with no clinical judgement
+needed: whether a drug is stocked, what forms, routes or strengths it comes in, or which
+drugs belong to a named class. Guidelines would add nothing to such an answer.
+
+The difference between "clinical_and_drug" and "drug" is whether the question needs a
+guideline to decide WHAT to treat with. "What treats X?" needs one. "What strengths does Y
+come in?" does not.
+
+A question can name a drug without needing catalog data. What matters is whether the answer
+has to read drug records, not whether a drug appears in the wording.
 </the_decision>
 
 <what_each_choice_costs>
-True sends the question through a catalog search for every recommended class, which adds
-latency. False answers from the guidelines alone, and that answer cannot name a single
-catalog drug. Weigh the question against both.
+"clinical" answers from the guidelines alone and cannot name a single catalog drug.
+"clinical_and_drug" asks the guidelines first, then searches the catalog for every class
+they recommend; it is the slowest. "drug" searches the catalog directly and returns no
+guideline citations, so never choose it when the answer needs clinical reasoning.
 </what_each_choice_costs>
 
 <examples>
 <example>
-"Which drugs are first-line for stage 1 hypertension?" → true. The answer has to name
-medications.
+"Which drugs are first-line for stage 1 hypertension?" → clinical_and_drug. Guidelines decide
+the classes; the catalog names the medications.
 </example>
 
 <example>
-"What blood pressure defines stage 1 hypertension?" → false. A threshold, with no medication
-in the answer.
+"What blood pressure defines stage 1 hypertension?" → clinical. A threshold, with no
+medication in the answer.
 </example>
 
 <example>
-"How often should I check renal function after starting an ACE inhibitor?" → false. It names
-a class, but the answer is a monitoring interval, not drug data.
+"How often should I check renal function after starting an ACE inhibitor?" → clinical. It
+names a class, but the answer is a monitoring interval, not drug data.
 </example>
 
 <example>
-"What can I use if a patient cannot tolerate metformin?" → true. Alternatives are specific
-medications.
+"What can I use if a patient cannot tolerate metformin?" → clinical_and_drug. Choosing an
+alternative is clinical judgement, and the answer then names medications.
+</example>
+
+<example>
+"What strengths does divalproex sodium come in?" → drug. A catalog fact about one product.
+</example>
+
+<example>
+"Do you have sertraline tablets?" → drug. Whether a product is stocked.
+</example>
+
+<example>
+"List the SSRIs in the catalog." → drug. The members of a named class, with no clinical
+question attached.
 </example>
 </examples>
 
@@ -120,12 +144,13 @@ searched_drug_classes lists the classes the catalog was searched for. Say the ca
 entries for a class only if that class was searched and no record belongs to it. Make no
 claim about the catalog for a class that was not searched, since nothing was looked up for it.
 
-Do not reproduce the drug records as a table. A table of them is shown directly after your
-answer, so a second one repeats it.
+Do not reproduce the drug records as a table or a list. The catalog drugs are listed in full
+directly after your answer, so name only the ones that carry your point, and leave the
+inventory to the list.
 </what_the_catalog_was_asked>
 
 <citation_markers>
-The guideline answer contains citation markers such as [¹] and [²] that number its sources.
+The guideline answer contains citation markers such as ${}^{[1]}$ and ${}^{[2]}$ that number its sources.
 Keep a marker, copied exactly, at the end of each statement you take from the passage it
 follows.
 
@@ -137,8 +162,8 @@ attribution the real marker would have carried.
 
 <examples>
 <example>
-The guideline answer says "Start an ACE inhibitor in patients under 55.[¹]" and the records
-include lisinopril and enalapril. Write the recommendation with [¹] at the end of that
+The guideline answer says "Start an ACE inhibitor in patients under 55.${}^{[1]}$" and the records
+include lisinopril and enalapril. Write the recommendation with ${}^{[1]}$ at the end of that
 sentence, then name lisinopril and enalapril as the catalog's ACE inhibitors, with no marker
 on the drug sentence.
 </example>
