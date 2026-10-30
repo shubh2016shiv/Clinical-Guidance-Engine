@@ -17,6 +17,7 @@ Big-picture flow:
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, TypeVar
 
@@ -84,6 +85,14 @@ def _map_openai_error(exc: Exception, operation: str) -> VectorDBProviderError:
 # SDK calls. Needed so the guideline store manager (elsewhere in the app)
 # can work with simple, named methods instead of calling the OpenAI SDK
 # directly everywhere it needs a vector store.
+@dataclass(frozen=True)
+class UploadedFileInfo:
+    """What an uploaded file is called and how big it is."""
+
+    filename: str
+    size_bytes: int
+
+
 class OpenAIVectorStoreClient:
     """Expose OpenAI vector-store SDK calls to the guideline store manager."""
 
@@ -168,6 +177,39 @@ class OpenAIVectorStoreClient:
             return [vector_store_file async for vector_store_file in vector_store_file_page]
 
         return await self._run(f"list files in vector store {vector_store_id}", read)
+
+    async def retrieve_file_info(self, file_id: str) -> UploadedFileInfo:
+        """Return the name and size of an uploaded file.
+
+        A vector store file record only holds the file's ID, so anything a
+        person would recognise has to be looked up on the file itself.
+        """
+        uploaded_file = await self._run(
+            f"retrieve file {file_id}",
+            lambda: self.openai_client.files.retrieve(file_id),
+        )
+        return UploadedFileInfo(
+            filename=uploaded_file.filename,
+            size_bytes=uploaded_file.bytes or 0,
+        )
+
+    async def remove_file(self, vector_store_id: str, file_id: str) -> bool:
+        """Take a file out of a vector store and delete the uploaded file too.
+
+        OpenAI treats these as two separate things: detaching a file from the
+        store does not delete the file, which would stay in the account. Both
+        steps are done so nothing is left behind. Only the one file ID given is
+        touched. Returns whether OpenAI confirmed the file itself was deleted.
+        """
+
+        async def remove() -> bool:
+            await self.openai_client.vector_stores.files.delete(
+                file_id, vector_store_id=vector_store_id
+            )
+            file_deletion = await self.openai_client.files.delete(file_id)
+            return bool(getattr(file_deletion, "deleted", False))
+
+        return await self._run(f"remove file {file_id} from vector store {vector_store_id}", remove)
 
     async def create_vector_store(self, vector_store_name: str) -> Any:
         """Create a hosted store and return its OpenAI SDK object."""
