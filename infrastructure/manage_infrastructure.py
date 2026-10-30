@@ -6,6 +6,7 @@ including Milvus (vector database) and Redis (cache).
 
 Features:
 - Starting services with health checks
+- Starting services only if they are not already running and healthy (--ensure)
 - Stopping services gracefully
 - Restarting services
 - Displaying connection information
@@ -15,6 +16,7 @@ Features:
 
 Usage:
     python manage_infrastructure.py --start
+    python manage_infrastructure.py --ensure
     python manage_infrastructure.py --stop
     python manage_infrastructure.py --restart
     python manage_infrastructure.py --info
@@ -427,6 +429,26 @@ class InfrastructureManager:
         except (RuntimeError, OSError, subprocess.TimeoutExpired) as exc:
             return False, f"Could not start services: {exc}"
 
+    def ensure_services_running(self) -> tuple[bool, str]:
+        """
+        Start the services only when they are not already running and healthy.
+
+        Unlike start_services, this makes no image pulls and no Docker Compose
+        changes when everything is already up, so it returns in about a second.
+        That makes it safe to call every time the application is launched.
+        """
+        docker_available, error_msg = self._check_docker_available()
+        if not docker_available:
+            return False, error_msg
+
+        # timeout=0 means "look once, do not wait": a single pass over the containers.
+        already_ready, readiness_message = self._wait_for_services_healthy(timeout=0)
+        if already_ready:
+            return True, f"Infrastructure already running. {readiness_message}"
+
+        print(f"Infrastructure is not ready ({readiness_message}). Starting it now...")
+        return self.start_services()
+
     def stop_services(self) -> tuple[bool, str]:
         """
         Stop all infrastructure services gracefully.
@@ -574,6 +596,7 @@ def main():
         epilog="""
 Examples:
   python manage_infrastructure.py --start     Start all services
+  python manage_infrastructure.py --ensure    Start services only if not already healthy
   python manage_infrastructure.py --stop      Stop all services
   python manage_infrastructure.py --restart   Restart all services
   python manage_infrastructure.py --info      Show ports, URLs and credentials
@@ -581,6 +604,11 @@ Examples:
     )
 
     parser.add_argument("--start", action="store_true", help="Start all infrastructure services")
+    parser.add_argument(
+        "--ensure",
+        action="store_true",
+        help="Check the services and start them only if they are not already running and healthy",
+    )
     parser.add_argument("--stop", action="store_true", help="Stop all infrastructure services")
     parser.add_argument(
         "--restart", action="store_true", help="Restart all infrastructure services"
@@ -593,9 +621,11 @@ Examples:
 
     args = parser.parse_args()
 
-    actions = [args.start, args.stop, args.restart, args.info]
+    actions = [args.start, args.ensure, args.stop, args.restart, args.info]
     if sum(actions) != 1:
-        parser.error("Please specify exactly one action: --start, --stop, --restart, or --info")
+        parser.error(
+            "Please specify exactly one action: --start, --ensure, --stop, --restart, or --info"
+        )
 
     try:
         manager = InfrastructureManager()
@@ -612,6 +642,15 @@ Examples:
         if success:
             print(f"\n✓ {message}")
             manager.display_connection_info()
+        else:
+            print(f"\n✗ {message}", file=sys.stderr)
+            sys.exit(1)
+
+    elif args.ensure:
+        print("Checking infrastructure services...")
+        success, message = manager.ensure_services_running()
+        if success:
+            print(f"✓ {message}")
         else:
             print(f"\n✗ {message}", file=sys.stderr)
             sys.exit(1)

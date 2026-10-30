@@ -95,6 +95,7 @@ From the repository root, the remaining management commands are:
 
 | Command | When to use it | Result |
 | --- | --- | --- |
+| `python infrastructure/manage_infrastructure.py --ensure` | Make sure the stack is up before running the app | Does nothing if every service is running and healthy; otherwise starts the stack. `run_demo.sh` and `run_demo.bat` call this before launching the web app |
 | `python infrastructure/manage_infrastructure.py --info` | Find connection settings or check status | Reads Compose configuration and container state; displays credentials in the terminal |
 | `python infrastructure/manage_infrastructure.py --stop` | Finish local work | Stops/removes this project's containers and network; keeps bind-mounted data |
 | `python infrastructure/manage_infrastructure.py --restart` | Apply a Compose setting or restart the stack | Stops then starts the stack and pulls images again |
