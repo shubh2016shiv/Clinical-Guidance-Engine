@@ -44,10 +44,13 @@ class FakeChatModel:
         }
         self.consolidated = consolidated
         self.calls: list[tuple[str, str, dict]] = []
+        self.full_messages_by_call: list[list[dict]] = []  # everything each call was sent
 
     async def execute_chat_completion(self, messages, *, stream=False, **kwargs):
-        system_prompt, user_content = messages[0]["content"], messages[1]["content"]
+        # System prompt first, current question last; any chat history sits in between.
+        system_prompt, user_content = messages[0]["content"], messages[-1]["content"]
         self.calls.append((system_prompt, user_content, kwargs))
+        self.full_messages_by_call.append(messages)
         if stream:
             assert system_prompt == ANSWER_CONSOLIDATION_SYSTEM_PROMPT
             return self._stream()
@@ -95,10 +98,15 @@ def drug_agent(
     return agent
 
 
-async def collect_with_answer(orchestrator, question="How should hypertension be treated?"):
+async def collect_with_answer(
+    orchestrator, question="How should hypertension be treated?", conversation_thread_id=None
+):
     """Return the streamed text chunks and the final answer, checking it comes last, once."""
     updates = [
-        update async for update in orchestrator.stream_clinical_drug_answer_updates(question)
+        update
+        async for update in orchestrator.stream_clinical_drug_answer_updates(
+            question, conversation_thread_id
+        )
     ]
     *text_updates, completed = updates
     assert all(update.type == "text" for update in text_updates)
@@ -106,8 +114,10 @@ async def collect_with_answer(orchestrator, question="How should hypertension be
     return [update.text for update in text_updates], completed.answer
 
 
-async def collect(orchestrator, question="How should hypertension be treated?"):
-    text_chunks, _ = await collect_with_answer(orchestrator, question)
+async def collect(
+    orchestrator, question="How should hypertension be treated?", conversation_thread_id=None
+):
+    text_chunks, _ = await collect_with_answer(orchestrator, question, conversation_thread_id)
     return text_chunks
 
 
@@ -306,6 +316,94 @@ class ClinicalAndDrugRouteTests(unittest.IsolatedAsyncioTestCase):
 
         drugs.answer_drug_class_query.assert_not_awaited()
         self.assertIn("No matching drugs were found.", answer)
+
+
+class ConversationHistoryTests(unittest.IsolatedAsyncioTestCase):
+    """Questions on the same conversation thread see earlier questions and answers."""
+
+    async def ask_in_order(self, orchestrator, questions, conversation_thread_id):
+        for question in questions:
+            await collect_with_answer(orchestrator, question, conversation_thread_id)
+
+    async def test_the_first_question_is_sent_with_no_history(self) -> None:
+        chat_model = FakeChatModel(route="clinical")
+
+        await collect(ClinicalDrugOrchestrator(guideline_agent(), drug_agent({}), chat_model))
+
+        routing_messages = chat_model.full_messages_by_call[0]
+        self.assertEqual([message["role"] for message in routing_messages], ["system", "user"])
+
+    async def test_a_second_question_is_sent_with_the_first_question_and_answer(self) -> None:
+        chat_model = FakeChatModel(route="clinical")
+        orchestrator = ClinicalDrugOrchestrator(guideline_agent(), drug_agent({}), chat_model)
+
+        await self.ask_in_order(orchestrator, ["first question", "second question"], "thread-1")
+
+        second_routing_messages = chat_model.full_messages_by_call[1]
+        self.assertEqual(
+            [(message["role"], message["content"]) for message in second_routing_messages[1:]],
+            [
+                ("user", "first question"),
+                ("assistant", MARKED_GUIDELINE_TEXT),
+                ("user", "second question"),
+            ],
+        )
+
+    async def test_only_the_last_ten_exchanges_are_sent_with_the_current_question(self) -> None:
+        chat_model = FakeChatModel(route="clinical")
+        orchestrator = ClinicalDrugOrchestrator(guideline_agent(), drug_agent({}), chat_model)
+        twelve_questions = [f"question {number}" for number in range(1, 13)]
+
+        await self.ask_in_order(orchestrator, twelve_questions, "thread-1")
+
+        # The 12th question is sent with 10 earlier exchanges (20 messages), so
+        # questions 1 and 2 have fallen out of the window.
+        twelfth_routing_messages = chat_model.full_messages_by_call[-1]
+        history_messages = twelfth_routing_messages[1:-1]
+        self.assertEqual(len(history_messages), 20)
+        self.assertEqual(history_messages[0]["content"], "question 2")
+        self.assertEqual(history_messages[-2]["content"], "question 11")
+        self.assertEqual(twelfth_routing_messages[-1]["content"], "question 12")
+
+    async def test_different_threads_do_not_share_history(self) -> None:
+        chat_model = FakeChatModel(route="clinical")
+        orchestrator = ClinicalDrugOrchestrator(guideline_agent(), drug_agent({}), chat_model)
+
+        await collect(orchestrator, "question on thread one", "thread-1")
+        await collect(orchestrator, "question on thread two", "thread-2")
+
+        messages_for_thread_two = chat_model.full_messages_by_call[1]
+        self.assertEqual(
+            [message["role"] for message in messages_for_thread_two], ["system", "user"]
+        )
+
+    async def test_the_combined_answer_is_also_sent_the_history(self) -> None:
+        chat_model = FakeChatModel(route="clinical_and_drug", drug_classes=[])
+        orchestrator = ClinicalDrugOrchestrator(guideline_agent(), drug_agent({}), chat_model)
+
+        await self.ask_in_order(orchestrator, ["first question", "second question"], "thread-1")
+
+        combined_answer_calls = [
+            messages
+            for messages in chat_model.full_messages_by_call
+            if messages[0]["content"] == ANSWER_CONSOLIDATION_SYSTEM_PROMPT
+        ]
+        self.assertEqual(len(combined_answer_calls[0]), 2)  # first question: no history
+        self.assertEqual(
+            [message["role"] for message in combined_answer_calls[1]],
+            ["system", "user", "assistant", "user"],
+        )
+
+    async def test_results_from_an_earlier_question_do_not_leak_into_the_next(self) -> None:
+        chat_model = FakeChatModel(route="clinical")
+        orchestrator = ClinicalDrugOrchestrator(guideline_agent(), drug_agent({}), chat_model)
+        await collect(orchestrator, "guideline question", "thread-1")
+
+        chat_model.replies[QUESTION_ROUTING_SYSTEM_PROMPT] = {"route": "drug"}
+        _, drug_only_answer = await collect_with_answer(orchestrator, "drug question", "thread-1")
+
+        self.assertIsNone(drug_only_answer.guideline_answer)
+        self.assertEqual(drug_only_answer.sources, [])
 
 
 class FailureTests(unittest.IsolatedAsyncioTestCase):

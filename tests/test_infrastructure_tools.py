@@ -63,6 +63,53 @@ class InfrastructureManagerTests(unittest.TestCase):
         self.assertFalse(success)
         self.assertIn("redis", message)
 
+    def test_ensure_does_not_start_services_that_are_already_healthy(self) -> None:
+        with (
+            patch.object(self.manager, "_check_docker_available", return_value=(True, "")),
+            patch.object(
+                self.manager,
+                "_get_container_info",
+                return_value={"state": "running", "status": "Up 1 minute (healthy)"},
+            ),
+            patch.object(self.manager, "start_services") as start_services,
+        ):
+            success, message = self.manager.ensure_services_running()
+
+        self.assertTrue(success)
+        self.assertIn("already running", message)
+        start_services.assert_not_called()
+
+    def test_ensure_starts_services_when_one_is_not_running(self) -> None:
+        def container_info(name: str) -> dict[str, str] | None:
+            if name == "redis":
+                return None
+            return {"state": "running", "status": "Up 1 minute (healthy)"}
+
+        with (
+            patch.object(self.manager, "_check_docker_available", return_value=(True, "")),
+            patch.object(self.manager, "_get_container_info", side_effect=container_info),
+            patch.object(
+                self.manager, "start_services", return_value=(True, "started")
+            ) as start_services,
+        ):
+            success, message = self.manager.ensure_services_running()
+
+        self.assertTrue(success)
+        self.assertEqual(message, "started")
+        start_services.assert_called_once()
+
+    def test_ensure_fails_without_trying_to_start_when_docker_is_unavailable(self) -> None:
+        with (
+            patch.object(
+                self.manager, "_check_docker_available", return_value=(False, "no docker")
+            ),
+            patch.object(self.manager, "start_services") as start_services,
+        ):
+            success, message = self.manager.ensure_services_running()
+
+        self.assertEqual((success, message), (False, "no docker"))
+        start_services.assert_not_called()
+
 
 class RedisFlushTests(unittest.TestCase):
     def test_explicit_database_zero_overrides_environment(self) -> None:

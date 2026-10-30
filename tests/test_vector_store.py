@@ -309,6 +309,49 @@ class OpenAIVectorStoreClientTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(VectorDBConnectionError):
             await client.list_vector_stores()
 
+    async def test_retrieve_file_info_returns_the_uploaded_name_and_size(self) -> None:
+        client = self.make_client()
+        client.openai_client.files.retrieve = AsyncMock(
+            return_value=MagicMock(filename="CKD KDIGO 2024.pdf", bytes=2_500_000)
+        )
+
+        file_info = await client.retrieve_file_info("file_1")
+
+        self.assertEqual(file_info.filename, "CKD KDIGO 2024.pdf")
+        self.assertEqual(file_info.size_bytes, 2_500_000)
+        client.openai_client.files.retrieve.assert_awaited_once_with("file_1")
+
+    async def test_retrieve_file_info_reports_zero_when_the_size_is_missing(self) -> None:
+        client = self.make_client()
+        client.openai_client.files.retrieve = AsyncMock(
+            return_value=MagicMock(filename="a.pdf", bytes=None)
+        )
+
+        self.assertEqual((await client.retrieve_file_info("file_1")).size_bytes, 0)
+
+    async def test_remove_file_detaches_it_and_deletes_the_upload(self) -> None:
+        client = self.make_client()
+        client.openai_client.vector_stores.files.delete = AsyncMock()
+        client.openai_client.files.delete = AsyncMock(return_value=MagicMock(deleted=True))
+
+        self.assertTrue(await client.remove_file("vs_1", "file_1"))
+        client.openai_client.vector_stores.files.delete.assert_awaited_once_with(
+            "file_1", vector_store_id="vs_1"
+        )
+        client.openai_client.files.delete.assert_awaited_once_with("file_1")
+
+    async def test_remove_file_failure_becomes_adapter_error(self) -> None:
+        client = self.make_client()
+        client.openai_client.vector_stores.files.delete = AsyncMock(
+            side_effect=make_sdk_error(openai.NotFoundError)
+        )
+        client.openai_client.files.delete = AsyncMock()
+
+        with self.assertRaises(VectorDBCollectionError):
+            await client.remove_file("vs_1", "file_missing")
+        # The upload must not be deleted when detaching it failed.
+        client.openai_client.files.delete.assert_not_awaited()
+
     async def test_unreadable_local_file_becomes_config_error(self) -> None:
         """A missing guideline file used to escape as a bare FileNotFoundError."""
         client = self.make_client()

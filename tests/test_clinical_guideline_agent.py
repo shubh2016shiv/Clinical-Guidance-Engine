@@ -11,7 +11,11 @@ from openai.types.responses.response_error import ResponseError
 from openai.types.responses.response_failed_event import ResponseFailedEvent
 from openai.types.responses.response_incomplete_event import ResponseIncompleteEvent
 
-from src.adapters.vector_store.openai_vector_store import OpenAIVectorStoreClient
+from src.adapters.vector_store.exceptions import VectorDBCollectionError
+from src.adapters.vector_store.openai_vector_store import (
+    OpenAIVectorStoreClient,
+    UploadedFileInfo,
+)
 from src.clinical_guideline_agent import ClinicalGuidelineAgent
 from src.clinical_guideline_agent.tools.file_search import file_search_tool
 from src.clinical_guideline_agent.vector_store.guidelines_store import GuidelinesStore
@@ -376,6 +380,77 @@ class GuidelinesStoreFreshStartTests(unittest.IsolatedAsyncioTestCase):
 
         with self.assertRaisesRegex(RuntimeError, "prepare_guidelines_store"):
             await agent.add_guideline_files([Path("a.pdf")])
+
+
+class GuidelinesStoreFileListTests(unittest.IsolatedAsyncioTestCase):
+    def make_client(self):
+        client = MagicMock()
+        client.list_vector_store_files = AsyncMock(
+            return_value=[
+                SimpleNamespace(id="file_1", status="completed"),
+                SimpleNamespace(id="file_2", status="in_progress"),
+            ]
+        )
+        client.retrieve_file_info = AsyncMock(
+            side_effect=[
+                UploadedFileInfo(filename="ADHD NICE 2019.pdf", size_bytes=3_100_000),
+                UploadedFileInfo(filename="COPD GOLD.pdf", size_bytes=512),
+            ]
+        )
+        client.remove_file = AsyncMock(return_value=True)
+        return client
+
+    async def test_list_files_pairs_each_file_with_its_uploaded_name(self) -> None:
+        files = await GuidelinesStore(self.make_client()).list_files("vs_1")
+
+        self.assertEqual(
+            [(file.file_id, file.filename, file.status, file.size_bytes) for file in files],
+            [
+                ("file_1", "ADHD NICE 2019.pdf", "completed", 3_100_000),
+                ("file_2", "COPD GOLD.pdf", "in_progress", 512),
+            ],
+        )
+
+    async def test_a_file_whose_upload_was_just_deleted_is_left_out_of_the_list(self) -> None:
+        client = self.make_client()
+        client.retrieve_file_info = AsyncMock(
+            side_effect=[
+                VectorDBCollectionError("No such File object"),
+                UploadedFileInfo(filename="COPD GOLD.pdf", size_bytes=512),
+            ]
+        )
+
+        files = await GuidelinesStore(client).list_files("vs_1")
+
+        self.assertEqual([file.file_id for file in files], ["file_2"])
+
+    async def test_list_files_is_empty_for_an_empty_store(self) -> None:
+        client = self.make_client()
+        client.list_vector_store_files = AsyncMock(return_value=[])
+
+        self.assertEqual(await GuidelinesStore(client).list_files("vs_1"), [])
+
+    async def test_remove_file_removes_only_the_given_file(self) -> None:
+        client = self.make_client()
+
+        await GuidelinesStore(client).remove_file("vs_1", "file_1")
+
+        client.remove_file.assert_awaited_once_with("vs_1", "file_1")
+
+    async def test_agent_lists_and_removes_files_in_its_own_store(self) -> None:
+        client = self.make_client()
+        agent = ClinicalGuidelineAgent(
+            openai_vector_store_client=client,
+            responses_api_provider=MagicMock(),
+            guidelines_store_id="vs_agent",
+        )
+
+        files = await agent.list_guideline_files()
+        await agent.remove_guideline_file("file_2")
+
+        self.assertEqual(len(files), 2)
+        client.list_vector_store_files.assert_awaited_once_with("vs_agent")
+        client.remove_file.assert_awaited_once_with("vs_agent", "file_2")
 
 
 class FileSearchToolTests(unittest.TestCase):
