@@ -22,7 +22,7 @@ logs/
 *_DELETE*
 *_DELETE/
 
-# Chatbot conversation history
+# Chatbot conversation history (the old Chainlit logs are kept locally, not committed)
 healthcare_assistant_ui/conversations
 .chainlit
 
@@ -30,3 +30,5 @@ healthcare_assistant_ui/conversations
 **/volumes/
 infrastructure/volumes/
 volumes/
+
+healthcare_assistant_web/conversations

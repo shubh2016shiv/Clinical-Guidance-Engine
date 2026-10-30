@@ -2,13 +2,12 @@
 name = "drug-recommendation-chatbot"
 version = "0.1.0"
 description = "Healthcare AI Agent for drug recommendations with RAG-powered knowledge retrieval"
-readme = "Chainlit_Frontend_Documentation.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
 authors = [
     { name = "Your Name", email = "you@example.com" }
 ]
-keywords = ["healthcare", "drug-recommendation", "rag", "chatbot", "chainlit"]
+keywords = ["healthcare", "drug-recommendation", "rag", "chatbot", "nicegui"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Healthcare Industry",
@@ -18,8 +17,9 @@ classifiers = [
 
 dependencies = [
     "aiobreaker>=1.2.0",
-    "chainlit>=2.0.0",
-    "openai",
+    "langgraph>=1.2.16",
+    "nicegui>=3.18.0",
+    "openai>=3.0.0,<4",
     "pandas[excel]==2.3.3",
     "pydantic>=2.0.0",
     "pydantic-settings",
@@ -65,4 +65,4 @@ indent-style = "space"
 skip-magic-trailing-comma = false
 
 [tool.ruff.lint.isort]
-known-first-party = ["src", "healthcare_assistant_ui", "drug_data_ingestion_pipeline", "pharmaceutical_knowledge_base", "infrastructure"]
+known-first-party = ["src", "healthcare_assistant_web", "drug_data_ingestion_pipeline", "pharmaceutical_knowledge_base", "infrastructure"]

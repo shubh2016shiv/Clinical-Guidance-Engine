@@ -68,7 +68,7 @@ def format_inline_citation_marker(source_number: int) -> str:
     # trick that lifts the whole "[1]" - brackets included - rather than
     # just the digit.
     # NOTE: this renders as a raised "[1]" only where maths is supported
-    # (the Chainlit UI). Somewhere plain, such as terminal output, the
+    # (the web UI). Somewhere plain, such as terminal output, the
     # reader sees the literal text ${}^{[1]}$.
     return "${}^{[" + str(source_number) + "]}$"
 

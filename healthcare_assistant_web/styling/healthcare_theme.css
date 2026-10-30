@@ -1,0 +1,576 @@
+/* ===================================================================
+   Colours. Every rule below uses these names, so dark mode only has to
+   redefine the names once, further down.
+   =================================================================== */
+:root {
+  --surface: #ffffff;
+  --surface-soft: #f4f7ff;
+  --border: #deebff;
+  --border-strong: #cddcf7;
+  --text-main: #0c1248;
+  --text-soft: #4d5b87;
+  --text-faint: #6d7fb0;
+
+  --brand: #006bff;
+  --brand-deep: #6550ef;
+  --brand-tint: #e8f2ff;
+  --brand-gradient: linear-gradient(110deg, #008cf5 0%, #2678ff 58%, #568cff 100%);
+  --logo-gradient: linear-gradient(135deg, #149fff 15%, #487aff 55%, #a54bfa 100%);
+
+  --user-bubble: #c5e1ff;
+  --user-bubble-text: #0c1248;
+
+  /* The pale page and the soft shapes drifting across it. */
+  --page-base: #f5fbff;
+  --blob-sky: rgba(220, 242, 255, 0.24);
+  --dot-color: rgba(179, 213, 255, 0.34);
+  --sidebar-surface: linear-gradient(160deg, #ffffff 0%, #f8fbff 65%, #f3faff 100%);
+  --promo-background: linear-gradient(125deg, #e4f1ff 0%, #edfaff 58%, #d8edff 100%);
+
+  --shadow-card: 0 2px 12px rgba(70, 127, 214, 0.04);
+  --shadow-float: 0 4px 18px rgba(70, 127, 214, 0.10);
+  --radius-lg: 18px;
+  --radius-md: 14px;
+  --radius-sm: 10px;
+}
+
+body.body--dark {
+  --surface: #151c2c;
+  --surface-soft: #1b2436;
+  --border: #2a3448;
+  --border-strong: #38455e;
+  --text-main: #e8eefc;
+  --text-soft: #a6b3cc;
+  --text-faint: #7183a3;
+
+  --brand: #60a5fa;
+  --brand-deep: #818cf8;
+  --brand-tint: #1c2740;
+  --brand-gradient: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%);
+  --logo-gradient: linear-gradient(135deg, #3b82f6 0%, #7c5cf0 100%);
+
+  --user-bubble: #1e3a8a;
+  --user-bubble-text: #dbeafe;
+
+  --page-base: #0d1220;
+  --blob-blue: rgba(59, 100, 190, 0.2);
+  --blob-sky: rgba(40, 70, 130, 0.3);
+  --blob-mint: rgba(30, 110, 100, 0.16);
+  --blob-violet: rgba(99, 80, 190, 0.16);
+  --dot-color: rgba(140, 165, 210, 0.2);
+  --sidebar-surface: rgba(21, 28, 44, 0.88);
+  --promo-background: linear-gradient(135deg, #1b2740 0%, #221f3d 100%);
+}
+
+/* ===================================================================
+   Page
+   =================================================================== */
+body {
+  font-family: "Inter", "Segoe UI", system-ui, sans-serif;
+  color: var(--text-main);
+  /* A near-white canvas with only a faint wash behind the conversation. */
+  background-color: var(--page-base);
+  background-image:
+    radial-gradient(ellipse at 48% 36%, var(--blob-sky), transparent 72%);
+  background-attachment: fixed;
+}
+
+/* Decorative shapes stay at the edges of the canvas, behind all controls.
+   The inline vector scales with the viewport without changing page layout. */
+body::after {
+  content: "";
+  position: fixed;
+  inset: 0 0 0 300px;
+  z-index: -2;
+  pointer-events: none;
+  background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 1456 868' preserveAspectRatio='none'%3E%3Cpath fill='%23fff' fill-opacity='.78' d='M0 0H104C54 0 57 68 0 77Z'/%3E%3Cpath fill='%23dff1ff' fill-opacity='.62' d='M0 232C52 215 99 249 102 293C106 346 57 393 0 418Z'/%3E%3Cpath fill='%23def1ff' fill-opacity='.72' d='M0 682C95 674 148 747 176 814C185 837 192 854 208 868H0Z'/%3E%3Cpath fill='%23dff6f3' fill-opacity='.64' d='M1180 67H1456V275C1410 249 1401 209 1363 192C1322 172 1280 192 1238 164C1199 139 1183 107 1180 67Z'/%3E%3Cpath fill='%23e8e3ff' fill-opacity='.65' d='M1180 686C1261 647 1365 643 1456 713V868H1120C1155 817 1137 724 1180 686Z'/%3E%3Cpath fill='%23d8e6ff' fill-opacity='.62' d='M1456 624C1403 591 1355 618 1326 661C1294 709 1316 766 1231 826L1202 868H1456Z'/%3E%3C/svg%3E") center / 100% 100% no-repeat;
+  /* Fade the lower edge of the shapes into the page, as in the reference. */
+  -webkit-mask-image: linear-gradient(#000 88%, transparent 100%);
+  mask-image: linear-gradient(#000 88%, transparent 100%);
+}
+
+body.body--dark::after {
+  opacity: 0.08;
+}
+
+@media (max-width: 1023px) {
+  body::after {
+    left: 0;
+  }
+}
+
+/* A small patch of dots on the right edge, like the target design. */
+body::before {
+  content: "";
+  position: fixed;
+  right: 6px;
+  top: 36%;
+  width: 62px;
+  height: 136px;
+  z-index: -1;
+  pointer-events: none;
+  background-image: radial-gradient(circle, var(--dot-color) 1.4px, transparent 1.8px);
+  background-size: 16px 19px;
+  -webkit-mask-image: radial-gradient(closest-side, #000 40%, transparent 100%);
+  mask-image: radial-gradient(closest-side, #000 40%, transparent 100%);
+}
+
+.muted-text {
+  color: var(--text-soft);
+}
+
+/* ===================================================================
+   Header
+   =================================================================== */
+.app-header {
+  background: transparent;
+  box-shadow: none;
+  color: var(--text-main);
+}
+
+.status-pill {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 5px 14px 5px 10px;
+  box-shadow: var(--shadow-card);
+}
+
+/* ===================================================================
+   Sidebar
+   =================================================================== */
+.app-sidebar {
+  /* A luminous white-to-ice-blue sidebar, matching the page palette. */
+  background: var(--sidebar-surface);
+  -webkit-backdrop-filter: blur(14px);
+  backdrop-filter: blur(14px);
+  border-right: 1px solid var(--border);
+  box-shadow: 4px 0 24px rgba(86, 151, 224, 0.025);
+}
+
+.brand-mark {
+  width: 42px;
+  height: 42px;
+  border-radius: 13px;
+  background: var(--logo-gradient);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  box-shadow: 0 4px 12px rgba(38, 123, 255, 0.15);
+}
+
+.brand-name {
+  font-size: 1.05rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+.brand-tagline {
+  font-size: 0.72rem;
+  color: var(--text-faint);
+  letter-spacing: 0.02em;
+}
+
+.new-chat-button {
+  background: linear-gradient(110deg, #008cf5 0%, #2678ff 58%, #568cff 100%) !important;
+  color: #fff !important;
+  border-radius: 15px;
+  padding: 8px 14px;
+  font-size: 14px;
+  font-weight: 600;
+  text-transform: none;
+  letter-spacing: 0;
+  min-height: 44px;
+  box-shadow: inset 0 1px 2px rgba(255, 255, 255, 0.24), 0 3px 10px rgba(38, 123, 255, 0.08);
+}
+
+.new-chat-button .q-btn__content {
+  justify-content: flex-start;
+  gap: 18px;
+}
+
+.new-chat-button .q-icon {
+  width: 28px;
+  height: 28px;
+  margin: 0;
+  border-radius: 50%;
+  background: #fff;
+  color: #0085ff;
+  font-size: 26px;
+  box-shadow: 0 1px 4px rgba(0, 94, 229, 0.12);
+}
+
+.sidebar-heading {
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+/* ===================================================================
+   Drop zone. The real uploader sits underneath, stripped of its own
+   chrome, so a drop anywhere on the box still reaches it.
+   =================================================================== */
+.dropzone {
+  position: relative;
+  border: 1.5px dashed var(--border-strong);
+  border-radius: var(--radius-md);
+  background: var(--surface-soft);
+  min-height: 132px;
+  transition: border-color 0.15s, background 0.15s;
+}
+
+.dropzone:hover {
+  border-color: var(--brand);
+  background: var(--brand-tint);
+}
+
+.dropzone .q-uploader {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  max-height: none;
+  height: 100%;
+  background: transparent;
+  box-shadow: none;
+  border-radius: var(--radius-md);
+}
+
+/* The uploader's own title bar and file rows are hidden: the panel below
+   reports progress instead, and the overlay provides the wording. */
+.dropzone .q-uploader__header,
+.dropzone .q-uploader__list {
+  display: none;
+}
+
+.dropzone-overlay {
+  position: relative;
+  pointer-events: none; /* clicks and drops fall through to the uploader */
+  text-align: center;
+  padding: 18px 12px;
+}
+
+.dropzone-title {
+  font-size: 0.86rem;
+  font-weight: 600;
+  color: var(--text-main);
+}
+
+.dropzone-hint {
+  font-size: 0.74rem;
+  color: var(--text-faint);
+}
+
+.browse-link {
+  pointer-events: auto; /* this one word is clickable */
+  color: var(--brand);
+  font-weight: 600;
+  font-size: 0.78rem;
+  cursor: pointer;
+}
+
+.browse-link:hover {
+  text-decoration: underline;
+}
+
+/* ===================================================================
+   Guideline file cards
+   =================================================================== */
+.file-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 9px 10px;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+
+.file-card:hover {
+  border-color: var(--border-strong);
+  box-shadow: var(--shadow-card);
+}
+
+.file-badge {
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+  background: #fee2e2;
+  color: #b91c1c;
+  font-size: 0.56rem;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+}
+
+body.body--dark .file-badge {
+  background: #3f1d1d;
+  color: #fca5a5;
+}
+
+.file-badge.is-markdown {
+  background: #dbeafe;
+  color: #1d4ed8;
+}
+
+body.body--dark .file-badge.is-markdown {
+  background: #1e2b4d;
+  color: #93c5fd;
+}
+
+.file-name {
+  font-size: 0.82rem;
+  font-weight: 600;
+  line-height: 1.25;
+}
+
+.file-meta {
+  font-size: 0.7rem;
+  color: var(--text-faint);
+}
+
+/* ===================================================================
+   The small promotional card at the foot of the sidebar
+   =================================================================== */
+.promo-card {
+  background: var(--promo-background);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 14px;
+}
+
+/* ===================================================================
+   Start screen
+   =================================================================== */
+.greeting-section {
+  width: 100%;
+  max-width: 1064px;
+  margin: 0 auto;
+  gap: 20px;
+  padding: 4px 0 16px;
+}
+
+.greeting-mascot {
+  width: 144px;
+  height: 144px;
+  flex: 0 0 144px;
+  object-fit: contain;
+}
+
+.greeting-content {
+  gap: 3px;
+}
+
+.greeting-sparkle {
+  color: #9d87ff;
+}
+
+.greeting-title {
+  font-size: 2rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1.1;
+}
+
+.greeting-subtitle {
+  font-size: 1.125rem;
+  font-weight: 600;
+  color: var(--text-main);
+}
+
+.greeting-hint {
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--text-faint);
+}
+
+.starter-actions {
+  margin-top: 5px;
+}
+
+.starter-chip {
+  background: var(--surface);
+  color: var(--text-soft);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 8px 14px;
+  font-size: 0.78rem;
+  font-weight: 500;
+  cursor: pointer;
+  box-shadow: var(--shadow-card);
+  transition: border-color 0.15s, transform 0.15s, box-shadow 0.15s;
+}
+
+.starter-symbol {
+  font-size: 15px;
+  line-height: 1;
+}
+
+@media (max-width: 700px) {
+  .greeting-section {
+    gap: 12px;
+    align-items: flex-start;
+  }
+
+  .greeting-mascot {
+    width: 88px;
+    height: 100px;
+    flex-basis: 88px;
+  }
+
+  .greeting-title {
+    font-size: 1.65rem;
+  }
+
+  .greeting-subtitle {
+    font-size: 1rem;
+  }
+}
+
+.starter-chip:hover {
+  border-color: var(--brand);
+  transform: translateY(-1px);
+  box-shadow: var(--shadow-float);
+}
+
+/* ===================================================================
+   Conversation
+   =================================================================== */
+.chat-column {
+  width: 100%;
+  max-width: 880px;
+  margin: 0 auto;
+}
+
+.user-message {
+  background: var(--user-bubble);
+  color: var(--user-bubble-text);
+  border-radius: 16px 16px 4px 16px;
+  padding: 10px 16px;
+  max-width: 80%;
+  font-size: 0.92rem;
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+
+.assistant-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-card);
+  padding: 18px 20px;
+  width: 100%;
+}
+
+.answer-kind {
+  font-size: 0.95rem;
+  font-weight: 700;
+}
+
+.answer-badge {
+  background: var(--brand-tint);
+  color: var(--brand);
+  border-radius: 999px;
+  padding: 3px 11px;
+  font-size: 0.72rem;
+  font-weight: 600;
+}
+
+/* The answer itself is Markdown, so its tags are styled here. */
+.answer-body {
+  font-size: 0.93rem;
+  line-height: 1.65;
+  color: var(--text-soft);
+}
+
+.answer-body p {
+  margin: 0 0 0.85em;
+}
+
+.answer-body p:last-child {
+  margin-bottom: 0;
+}
+
+.answer-body strong {
+  color: var(--text-main);
+  font-weight: 600;
+}
+
+.answer-body ul,
+.answer-body ol {
+  margin: 0 0 0.85em;
+  padding-left: 1.25em;
+}
+
+.answer-body li {
+  margin-bottom: 0.3em;
+}
+
+.answer-body h1,
+.answer-body h2,
+.answer-body h3 {
+  font-size: 1rem;
+  font-weight: 700;
+  margin: 1.1em 0 0.5em;
+}
+
+/* The small raised [1] that points at a source. */
+.answer-body sup {
+  color: var(--brand);
+  font-weight: 700;
+  font-size: 0.7em;
+  padding: 0 1px;
+}
+
+.sources-list {
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+}
+
+.source-row {
+  font-size: 0.8rem;
+  color: var(--text-soft);
+}
+
+.source-number {
+  color: var(--brand);
+  font-weight: 700;
+}
+
+/* ===================================================================
+   Input bar
+   =================================================================== */
+.input-bar {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 6px 8px 6px 18px;
+  box-shadow: var(--shadow-float);
+}
+
+.input-bar:focus-within {
+  border-color: var(--brand);
+}
+
+.send-button {
+  background: var(--brand-gradient) !important;
+  color: #fff !important;
+  box-shadow: 0 4px 12px rgba(37, 99, 235, 0.35);
+}
+
+.disclaimer {
+  font-size: 0.72rem;
+  color: var(--text-faint);
+}
+
+/* Quasar paints drawers and the page body itself; these keep our own
+   background visible through them. */
+.q-drawer,
+.q-page-container,
+.q-layout,
+.q-header,
+.q-footer {
+  background: transparent;
+}

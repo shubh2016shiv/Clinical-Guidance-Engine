@@ -1,8 +1,8 @@
 # Local infrastructure
 
-This directory runs local services for the Asclepius healthcare chatbot. The current application uses Milvus for searchable drug embeddings and has a Redis adapter for cache and session state. The Chainlit UI writes completed conversations to JSON files under `healthcare_assistant_ui/conversations/`.
+This directory runs local services for the Asclepius healthcare chatbot. The current application uses Milvus for searchable drug embeddings and has a Redis adapter for cache and session state. The web UI writes completed conversations to JSON files under `healthcare_assistant_web/conversations/`.
 
-**Readers:** Developers setting up, inspecting, or troubleshooting the local stack. This guide covers infrastructure containers and their data. For loading drug data, see the [ingestion guide](../drug_data_ingestion_pipeline/README.md). For the user interface, see the [UI guide](../healthcare_assistant_ui/README.md).
+**Readers:** Developers setting up, inspecting, or troubleshooting the local stack. This guide covers infrastructure containers and their data. For loading drug data, see the [ingestion guide](../drug_data_ingestion_pipeline/README.md). For the user interface, see the web UI code in [healthcare_assistant_web](../healthcare_assistant_web).
 
 ## Start here
 
