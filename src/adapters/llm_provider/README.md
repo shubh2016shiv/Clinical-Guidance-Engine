@@ -2,6 +2,13 @@
 
 Unified interface to language-model APIs. Currently supports OpenAI. Extensible to add Azure, Anthropic, or other providers.
 
+## Structured model replies
+
+`structured_model_response.py` provides `ask_model_for_structured_json()` for callers
+that request a typed JSON reply. Workflow triage currently uses it; clinical class
+extraction has been removed. It builds the strict schema request and preserves completion/content checks
+and Pydantic validation; it owns no routing, clinical policy or graph state.
+
 ## What This Module Does
 
 The LLM Provider adapter lets the healthcare assistant talk to LLM APIs through a common interface. Instead of each agent writing its own API code, they use `LLMProvider` methods and get consistent responses, configuration, error handling, and token budgeting.
