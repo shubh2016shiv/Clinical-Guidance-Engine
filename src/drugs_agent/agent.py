@@ -1,15 +1,17 @@
-"""Find drugs for a query, then have the model structure what was found."""
+"""Retrieve drug records and stream an answer."""
 
+import asyncio
 import json
+from collections.abc import AsyncIterator
 from typing import Any
 
 from src.config import get_settings
 from src.logs import get_component_logger
-from src.prompts.drug_system_prompt import DRUG_SYSTEM_PROMPT
+from src.prompts.drug_system_prompt import DRUG_STREAM_SYSTEM_PROMPT
 
 from .drug_classification import DrugClassifier
 from .milvus_drug_search import DrugSearcher
-from .schema import DrugAnswer, DrugMatch
+from .retrieved_drug_formatter import format_retrieved_drug_table
 
 # Low sampling values encourage the model to copy retrieved records.
 DRUG_ANSWER_TEMPERATURE = 0.01
@@ -27,7 +29,7 @@ def _remove_empty_fields_from_drug_record(drug_record: dict[str, Any]) -> dict[s
 
 
 class DrugAgent:
-    """Search the drug collection once, then return the rows as a ``DrugAnswer``."""
+    """Own drug retrieval, interpretation and user-facing answer generation."""
 
     def __init__(
         self,
@@ -35,7 +37,6 @@ class DrugAgent:
         chat_completions_provider: Any,
         *,
         chat_completion_model_name: str | None = None,
-        drug_answer_system_prompt: str = DRUG_SYSTEM_PROMPT,
         chat_completion_temperature: float = DRUG_ANSWER_TEMPERATURE,
         chat_completion_top_p: float = DRUG_ANSWER_TOP_P,
         drug_classifier: DrugClassifier | None = None,
@@ -45,7 +46,6 @@ class DrugAgent:
         self.chat_completion_model_name = (
             chat_completion_model_name or get_settings().openai_model_name
         )
-        self.drug_answer_system_prompt = drug_answer_system_prompt
         self.chat_completion_temperature = chat_completion_temperature
         self.chat_completion_top_p = chat_completion_top_p
         self.drug_classifier = drug_classifier or DrugClassifier(
@@ -53,89 +53,63 @@ class DrugAgent:
             chat_completion_model_name=self.chat_completion_model_name,
         )
 
-    async def answer_drug_search_query(
+    async def _retrieve_drug_records(
         self, drug_search_query: str, *, max_retrieved_drug_records: int | None = None
-    ) -> DrugAnswer:
-        """Return drug matches backed by records found for the search query."""
+    ) -> list[Any]:
+        """Classify the query and retrieve matching catalog candidates."""
         identified_drug_class = await self.drug_classifier.identify_drug_class(drug_search_query)
         logger.info("Drug classification completed", drug_class=identified_drug_class)
-        drug_search_results = await self.drug_searcher.search_drug_records(
+        return await self.drug_searcher.search_drug_records(
             drug_name=drug_search_query,
             drug_class=identified_drug_class,
             max_drug_results=max_retrieved_drug_records,
         )
-        return await self._structure_drug_search_results(drug_search_query, drug_search_results)
 
-    async def answer_drug_class_query(
-        self, drug_class: str, *, max_retrieved_drug_records: int | None = None
-    ) -> DrugAnswer:
-        """Return catalog drugs in ``drug_class``, searched by meaning without name matching."""
-        drug_search_results = await self.drug_searcher.search_drug_records(
-            drug_class=drug_class, max_drug_results=max_retrieved_drug_records
+    # ---------------------------------------------------------------------------
+    # STREAM AN ANSWER — Retrieve first; the table is context, not display output
+    # ---------------------------------------------------------------------------
+    async def stream_drug_answer_text(
+        self, *, question: str, drug_search_terms: list[str]
+    ) -> AsyncIterator[str]:
+        """Send retrieved rows to one answer call and forward its text as it arrives.
+
+        Search terms may resolve references from conversation history. The original
+        question tells the model what to explain about those records. This path does
+        not generate JSON for later rendering.
+        """
+        search_results_by_term = await asyncio.gather(
+            *(self._retrieve_drug_records(term) for term in drug_search_terms)
         )
-        return await self._structure_drug_search_results(drug_class, drug_search_results)
+        retrieved_records: list[dict[str, Any]] = []
+        for search_results in search_results_by_term:
+            for search_result in search_results:
+                record = _remove_empty_fields_from_drug_record(search_result.fields)
+                # Drop identical rows across queries, preserving distinct forms/strengths.
+                if record not in retrieved_records:
+                    retrieved_records.append(record)
 
-    async def _structure_drug_search_results(
-        self, drug_search_query: str, drug_search_results: list[Any]
-    ) -> DrugAnswer:
-        retrieved_drug_records = [
-            _remove_empty_fields_from_drug_record(search_result.fields)
-            for search_result in drug_search_results
-        ]
-        chat_completion_result = await self.chat_completions_provider.execute_chat_completion(
+        answer_stream = await self.chat_completions_provider.execute_chat_completion(
             [
-                {"role": "system", "content": self.drug_answer_system_prompt},
+                {"role": "system", "content": DRUG_STREAM_SYSTEM_PROMPT},
                 {
                     "role": "user",
-                    "content": json.dumps(
-                        {"query": drug_search_query, "rows": retrieved_drug_records}
+                    "content": (
+                        f"Question: {json.dumps(question, ensure_ascii=False)}\n"
+                        f"Resolved search queries: {json.dumps(drug_search_terms, ensure_ascii=False)}"
+                        "\n\nRetrieved drug records:\n"
+                        f"{format_retrieved_drug_table(retrieved_records)}"
                     ),
                 },
             ],
             model=self.chat_completion_model_name,
             temperature=self.chat_completion_temperature,
             top_p=self.chat_completion_top_p,
-            response_format={
-                "type": "json_schema",
-                "json_schema": {
-                    "name": "drug_answer",
-                    "schema": DrugAnswer.model_json_schema(),
-                    "strict": True,
-                },
-            },
+            stream=True,
         )
-        drug_answer = self._parse_chat_completion_as_drug_answer(chat_completion_result)
-        self._validate_drug_matches_against_retrieved_records(drug_answer, retrieved_drug_records)
-        return self._deduplicate_drug_matches(drug_answer)
-
-    @staticmethod
-    def _parse_chat_completion_as_drug_answer(chat_completion_result: Any) -> DrugAnswer:
-        if chat_completion_result.finish_reason != "stop":
-            raise RuntimeError(f"Drug response ended early: {chat_completion_result.finish_reason}")
-        if not chat_completion_result.content:
-            raise RuntimeError("Drug response had no text; the model may have refused")
-        return DrugAnswer.model_validate_json(chat_completion_result.content)
-
-    @staticmethod
-    def _deduplicate_drug_matches(drug_answer: DrugAnswer) -> DrugAnswer:
-        """Keep the first of any drug the model listed twice; each retrieved row is one drug."""
-        unique_matches_by_name: dict[str, DrugMatch] = {}
-        for drug_match in drug_answer.matches:
-            unique_matches_by_name.setdefault(drug_match.drug_name, drug_match)
-        return drug_answer.model_copy(update={"matches": list(unique_matches_by_name.values())})
-
-    @staticmethod
-    def _validate_drug_matches_against_retrieved_records(
-        drug_answer: DrugAnswer, retrieved_drug_records: list[dict[str, Any]]
-    ) -> None:
-        """Reject any match whose drug name was not among the retrieved rows."""
-        retrieved_drug_names = {record["drug_name"] for record in retrieved_drug_records}
-        unretrieved_drug_names = [
-            drug_match.drug_name
-            for drug_match in drug_answer.matches
-            if drug_match.drug_name not in retrieved_drug_names
-        ]
-        if unretrieved_drug_names:
-            raise RuntimeError(
-                f"Drug answer contains drugs that were not retrieved: {unretrieved_drug_names}"
-            )
+        received_answer_text = False
+        async for text_chunk in answer_stream:
+            if text_chunk:
+                received_answer_text = received_answer_text or bool(text_chunk.strip())
+                yield text_chunk
+        if not received_answer_text:
+            raise RuntimeError("Drug answer stream ended without any answer text")
