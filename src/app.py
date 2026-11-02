@@ -1,4 +1,4 @@
-"""Command-line demo for drug search or clinical guideline questions."""
+"""Command-line demo for clinical guideline questions, with or without drug data."""
 
 import argparse
 import asyncio
@@ -8,35 +8,19 @@ from collections.abc import AsyncIterator
 from src.adapters.llm_provider import APIType, OpenAIProvider
 from src.bootstrap import bootstrap_services
 from src.clinical_guideline_agent.schema import FileCitation
-from src.drugs_agent import DrugAgent, DrugSearcher, format_drug_answer_as_markdown_list
+from src.drugs_agent import DrugAgent, DrugSearcher
 from src.orchestrator import ClinicalDrugOrchestrator, OrchestratorUpdate
 
 
-async def answer_question(question: str, *, source: str) -> str:
-    """Check the needed services, answer one question, and close owned clients."""
-    startup = await bootstrap_services(
-        use_drug_database=source == "drugs",
-        use_clinical_guidelines=source == "guidelines",
-    )
-    drug_llm_provider = None
+async def answer_from_guidelines(question: str) -> str:
+    """Check the guideline service, answer one question from the guidelines, and close it."""
+    startup = await bootstrap_services(use_drug_database=False, use_clinical_guidelines=True)
     try:
-        if source == "guidelines":
-            if startup.guideline_agent is None:
-                raise RuntimeError(
-                    "Clinical guidelines are unavailable. Check the startup warnings."
-                )
-            answer = await startup.guideline_agent.answer_guideline_question(question)
-            return answer.text
-
-        if startup.drug_provider is None:
-            raise RuntimeError("Drug search is unavailable. Check Milvus and run ingestion.")
-        drug_llm_provider = OpenAIProvider(api_type=APIType.CHAT_COMPLETION)
-        drug_agent = DrugAgent(DrugSearcher(startup.drug_provider), drug_llm_provider)
-        answer = await drug_agent.answer_drug_search_query(question)
-        return format_drug_answer_as_markdown_list(answer)
+        if startup.guideline_agent is None:
+            raise RuntimeError("Clinical guidelines are unavailable. Check the startup warnings.")
+        answer = await startup.guideline_agent.answer_guideline_question(question)
+        return answer.text
     finally:
-        if drug_llm_provider is not None:
-            await drug_llm_provider.close()
         await startup.close()
 
 
@@ -65,6 +49,9 @@ async def _print_streamed_answer(question: str) -> None:
     async for orchestrator_update in stream_orchestrated_answer(question):
         if orchestrator_update.type == "text":
             print(orchestrator_update.text, end="", flush=True)
+        elif orchestrator_update.type == "status":
+            # To stderr, so piping this command still gives just the answer.
+            print(orchestrator_update.text, file=sys.stderr, flush=True)
         elif orchestrator_update.answer is not None:
             print(_references_block(orchestrator_update.answer.sources))
 
@@ -83,14 +70,14 @@ def _references_block(sources: list[FileCitation]) -> str:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("question", help="Question to answer")
-    parser.add_argument("--source", choices=("auto", "drugs", "guidelines"), default="auto")
+    parser.add_argument("--source", choices=("auto", "guidelines"), default="auto")
     args = parser.parse_args()
     # Answers contain symbols such as "≥" that the Windows code page cannot print.
     sys.stdout.reconfigure(encoding="utf-8")
     if args.source == "auto":
         asyncio.run(_print_streamed_answer(args.question))
     else:
-        print(asyncio.run(answer_question(args.question, source=args.source)))
+        print(asyncio.run(answer_from_guidelines(args.question)))
 
 
 if __name__ == "__main__":
