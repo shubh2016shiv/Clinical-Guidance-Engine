@@ -35,7 +35,6 @@ class ConversationLog:
                 "answer": answer.text,
                 "route": answer.route,
                 "sources": [source.filename for source in answer.sources],
-                "drug_classes": answer.drug_classes,
             }
         )
         conversation_file.write_text(json.dumps(conversation, indent=2), encoding="utf-8")

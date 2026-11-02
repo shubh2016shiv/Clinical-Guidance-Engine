@@ -37,6 +37,13 @@ class AssistantMessage:
             self.answer_text = ui.markdown().classes("answer-body w-full")
             self.sources_area = ui.column().classes("w-full gap-1")
 
+    def show_status(self, message: str) -> None:
+        """Say what is being worked on, in place of the "Thinking..." label.
+
+        `finish` overwrites this with the kind of answer, so it needs no clearing.
+        """
+        self.kind_label.set_text(message)
+
     def show_text(self, text: str) -> None:
         """Show the answer written so far."""
         self.waiting_dots.set_visibility(False)

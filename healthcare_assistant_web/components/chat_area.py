@@ -80,6 +80,8 @@ class ChatArea:
                 if update.type == "text":
                     text_so_far += update.text
                     assistant_message.show_text(text_so_far)
+                elif update.type == "status":
+                    assistant_message.show_status(update.text)
                 elif update.answer is not None:
                     # The final text carries the citation markers, which are only
                     # known once the whole answer is written.
