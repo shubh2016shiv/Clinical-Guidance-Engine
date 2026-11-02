@@ -55,17 +55,14 @@ finally:
 
 ### Turning off a feature you don't need
 
-Skip a service's checks entirely if a given run doesn't use it — this avoids requiring Milvus or guideline files to be configured just to answer a drug-only or guideline-only question:
+Skip a service's checks entirely if a given run doesn't use it — this avoids requiring Milvus or guideline files to be configured just to answer a guideline-only question:
 
 ```python
-# Drug-only question: don't bother checking clinical guidelines.
-startup = await bootstrap_services(use_drug_database=True, use_clinical_guidelines=False)
-
 # Guideline-only question: don't bother checking Milvus.
 startup = await bootstrap_services(use_drug_database=False, use_clinical_guidelines=True)
 ```
 
-This is how [src/app.py:18-21](../app.py#L18-L21) picks which checks to run based on `--source`.
+This is how `answer_from_guidelines` in [src/app.py](../app.py) skips the Milvus check for `--source guidelines`.
 
 ### Checking what's available
 
