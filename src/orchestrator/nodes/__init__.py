@@ -1,19 +1,17 @@
-"""One file per step (node) of the orchestrator graph."""
+"""Graph nodes in clinical-path order; conditional branches can skip numbers.
 
-from .decide_route_node import make_decide_route_node
-from .drug_only_answer_node import make_drug_only_answer_node
-from .extract_drug_classes_node import make_extract_drug_classes_node
-from .fetch_guideline_answer_node import make_fetch_guideline_answer_node
-from .search_drugs_node import make_search_drugs_node
-from .stream_combined_answer_node import make_stream_combined_answer_node
-from .stream_guideline_answer_node import make_stream_guideline_answer_node
+Numbers 01–04 match filenames and node banners. Preparation and completion
+belong to the public orchestrator. No graph nodes currently run in parallel.
+"""
+
+from .node_01_triage import triage
+from .node_02_guideline_answer import stream_guideline_answer
+from .node_03_drug_catalog_answer import search_catalog
+from .node_04_final_answer import finalize_answer
 
 __all__ = [
-    "make_decide_route_node",
-    "make_drug_only_answer_node",
-    "make_extract_drug_classes_node",
-    "make_fetch_guideline_answer_node",
-    "make_search_drugs_node",
-    "make_stream_guideline_answer_node",
-    "make_stream_combined_answer_node",
+    "triage",
+    "stream_guideline_answer",
+    "search_catalog",
+    "finalize_answer",
 ]

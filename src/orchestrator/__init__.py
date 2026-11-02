@@ -1,5 +1,11 @@
-"""Join clinical guideline answers with drug catalog lookups in one LangGraph flow."""
+"""Coordinate clinical guidelines and catalog answers; see README.md for the flow.
 
+Callers import ClinicalDrugOrchestrator, OrchestratorAnswer and OrchestratorUpdate here.
+"""
+
+# ---------------------------------------------------------------------------
+# START HERE — Stable public imports; read README.md, then orchestrator.py
+# ---------------------------------------------------------------------------
 from .orchestrator import ClinicalDrugOrchestrator
 from .schema import OrchestratorAnswer, OrchestratorUpdate
 

@@ -7,32 +7,47 @@ caller, and bundles the final answer together with its sources.
 
 from collections.abc import AsyncIterator
 from typing import Any
-from uuid import uuid4
 
-from langchain_core.messages import AIMessage, HumanMessage
-from langgraph.checkpoint.memory import InMemorySaver
-from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
+from langchain_core.messages import HumanMessage
 
-from src.clinical_guideline_agent.citations.inline_citations import (
-    insert_file_citation_markers,
-    remove_unknown_file_citation_markers,
-)
 from src.config import get_settings
+from src.memory import create_conversation_run_config, create_in_memory_checkpointer
 
 from .graph import build_orchestrator_graph
-from .schema import OrchestratorAnswer, OrchestratorState, OrchestratorUpdate
-
-# The checkpointer saves the graph's data to storage and reads it back. For our own
-# classes it only does so when they are listed here, as (module, class name) pairs.
-# Without this list LangGraph logs a warning and will refuse to load them in future.
-CHECKPOINT_SAVED_CLASSES = [
-    ("src.clinical_guideline_agent.schema", "GuidelineAnswer"),
-    ("src.clinical_guideline_agent.schema", "FileCitation"),
-    ("src.drugs_agent.schema", "DrugAnswer"),
-    ("src.drugs_agent.schema", "DrugMatch"),
-]
+from .schema import (
+    OrchestratorAnswer,
+    OrchestratorContext,
+    OrchestratorState,
+    OrchestratorUpdate,
+)
 
 
+# ---------------------------------------------------------------------------
+# PREPARE QUESTION — Reset working results and supply the new user message
+# ---------------------------------------------------------------------------
+# Other state fields use replacement. add_messages merges by message ID: new IDs
+# append, matching IDs update. Supplying one new message keeps earlier history.
+# Official reference: https://docs.langchain.com/oss/python/langgraph/graph-api#working-with-messages-in-graph-state
+def create_question_state(clinical_question: str) -> OrchestratorState:
+    """Return fresh per-question fields and the user message to append to history.
+
+    History is appended by the graph reducer, not replaced. Triage sets the route;
+    all other per-question results are cleared so saved results cannot leak into it.
+    """
+    return {
+        "conversation_messages": [HumanMessage(content=clinical_question)],
+        "clinical_question": clinical_question,
+        "drug_search_terms": [],
+        "guideline_answer": None,
+        "catalog_section_text": "",
+        "final_text": "",
+        "sources": [],
+    }
+
+
+# ---------------------------------------------------------------------------
+# PUBLIC ENTRY — Own the lifecycle; graph.py chooses the route
+# ---------------------------------------------------------------------------
 class ClinicalDrugOrchestrator:
     """Sends a question through the guideline agent and, if needed, the drug agent."""
 
@@ -45,24 +60,29 @@ class ClinicalDrugOrchestrator:
         chat_completion_model_name: str | None = None,
         checkpointer: Any | None = None,
     ) -> None:
-        # Use the model name we were given, otherwise fall back to the one in settings.
         model_name = chat_completion_model_name or get_settings().openai_model_name
 
-        # The checkpointer is where conversations are remembered between questions.
-        # The in-memory default forgets everything when the program stops; pass a
-        # database-backed checkpointer to keep conversations across restarts.
-        # Build the flowchart once, when the object is created.
-        self.graph = build_orchestrator_graph(
-            guideline_agent,
-            drug_agent,
-            chat_completions_provider,
-            model_name,
-            checkpointer
-            if checkpointer is not None
-            else InMemorySaver(
-                serde=JsonPlusSerializer(allowed_msgpack_modules=CHECKPOINT_SAVED_CLASSES)
-            ),
+        # ---------------------------------------------------------------------------
+        # SETUP 1 — Pass dependencies without saving clients in graph state
+        # ---------------------------------------------------------------------------
+        # Nodes read this through runtime.context during each run.
+        # Official reference: https://docs.langchain.com/oss/python/langgraph/graph-api#runtime-context
+        self.graph_context = OrchestratorContext(
+            chat_completions_provider=chat_completions_provider,
+            model_name=model_name,
+            guideline_agent=guideline_agent,
+            drug_agent=drug_agent,
         )
+
+        # Keep a supplied checkpointer; otherwise remember conversations in memory.
+        # ---------------------------------------------------------------------------
+        # SETUP 2 — Retain a supplied saver or use process-local memory
+        # ---------------------------------------------------------------------------
+        # InMemorySaver forgets checkpoints when the process stops.
+        # Official reference: https://docs.langchain.com/oss/python/langgraph/persistence
+        if checkpointer is None:
+            checkpointer = create_in_memory_checkpointer()
+        self.graph = build_orchestrator_graph(checkpointer)
 
     async def stream_clinical_drug_answer_updates(
         self, clinical_question: str, conversation_thread_id: str | None = None
@@ -70,93 +90,51 @@ class ClinicalDrugOrchestrator:
         """Yield text pieces as they are written, then one final update with everything.
 
         Questions that share a `conversation_thread_id` share a history, so a later
-        question can refer back to earlier ones. Without an id the question is
-        answered on its own, as a brand-new one-question conversation.
+        question can refer back to earlier ones. Without an id, graph history starts
+        fresh. A reused guideline agent still retains its own response chain
+        independently of graph history.
         """
-        # Step 1: reject empty questions.
+        # ---------------------------------------------------------------------------
+        # VALIDATE QUESTION — Validate input and select the conversation
+        # ---------------------------------------------------------------------------
+        # configurable.thread_id selects graph history. It does not select the guideline
+        # agent response chain, which belongs to that agent instance.
+        # Official reference: https://docs.langchain.com/oss/python/langgraph/checkpointers#threads
         if not clinical_question.strip():
             raise ValueError("A question is required")
 
-        # Step 2: tell LangGraph which conversation this question belongs to. The
-        # thread id is the key under which the checkpointer saves and loads history.
-        graph_run_configuration = {
-            "configurable": {"thread_id": conversation_thread_id or str(uuid4())}
-        }
+        conversation_run_config = create_conversation_run_config(conversation_thread_id)
+        question_state = create_question_state(clinical_question)
 
-        # Step 3: run the flowchart and forward everything it streams out.
-        streamed_text_pieces: list[str] = []  # we keep these to rebuild the full answer later
-        final_state: OrchestratorState = {}  # the graph's data once it has finished
-
-        async for mode, payload in self.graph.astream(
-            {
-                # The `add_messages` reducer APPENDS this to the history that the
-                # checkpointer loaded for this thread, so the history now ends with
-                # the current question.
-                "conversation_messages": [HumanMessage(content=clinical_question)],
-                "clinical_question": clinical_question,
-                # Clear the leftovers of the previous question on this thread (the
-                # checkpointer saved them), so they cannot leak into this answer.
-                "guideline_answer": None,
-                "cited_guideline_text": "",
-                "guideline_sources": [],
-                "drug_classes": [],
-                "drug_answer": None,
-            },
-            graph_run_configuration,
-            stream_mode=["custom", "values"],
+        # ---------------------------------------------------------------------------
+        # RUN NODES 01–04 — Forward custom text and progress events while the graph runs
+        # ---------------------------------------------------------------------------
+        # This code uses one stream mode and the default v1 format: our raw kind/text dict.
+        # Current docs also show v2 envelopes. Do not change formats just to match an example.
+        # Official reference: https://docs.langchain.com/oss/python/langgraph/streaming
+        async for stream_event in self.graph.astream(
+            question_state,
+            conversation_run_config,
+            context=self.graph_context,
+            stream_mode="custom",
         ):
-            if mode == "custom":
-                # "custom" = a piece of answer text. Pass it straight to the caller.
-                streamed_text_pieces.append(payload)
-                yield OrchestratorUpdate(type="text", text=payload)
-            else:
-                # "values" = the graph's current data. The last one we see is the final one.
-                final_state = payload
+            yield OrchestratorUpdate(type=stream_event["kind"], text=stream_event["text"])
 
-        # Step 4: read the final results out of the graph's data. There is no
-        # guideline answer on the drug-only route, which never asks the guidelines.
-        route = final_state["route"]
-        guideline_answer = final_state.get("guideline_answer")
+        # ---------------------------------------------------------------------------
+        # DELIVER ANSWER — Read the completed snapshot and send one final update
+        # ---------------------------------------------------------------------------
+        # Use the same conversation configuration. Snapshot values contain the completed
+        # text and sources saved by node 04, not merely the raw streamed chunks.
+        # Official reference: https://docs.langchain.com/oss/python/langgraph/checkpointers#get-state
+        final_state_snapshot = await self.graph.aget_state(conversation_run_config)
+        final_state: OrchestratorState = final_state_snapshot.values
 
-        # Step 5: work out the final text and the list of sources (citations).
-        if route == "drug":
-            # Nothing was cited, so the streamed drug list is already the answer.
-            final_text = "".join(streamed_text_pieces)
-            sources = []
-        elif route == "clinical_and_drug":
-            # The model wrote this answer while looking at numbered citation markers.
-            # Models sometimes invent a marker number, so remove any that don't match
-            # a real source.
-            sources = final_state["guideline_sources"]
-            final_text = remove_unknown_file_citation_markers(
-                "".join(streamed_text_pieces), len(sources)
-            )
-        else:
-            # On the guideline-only path, the streamed text has no citation markers,
-            # because the search tool only tells us where it cited things AFTER the
-            # whole answer is finished. So we add the markers now.
-            cited = insert_file_citation_markers(guideline_answer.text, guideline_answer.citations)
-            sources = cited.sources
-            final_text = cited.text
-
-        # Step 6: remember the answer. Nodes only stream text out, so the finished
-        # answer (with its citation markers fixed) is only known here. We save it into
-        # the same thread; the `add_messages` reducer appends it right after the
-        # question, which keeps the history in question, answer, question, answer order.
-        await self.graph.aupdate_state(
-            graph_run_configuration,
-            {"conversation_messages": [AIMessage(content=final_text)]},
-        )
-
-        # Step 7: send the final "completed" update with everything bundled together.
         yield OrchestratorUpdate(
             type="completed",
             answer=OrchestratorAnswer(
-                route=route,
-                text=final_text,
-                sources=sources,
-                guideline_answer=guideline_answer,
-                drug_classes=final_state.get("drug_classes", []),
-                drug_answer=final_state.get("drug_answer"),
+                route=final_state["route"],
+                text=final_state["final_text"],
+                sources=final_state["sources"],
+                guideline_answer=final_state["guideline_answer"],
             ),
         )
