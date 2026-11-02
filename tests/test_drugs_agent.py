@@ -13,8 +13,8 @@ from src.drugs_agent import (
     verify_drug_collection_ready_for_search,
 )
 from src.drugs_agent.milvus_drug_search import build_drug_embedding_query_text
+from src.drugs_agent.retrieved_drug_formatter import MAX_DRUG_ROWS
 from src.prompts.drug_classification_system_prompt import DRUG_CLASSIFICATION_SYSTEM_PROMPT
-from src.prompts.drug_system_prompt import DRUG_SYSTEM_PROMPT
 
 OUTPUT_FIELDS = ["drug_name", "drug_class"]
 
@@ -156,174 +156,6 @@ class DrugSearcherTests(unittest.IsolatedAsyncioTestCase):
             await drug_searcher.search_drug_records()
 
 
-ROW = {"drug_name": "Lisinopril", "drug_class": "ACE INHIBITORS, PLAIN", "formulation": "tablet"}
-
-
-def match(name="Lisinopril"):
-    return {
-        "drug_name": name,
-        "drug_class": "ACE INHIBITORS, PLAIN",
-        "drug_sub_class": None,
-        "therapeutic_category": None,
-        "route_of_administration": "oral",
-        "formulation": "tablet",
-        "dosage_strengths": ["10 mg"],
-    }
-
-
-def agent_with(model_output, *, finish_reason="stop", rows=(ROW,)):
-    searcher = MagicMock()
-    searcher.search_drug_records = AsyncMock(
-        return_value=[SimpleNamespace(fields=row) for row in rows]
-    )
-    response = SimpleNamespace(finish_reason=finish_reason, content=model_output)
-    llm = MagicMock()
-    llm.execute_chat_completion = AsyncMock(return_value=response)
-    classifier = MagicMock()
-    classifier.identify_drug_class = AsyncMock(return_value=None)
-    return (
-        DrugAgent(
-            searcher,
-            llm,
-            chat_completion_model_name="test-model",
-            drug_classifier=classifier,
-        ),
-        searcher,
-        llm,
-    )
-
-
-class DrugAgentTests(unittest.IsolatedAsyncioTestCase):
-    async def test_searches_once_then_asks_the_model_to_structure_the_rows(self) -> None:
-        output = json.dumps({"found": True, "matches": [match()]})
-        agent, searcher, llm = agent_with(output)
-
-        answer = await agent.answer_drug_search_query("lisinopril", max_retrieved_drug_records=5)
-
-        searcher.search_drug_records.assert_awaited_once_with(
-            drug_name="lisinopril", drug_class=None, max_drug_results=5
-        )
-        agent.drug_classifier.identify_drug_class.assert_awaited_once_with("lisinopril")
-        llm.execute_chat_completion.assert_awaited_once()
-        (messages,), kwargs = llm.execute_chat_completion.call_args
-        self.assertEqual([m["role"] for m in messages], ["system", "user"])
-        self.assertEqual(messages[0]["content"], DRUG_SYSTEM_PROMPT)
-        self.assertEqual(json.loads(messages[1]["content"]), {"query": "lisinopril", "rows": [ROW]})
-        self.assertEqual(kwargs["model"], "test-model")
-        self.assertTrue(kwargs["response_format"]["json_schema"]["strict"])
-        self.assertEqual(kwargs["temperature"], 0.01)
-        self.assertEqual(kwargs["top_p"], 0.99)
-        self.assertTrue(answer.found)
-        self.assertEqual(answer.matches[0].drug_name, "Lisinopril")
-
-    async def test_the_answer_has_no_free_text_field_the_model_could_make_claims_in(self) -> None:
-        agent, _, llm = agent_with(json.dumps({"found": False, "matches": []}))
-
-        await agent.answer_drug_search_query("zzz")
-
-        response_format = llm.execute_chat_completion.call_args.kwargs["response_format"]
-        schema = response_format["json_schema"]["schema"]
-        self.assertEqual(set(schema["properties"]), {"found", "matches"})
-
-    async def test_empty_columns_are_left_out_of_what_the_model_is_shown(self) -> None:
-        sparse = {"drug_name": "Metformin", "formulation": "", "dosage_strengths": "[]"}
-        agent, _, llm = agent_with(json.dumps({"found": False, "matches": []}), rows=(sparse,))
-
-        await agent.answer_drug_search_query("metformin")
-
-        sent = json.loads(llm.execute_chat_completion.call_args.args[0][1]["content"])
-        self.assertEqual(sent["rows"], [{"drug_name": "Metformin"}])
-
-    async def test_a_drug_the_model_lists_twice_is_returned_once_in_its_first_position(
-        self,
-    ) -> None:
-        output = json.dumps(
-            {
-                "found": True,
-                "matches": [match("Lisinopril"), match("Enalapril"), match("Lisinopril")],
-            }
-        )
-        rows = (ROW, {"drug_name": "Enalapril"})
-        agent, _, _ = agent_with(output, rows=rows)
-
-        answer = await agent.answer_drug_search_query("ace inhibitors")
-
-        self.assertEqual([m.drug_name for m in answer.matches], ["Lisinopril", "Enalapril"])
-
-    async def test_a_class_query_searches_by_class_only_and_skips_the_classifier(self) -> None:
-        agent, searcher, llm = agent_with(json.dumps({"found": True, "matches": [match()]}))
-        agent.drug_classifier = MagicMock()
-        agent.drug_classifier.identify_drug_class = AsyncMock()
-
-        answer = await agent.answer_drug_class_query("ACE inhibitors")
-
-        searcher.search_drug_records.assert_awaited_once_with(
-            drug_class="ACE inhibitors", max_drug_results=None
-        )
-        agent.drug_classifier.identify_drug_class.assert_not_awaited()
-        sent = json.loads(llm.execute_chat_completion.call_args.args[0][1]["content"])
-        self.assertEqual(sent["query"], "ACE inhibitors")
-        self.assertEqual(answer.matches[0].drug_name, "Lisinopril")
-
-    async def test_a_drug_that_was_not_retrieved_is_rejected(self) -> None:
-        output = json.dumps({"found": True, "matches": [match("Warfarin")]})
-        agent, _, _ = agent_with(output)
-
-        with self.assertRaisesRegex(RuntimeError, "not retrieved.*Warfarin"):
-            await agent.answer_drug_search_query("lisinopril")
-
-    async def test_a_response_cut_off_before_it_finished_is_an_error(self) -> None:
-        agent, _, _ = agent_with("{", finish_reason="length")
-
-        with self.assertRaisesRegex(RuntimeError, "ended early: length"):
-            await agent.answer_drug_search_query("lisinopril")
-
-    async def test_a_response_without_text_is_an_error(self) -> None:
-        agent, _, _ = agent_with("")
-
-        with self.assertRaisesRegex(RuntimeError, "no text"):
-            await agent.answer_drug_search_query("lisinopril")
-
-    async def test_identified_class_is_passed_to_drug_search(self) -> None:
-        agent, searcher, _ = agent_with(json.dumps({"found": True, "matches": [match()]}))
-        agent.drug_classifier.identify_drug_class.return_value = "ACE inhibitors"
-
-        with patch("src.drugs_agent.agent.logger") as drug_agent_logger:
-            await agent.answer_drug_search_query("lisinopril")
-
-        searcher.search_drug_records.assert_awaited_once_with(
-            drug_name="lisinopril", drug_class="ACE inhibitors", max_drug_results=None
-        )
-        drug_agent_logger.info.assert_called_once_with(
-            "Drug classification completed", drug_class="ACE inhibitors"
-        )
-
-    async def test_default_classifier_runs_before_search_and_final_answer(self) -> None:
-        drug_searcher = MagicMock()
-        drug_searcher.search_drug_records = AsyncMock(return_value=[SimpleNamespace(fields=ROW)])
-        chat_provider = MagicMock()
-        chat_provider.execute_chat_completion = AsyncMock(
-            side_effect=[
-                SimpleNamespace(finish_reason="stop", content='{"drug_class": "ACE inhibitors"}'),
-                SimpleNamespace(
-                    finish_reason="stop",
-                    content=json.dumps({"found": True, "matches": [match()]}),
-                ),
-            ]
-        )
-        agent = DrugAgent(drug_searcher, chat_provider, chat_completion_model_name="test-model")
-
-        drug_answer = await agent.answer_drug_search_query("lisinopril")
-
-        self.assertEqual(drug_answer.matches[0].drug_name, "Lisinopril")
-        drug_searcher.search_drug_records.assert_awaited_once_with(
-            drug_name="lisinopril", drug_class="ACE inhibitors", max_drug_results=None
-        )
-        self.assertEqual(chat_provider.execute_chat_completion.await_count, 2)
-        first_messages = chat_provider.execute_chat_completion.await_args_list[0].args[0]
-        self.assertEqual(first_messages[1]["content"], "lisinopril")
-
-
 class DrugClassifierTests(unittest.IsolatedAsyncioTestCase):
     async def test_uses_chat_completions_with_a_strict_classification_schema(self) -> None:
         chat_provider = MagicMock()
@@ -370,6 +202,41 @@ class DrugClassifierTests(unittest.IsolatedAsyncioTestCase):
             await DrugClassifier(
                 chat_provider, chat_completion_model_name="test-model"
             ).identify_drug_class("lisinopril")
+
+
+class DrugAgentRowCapTests(unittest.IsolatedAsyncioTestCase):
+    async def _model_input_for(self, row_count: int) -> str:
+        async def one_chunk():
+            yield "ok"
+
+        records = [SimpleNamespace(fields={"drug_name": f"drug {n}"}) for n in range(row_count)]
+        chat_provider = MagicMock()
+        chat_provider.execute_chat_completion = AsyncMock(return_value=one_chunk())
+        drug_searcher = MagicMock()
+        drug_searcher.search_drug_records = AsyncMock(return_value=records)
+        agent = DrugAgent(
+            drug_searcher,
+            chat_provider,
+            chat_completion_model_name="test-model",
+            drug_classifier=MagicMock(identify_drug_class=AsyncMock(return_value=None)),
+        )
+
+        async for _ in agent.stream_drug_answer_text(question="q", drug_search_terms=["x"]):
+            pass
+        return chat_provider.execute_chat_completion.call_args.args[0][1]["content"]
+
+    async def test_a_long_result_is_cut_to_the_cap_with_a_note(self) -> None:
+        model_input = await self._model_input_for(MAX_DRUG_ROWS + 5)
+
+        self.assertIn(f"drug {MAX_DRUG_ROWS - 1}", model_input)
+        self.assertNotIn(f"drug {MAX_DRUG_ROWS} ", model_input + " ")
+        self.assertIn(f"closest {MAX_DRUG_ROWS} of {MAX_DRUG_ROWS + 5}", model_input)
+
+    async def test_a_short_result_is_sent_whole_without_a_note(self) -> None:
+        model_input = await self._model_input_for(3)
+
+        self.assertIn("drug 2", model_input)
+        self.assertNotIn("NOTE", model_input)
 
 
 if __name__ == "__main__":

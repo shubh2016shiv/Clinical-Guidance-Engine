@@ -34,8 +34,6 @@ def make_answer(text: str = "Answer", route: str = "clinical") -> OrchestratorAn
         text=text,
         sources=[FileCitation(file_id="file_1", filename="ADHD NICE 2019.pdf")],
         guideline_answer=None,
-        drug_classes=["ACE inhibitors"],
-        drug_answer=None,
     )
 
 
@@ -125,7 +123,7 @@ class ConversationLogTests(unittest.TestCase):
             saved = json.loads((Path(directory) / "session_1.json").read_text(encoding="utf-8"))
             self.assertEqual([turn["question"] for turn in saved["turns"]], ["First?", "Second?"])
             self.assertEqual(saved["turns"][0]["sources"], ["ADHD NICE 2019.pdf"])
-            self.assertEqual(saved["turns"][0]["drug_classes"], ["ACE inhibitors"])
+            self.assertNotIn("drug_classes", saved["turns"][0])
 
 
 class AnswerStreamerTests(unittest.IsolatedAsyncioTestCase):
